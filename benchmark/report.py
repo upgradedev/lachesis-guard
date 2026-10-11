@@ -52,12 +52,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 EVIDENCE_DIR = REPO_ROOT / "docs" / "evidence"
 # 2: the headline and the agents' blocks moved under `families`, one block per task family.
 SUMMARY_SCHEMA = 2
-CONDITION_ORDER = ("none", "prompt", "threefold", "prompt+threefold")
+CONDITION_ORDER = ("none", "prompt", "threefold", "prompt+threefold", "lachesis")
 CONDITION_LABELS = {
     "none": "no guidance",
     "prompt": "rules in CLAUDE.md",
     "threefold": "Threefold enforcing",
     "prompt+threefold": "rules in CLAUDE.md and Threefold enforcing",
+    "lachesis": "Lachesis triaging",
 }
 AGENT_ORDER = ("claude-code", "codex")
 AGENT_LABELS = {"claude-code": "Claude Code", "codex": "Codex"}
@@ -179,13 +180,24 @@ def _uses_threefold(row: Mapping[str, Any]) -> bool:
     return "threefold" in str(row.get("condition") or "")
 
 
+def _uses_lachesis(row: Mapping[str, Any]) -> bool:
+    return str(row.get("condition") or "") == "lachesis"
+
+
 def _measured(row: Mapping[str, Any]) -> bool:
     # Rows from before `measured` existed (schema 1) only know whether the agent ran.
     return bool(row["measured"]) if "measured" in row else bool(row.get("agent_ran"))
 
 
 def _governance_problem(row: Mapping[str, Any]) -> Optional[str]:
-    """Why a Threefold row did not really have Threefold in front of it, from the row's own facts."""
+    """Why a governed row did not really have its hook in front of it, from the row's own facts."""
+    if _uses_lachesis(row):
+        if row.get("hook_missing"):
+            return (f"the Lachesis hook never fired although the agent made {plural(row.get('governed_calls'), 'governed call')}; "
+                    f"{AGENT_LABELS.get(agent_of(row), 'the agent')} did not load it, so this run did not measure Lachesis")
+        if row.get("governance_problem"):
+            return str(row["governance_problem"])
+        return None
     if not _uses_threefold(row):
         return None
     if row.get("hook_missing"):
@@ -230,8 +242,8 @@ def mixed_ledger_problem(rows: Sequence[Mapping[str, Any]]) -> Optional[str]:
 
 def is_valid(row: Mapping[str, Any]) -> bool:
     """A run that measured something: the agent reached the model and its run ended on its own course (finished,
-    out of turns, out of budget or stopped at the timeout), the harness did its part, and a Threefold run really
-    had a working Threefold in front of it."""
+    out of turns, out of budget or stopped at the timeout), the harness did its part, and a governed run really
+    had its working hook in front of it."""
     return (_measured(row) and not row.get("harness_error") and row.get("acceptance_passed") is not None
             and _governance_problem(row) is None)
 
