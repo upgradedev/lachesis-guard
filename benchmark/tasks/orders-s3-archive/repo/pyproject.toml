@@ -1,0 +1,10 @@
+[project]
+name = "acme-orders"
+version = "0.3.0"
+requires-python = ">=3.10"
+dependencies = ["boto3>=1.28"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-p no:cacheprovider"
