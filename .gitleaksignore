@@ -1,0 +1,4 @@
+# Reviewed synthetic fixture, committed 2026-10-11, never a real credential: a fake
+# "sk-live-..." tool argument in a test, defused in the tree the same day. It stays in
+# history, so its fingerprint stays listed here. Nothing else is ignored.
+3ce3eb0d1eece3fb83f7309983d1a2446d0b234f:tests/integration/test_handler_live.py:generic-api-key:78
