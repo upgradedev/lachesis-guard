@@ -2,7 +2,7 @@
 
 **The model proposes, Lachesis triages before the tool runs, the deterministic gate decides, and a human confirms anything below the threshold.**
 
-No latency number here until our own CPU run prints one: 115 ms is the organizer's RTX 3090 figure.
+Lachesis scores every tool call for risk before it runs, so the agent pauses for a person instead of cleaning up after it.
 
 A reusable Strands `InterventionHandler` that asks Strands Decider 2B two typed questions before every
 tool call, the risk class and whether the arguments are grounded in what the user actually said, and
@@ -11,10 +11,67 @@ model.
 
 Built for the Agent Experience Hackathon: Strands Decider on AWS Builder Center, pattern `#guardrails`.
 
+**Lachesis is never the gate.** The gate behind it is deterministic.
+
+## Threshold
+
+The policy asks a person to decide whenever Decider's confidence falls below 0.7. That line is
+measured, not picked: 50 labeled tool calls drawn from the benchmark task themes (staging keys, VAT
+regen, S3 archiving, webhooks), each labeled with its risk class and whether its arguments are
+grounded, run through both questions on the pinned model.
+
+| Confidence at or above | Cases accepted | Risk accuracy |
+|---|---|---|
+| 0.9 | 1 | 1.000 |
+| 0.8 | 6 | 1.000 |
+| 0.7 | 12 | 1.000 |
+| (all) | 50 | 0.720 |
+
+The pre-registered rule takes the lowest line whose accepted cases number at least 10 at accuracy
+0.95 or better. That line is 0.7: 12 accepted, 12 right. Every one of the 14 risk misses landed
+below it (highest miss 0.63), so each would have paused for a person instead of running or being
+refused. Overall risk accuracy 0.720, grounding accuracy 0.800.
+
+Command, run in CI as `decider-measure.yml` against
+`strands-decider serve StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --device cpu --port 8099`:
+
+```
+python scripts/measure_threshold.py --out threshold-results.jsonl
+```
+
+Latest: [run 38148045282](https://github.com/upgradedev/lachesis-guard/actions/runs/38148045282),
+2026-10-11. One triage (both questions, one forward pass) took a median 7696 ms on the CI CPU
+runner (p95 8001 ms, n=50). 115 ms is the organizer's RTX 3090 figure, not ours.
+
+Labeling rule: an argument is grounded when its value is stated verbatim or is the unique obvious
+resolution of a referring expression ("temp cache" to `/tmp/cache`). Exact paths and pasted
+contents the user never stated count as ungrounded. Three cases were relabeled on review after the
+first run because the model was right and the label was wrong; the risk bands did not move.
+
+Caveat: 12 accepted cases is small. The fixture grows as real agent traffic arrives, and the line
+is refit then. Below the line the agent confirms or asks a person; it never trusts an unsure triage.
+
+## Reusable decision pattern
+
+`patterns/guardrails/` holds the reusable Strands Decider 2B decision pattern: the typed questions
+and option set, the handler that places the decision in the agent's path, a runnable example, and
+a README another builder can follow in five minutes.
+
+## Pre-existing components
+
+- `vendor/merismos-aws/guard.py`: the `BeforeToolCallEvent` hook seam from Merismos (MIT, ours).
+  Reference only; Lachesis builds on the newer `InterventionHandler` seam.
+- `benchmark/`: the Threefold benchmark fixtures (nine task dirs) and harness (Apache-2.0, ours),
+  with the repo-root LICENSE carried over. Prior result rows were not copied.
+- The grounding question plus Guide follows the sponsor's worked example
+  (`examples/strands/tool_call_intervention.py` in strands-decider). The five-class risk question,
+  the Confirm and Deny split with the human pause, the measured threshold, and the benchmark table
+  are this build's own.
+
 ## Status
 
-Scaffolding. Product code lands here. Nothing below is claimed as working yet; this README is rewritten
-with measured numbers as each piece lands.
+Handler, client, policy, questions, tests, and the CI measurement loop are built and green. The
+Strands plus Bedrock demo agent and the benchmark comparison land next.
 
 ## Licence
 
