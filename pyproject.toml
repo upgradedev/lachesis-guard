@@ -22,6 +22,7 @@ where = ["src"]
 pythonpath = ["src"]
 testpaths = ["tests"]
 addopts = "--cov=lachesis --cov-report=term-missing --cov-fail-under=85"
+markers = ["live: needs a live Decider server (skips without one, fails without one under decider-live.yml)"]
 
 [tool.ruff]
 line-length = 100
