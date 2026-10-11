@@ -1,0 +1,81 @@
+name: decider-measure
+
+# Fits the confidence threshold on the labeled fixture: serve the pinned model
+# on CPU, run every case through both Lachesis questions, print the
+# accuracy-by-confidence table and the pre-registered rule's suggestion.
+# Measurement, not a gate: it reports numbers and exits 0.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "evaluation/**"
+      - "scripts/measure_threshold.py"
+      - "src/lachesis/evaluate.py"
+      - ".github/workflows/decider-measure.yml"
+  pull_request:
+    paths:
+      - "evaluation/**"
+      - "scripts/measure_threshold.py"
+      - "src/lachesis/evaluate.py"
+      - ".github/workflows/decider-measure.yml"
+  workflow_dispatch:
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      MODEL: StrandsAgents/strands-decider-2B-qwen3.5-v1-2610
+      PORT: "8099"
+      STRANDS_DECIDER_URL: http://127.0.0.1:8099
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+          cache: pip
+
+      - name: Install package, CPU torch, Decider 0.1.0
+        run: |
+          pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cpu
+          pip install strands-decider==0.1.0
+          pip install -e ".[dev]"
+
+      - name: Serve pinned model on CPU
+        run: |
+          strands-decider serve "$MODEL" --device cpu --port "$PORT" > server.log 2>&1 &
+          echo $! > server.pid
+          for i in $(seq 1 180); do
+            if curl -sf "http://127.0.0.1:$PORT/health" > health.json 2>/dev/null; then
+              echo "server ready after about $((i * 10)) s"
+              exit 0
+            fi
+            if ! kill -0 "$(cat server.pid)" 2>/dev/null; then
+              echo "server process died; last 40 lines of server.log:"
+              tail -40 server.log
+              exit 1
+            fi
+            sleep 10
+          done
+          echo "server did not answer /health within 30 minutes"
+          tail -40 server.log
+          exit 1
+
+      - name: Measure threshold on the labeled fixture
+        run: python scripts/measure_threshold.py --out threshold-results.jsonl
+
+      - name: Stop server
+        if: always()
+        run: kill "$(cat server.pid)" 2>/dev/null || true
+
+      - name: Upload measurement
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: decider-measure
+          path: |
+            health.json
+            threshold-results.jsonl
+            server.log
