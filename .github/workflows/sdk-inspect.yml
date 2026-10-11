@@ -1,0 +1,55 @@
+name: sdk-inspect
+
+# One-shot research probe (dispatch only): print the installed strands-agents
+# version and the source of the intervention seam we build on, so the handler
+# is written against the real API instead of memory.
+#
+# gh workflow run sdk-inspect.yml --ref <branch>
+
+on:
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install SDK and dump intervention API
+        run: |
+          pip install strands-agents
+          pip show strands-agents | head -3
+          python - <<'EOF'
+          import inspect
+          import strands
+          print("strands:", strands.__file__)
+          import strands.interventions as I
+          print("interventions:", I.__file__)
+          print("exports:", sorted(n for n in dir(I) if not n.startswith("_")))
+          from strands.interventions import actions
+          print("actions file:", actions.__file__)
+          for name in ("Proceed", "Deny", "Guide", "Confirm"):
+              cls = getattr(actions, name)
+              print("=" * 70)
+              print(name, inspect.signature(cls.__init__))
+              print(inspect.getsource(cls))
+          from strands.interventions import InterventionHandler
+          print("=" * 70)
+          print("InterventionHandler file:", inspect.getfile(InterventionHandler))
+          print(inspect.getsource(InterventionHandler))
+          EOF
+
+      - name: Dump vended HITL and hook event names
+        run: |
+          python - <<'EOF'
+          import inspect
+          import strands.vended_interventions.hitl as hitl
+          print("hitl:", hitl.__file__)
+          print("hitl exports:", sorted(n for n in dir(hitl) if not n.startswith("_")))
+          import strands.hooks as hooks
+          print("hooks:", hooks.__file__)
+          print("hook events:", sorted(n for n in dir(hooks) if "Event" in n))
+          EOF
