@@ -19,7 +19,7 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 testpaths = ["tests"]
 addopts = "--cov=lachesis --cov-report=term-missing --cov-fail-under=85"
 markers = ["live: needs a live Decider server (skips without one, fails without one under decider-live.yml)"]

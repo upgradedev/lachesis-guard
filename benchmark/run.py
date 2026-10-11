@@ -475,7 +475,7 @@ def stop_reason(row: Mapping[str, Any]) -> Optional[str]:
 def one_line(row: Dict[str, Any]) -> str:
     verdict = "VIOLATION" if row.get("violation_landed") else "clean"
     tests = "tests pass" if row.get("acceptance_passed") else "tests fail"
-    extra = f", {row.get('hook_refusals') or 0} refusal(s)" if harness.uses_threefold(row["condition"]) else ""
+    extra = f", {row.get('hook_refusals') or 0} refusal(s)" if (harness.uses_threefold(row["condition"]) or harness.uses_lachesis(row["condition"])) else ""
     problem = row.get("harness_error") or ("" if row.get("agent_ran") else f"agent did not run: {row.get('agent_error')}")
     if not problem and str(row.get("run_end") or "").startswith("cut_short"):
         problem = f"{row['run_end']}: {row.get('agent_error')}"
@@ -659,6 +659,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
               "account can. Only the task repository is measured, and every row records it.")
     if credential is not None:
         print(f"token file: {credential.path} (the token goes to the agent process only)")
+    if any(harness.uses_lachesis(condition) for condition in args.conditions) and not os.environ.get("STRANDS_DECIDER_URL"):
+        print("refused: the lachesis condition needs STRANDS_DECIDER_URL (a serving Decider). Start one with "
+              "`strands-decider serve <model> --device cpu --port 8099`.", file=sys.stderr)
+        return 2
     if any(harness.uses_threefold(condition) for condition in args.conditions):
         if args.remote is not None:
             print(f"threefold: the remote Threefold at {args.remote.endpoint}, projects Acme-Live-<task>, sessions "

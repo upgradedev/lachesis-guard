@@ -74,6 +74,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional
 # The same words the Threefold hook prints in a refusal and when it lets a call
 # through unjudged; harness.py uses the same two constants for Claude Code.
 REFUSAL_MARKER = "Threefold refused"
+LACHESIS_REFUSAL_MARKER = "Lachesis refused"
 HOOK_UNJUDGED_MARKER = "could not check this call"
 
 # Every option the command below passes, as `codex exec --help` spells it.
@@ -189,7 +190,8 @@ def _item_text(item: Mapping[str, Any]) -> str:
     return "\n".join(parts)
 
 
-def parse_events(path: Path, classify: Callable[[str], str] = lambda text: "OTHER") -> Dict[str, Any]:
+def parse_events(path: Path, classify: Callable[[str], str] = lambda text: "OTHER",
+                 refusal_marker: str = REFUSAL_MARKER) -> Dict[str, Any]:
     """What a Codex run did, from `codex exec --json`, in the shape harness.parse_transcript returns.
 
     Codex prints no result message and no turn count, so both are made here:
@@ -265,7 +267,7 @@ def parse_events(path: Path, classify: Callable[[str], str] = lambda text: "OTHE
                 summary["assistant_messages"] += 1
                 last_message = str(item.get("text") or "")
             text = _item_text(item)
-            if REFUSAL_MARKER in text and item_id not in refused_items:
+            if refusal_marker in text and item_id not in refused_items:
                 refused_items.add(item_id)
                 summary["refusals"].append({"tool": item_type or "?", "kind": classify(text)})
             elif item.get("status") == "declined" and item_type in TOOL_ITEMS:
