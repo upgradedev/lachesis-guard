@@ -6,31 +6,18 @@ exist: the questions, the policy matrix, and the handler mapping must agree
 exactly with ``src/lachesis``.
 """
 
-import importlib.util
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from _pattern import PATTERN, load_pattern
 
 import lachesis.handler
 import lachesis.policy
 import lachesis.questions
 
-PATTERN = Path(__file__).resolve().parents[1] / "patterns" / "guardrails" / "triage.py"
-
-
-def load_pattern():
-    spec = importlib.util.spec_from_file_location("lachesis_pattern", PATTERN)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
 
 @pytest.fixture(scope="module")
 def pattern():
-    assert PATTERN.is_file(), "the reusable pattern file is missing"
     return load_pattern()
 
 
