@@ -22,11 +22,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# The sponsor's README figure: on short classification, answers at a confidence
-# of 0.9 or more are right about 95% of the time, and below that to "confirm or
-# ask a person". NOT measured on our traffic. The threshold experiment replaces
-# this default with a measured value; until then do not trust it.
-DEFAULT_THRESHOLD = 0.9
+# Measured 2026-10-11 on 50 labeled tool calls (run 38148045282): the lowest edge
+# in {0.9, 0.8, 0.7} with at least 10 accepted cases at accuracy 0.95 or better
+# is 0.7, with 12 accepted and 12 right. Every one of the 14 risk misses landed
+# below it (highest miss 0.63), so each would have paused for a person. Refit
+# when real agent traffic arrives; the rule lives in lachesis.evaluate.
+DEFAULT_THRESHOLD = 0.7
 
 PROCEED = "proceed"
 GUIDE = "guide"

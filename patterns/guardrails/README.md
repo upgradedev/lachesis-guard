@@ -62,7 +62,8 @@ cannot be triaged does not run unguarded.
   question carry most of its signal; write them carefully.
 - Pick the threshold by measurement: run your own tool calls through, plot
   confidence against right and wrong, and set the line where a person should
-  take over. Our own measurement lands in the repo README when it runs.
+  take over. Our own measurement is in the repo README under Threshold: 0.7,
+  fit on 50 labeled tool calls.
 - Keep `Confirm` for the calls a person must see and `Deny` for the ones that
   must never run. A triage that denies when unsure takes the human out of a
   decision the human should make.

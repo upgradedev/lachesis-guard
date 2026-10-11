@@ -49,8 +49,8 @@ def test_anything_below_threshold_confirms(risk, grounded_p):
 
 
 def test_threshold_boundary_confirms_below_and_decides_at():
-    assert decide("benign", 0.89, 1.0).action == CONFIRM
-    assert decide("benign", 0.9, 1.0).action == PROCEED
+    assert decide("benign", 0.69, 1.0).action == CONFIRM
+    assert decide("benign", 0.7, 1.0).action == PROCEED
 
 
 def test_custom_threshold_is_honored():
@@ -68,5 +68,5 @@ def test_empty_label_confirms():
     assert decide("", 0.99, 1.0).action == CONFIRM
 
 
-def test_default_threshold_is_the_sponsor_figure_until_measured():
-    assert DEFAULT_THRESHOLD == 0.9
+def test_default_threshold_is_the_measured_value():
+    assert DEFAULT_THRESHOLD == 0.7  # fit 2026-10-11, run 38148045282
