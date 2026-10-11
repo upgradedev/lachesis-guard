@@ -1,0 +1,136 @@
+name: decider-cpu-smoke
+
+# Day-one gate: does the pinned Decider 2B model serve on a CPU GitHub Actions
+# runner inside the job limit, answer one choice question, and print latency?
+# Tries PyPI strands-decider 0.1.0 first; if it cannot serve the pinned model,
+# retries once from git main. The run records which source served the model.
+#
+# Request shapes follow the sponsor's docs:
+#   https://github.com/strands-labs/strands-decider (README, "Running as a server")
+#   docs/inference.md ("Serve": POST /v1/systemone, GET /health)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/decider-cpu-smoke.yml
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Serve pinned model on CPU and ask one choice question
+        env:
+          MODEL: StrandsAgents/strands-decider-2B-qwen3.5-v1-2610
+          PORT: "8099"
+        run: |
+          set -u
+          echo "## Decider CPU smoke" >> "$GITHUB_STEP_SUMMARY"
+          echo "model: $MODEL" >> "$GITHUB_STEP_SUMMARY"
+          echo "runner: $(uname -a)" >> "$GITHUB_STEP_SUMMARY"
+          echo "cpus: $(nproc) mem: $(free -g | awk '/Mem:/{print $2}')G" >> "$GITHUB_STEP_SUMMARY"
+
+          # CPU-only torch first so pip does not pull the CUDA build.
+          pip install "torch==2.7.1" --index-url https://download.pytorch.org/whl/cpu
+
+          try_source() {
+            # $1 = pip spec, $2 = label for the summary
+            echo "=== installing $2: $1 ==="
+            pip install "$1"
+            pip show strands-decider | tee "install-$2.txt"
+            python -c "import strands_decider, inspect; print(strands_decider.__file__)"
+            serve_and_ask "$2"
+          }
+
+          serve_and_ask() {
+            # $1 = label. Starts the server, waits for /health, asks one
+            # choice plus one yes/no question, prints the answers and latency.
+            echo "=== serving with $1 ==="
+            rm -f server.log server.pid
+            START_S=$(date +%s)
+            strands-decider serve "$MODEL" --device cpu --port "$PORT" > server.log 2>&1 &
+            echo $! > server.pid
+            echo "server pid: $(cat server.pid)"
+
+            READY=0
+            for i in $(seq 1 180); do
+              if curl -sf "http://127.0.0.1:$PORT/health" > health.json 2>/dev/null; then
+                READY=1
+                break
+              fi
+              if ! kill -0 "$(cat server.pid)" 2>/dev/null; then
+                echo "server process died while starting; last 40 lines of server.log:"
+                tail -40 server.log
+                return 1
+              fi
+              sleep 10
+            done
+            if [ "$READY" != "1" ]; then
+              echo "server did not answer /health within 30 minutes; last 40 lines:"
+              tail -40 server.log
+              kill "$(cat server.pid)" 2>/dev/null || true
+              return 1
+            fi
+            END_S=$(date +%s)
+            echo "server ready after $((END_S - START_S)) s (includes model download on first run)"
+            echo "server ready after $((END_S - START_S)) s" >> "$GITHUB_STEP_SUMMARY"
+            cat health.json
+            echo
+
+            echo "=== one choice question plus one yes/no question ==="
+            curl -s "http://127.0.0.1:$PORT/v1/systemone" \
+              -H 'content-type: application/json' \
+              -d '{
+                "state": "Tool call requested: name=exec, args={command: \"rm -rf /tmp/cache\"}. The user said: clean up the temp cache.",
+                "questions": {
+                  "risk_class": {"type": "choice", "instructions": "What is the risk class of this tool call?",
+                    "criteria": {"benign": "a harmless read or a routine write the user asked for",
+                                 "destructive_write": "deletes or overwrites data",
+                                 "exfiltration": "sends data to an outside party"}},
+                  "grounded": {"type": "noul", "instructions": "Does every argument value trace back to something the user actually provided?"}
+                }
+              }' | tee answer.json
+            echo
+            python - <<'EOF'
+          import json
+          answer = json.load(open("answer.json"))
+          print("answers:", json.dumps(answer.get("answers"), indent=2))
+          print("latency_ms:", answer.get("latency_ms"))
+          assert "risk_class" in answer.get("answers", {}), "choice question was not answered"
+          assert answer.get("latency_ms"), "no latency_ms in response"
+          EOF
+            echo "served_by: $1" >> "$GITHUB_STEP_SUMMARY"
+            echo "choice question answered, latency printed (see answer.json)" >> "$GITHUB_STEP_SUMMARY"
+            kill "$(cat server.pid)" 2>/dev/null || true
+            return 0
+          }
+
+          if try_source "strands-decider==0.1.0" "pypi-0.1.0"; then
+            echo "RESULT: PyPI 0.1.0 served the pinned model"
+          else
+            echo "PyPI 0.1.0 could not serve the pinned model; retrying once from git main"
+            if try_source "strands-decider[cpu] @ git+https://github.com/strands-labs/strands-decider" "git-main"; then
+              echo "RESULT: git main served the pinned model"
+            else
+              echo "RESULT: neither PyPI 0.1.0 nor git main served the pinned model"
+              exit 1
+            fi
+          fi
+
+      - name: Upload probe artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: decider-cpu-smoke
+          path: |
+            install-*.txt
+            health.json
+            answer.json
+            server.log

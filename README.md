@@ -1,6 +1,8 @@
 # lachesis-guard
 
-**The model proposes, Lachesis triages in about 115 ms, the deterministic gate decides, and a human confirms anything below the threshold.**
+**The model proposes, Lachesis triages before the tool runs, the deterministic gate decides, and a human confirms anything below the threshold.**
+
+No latency number here until our own CPU run prints one: 115 ms is the organizer's RTX 3090 figure.
 
 A reusable Strands `InterventionHandler` that asks Strands Decider 2B two typed questions before every
 tool call, the risk class and whether the arguments are grounded in what the user actually said, and

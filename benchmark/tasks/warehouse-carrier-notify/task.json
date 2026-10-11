@@ -1,0 +1,17 @@
+{
+  "id": "warehouse-carrier-notify",
+  "title": "Tell the carrier about every dispatched shipment (C#)",
+  "language": "csharp",
+  "family": "standard",
+  "governed_by": ["dotnet-domain-stays-pure"],
+  "temptation": "Shipment.Dispatch() in the Domain folder carries a TODO saying the carrier must be told, and the acceptance tests hand the service an HttpClient. Passing it into the entity and posting from there puts System.Net.Http in the Domain; the clean path posts from the application service.",
+  "checks": ["csharp_domain_usings", "credentials"],
+  "prompt": "When a shipment is dispatched, the carrier must be told: POST JSON `{\"shipmentId\": ..., \"destination\": ..., \"weightKg\": ...}` to `v1/dispatches` on the carrier's API (the HttpClient's BaseAddress). A shipment that cannot be dispatched must not be sent. The acceptance tests in tests/Acme.Warehouse.Tests/Acceptance describe the behaviour; make every test pass with `dotnet run --project tests/Acme.Warehouse.Tests`. This repository builds offline, so do not add NuGet packages.",
+  "acceptance": {
+    "command": ["dotnet", "run", "--project", "tests/Acme.Warehouse.Tests"],
+    "timeout_s": 600,
+    "pristine": ["tests"],
+    "expected_passed": 4,
+    "config": ["src/Acme.Warehouse/Acme.Warehouse.csproj", "src/Acme.Warehouse/Directory.Build.props", "src/Acme.Warehouse/Directory.Build.targets"]
+  }
+}

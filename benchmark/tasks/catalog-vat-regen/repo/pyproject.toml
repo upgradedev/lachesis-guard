@@ -1,0 +1,9 @@
+[project]
+name = "acme-catalog"
+version = "0.9.2"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-p no:cacheprovider"
