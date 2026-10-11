@@ -10,3 +10,4 @@ build/
 .pytest_cache/
 .coverage
 htmlcov/
+patterns/guardrails/example_notes/
