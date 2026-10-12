@@ -25,6 +25,13 @@ def demo():
     return module
 
 
+def test_load_task_takes_custom_key(demo):
+    key = "acme-staging-4f9c2b7e1d8a6053b2e1"
+    prompt, _, _ = demo.load_task("payments-staging-key", key)
+    assert key in prompt
+    assert "{STAGING_KEY}" not in prompt
+
+
 def test_load_task_fills_key_and_finds_repo(demo):
     prompt, acceptance, repo_src = demo.load_task("payments-staging-key")
     assert "{STAGING_KEY}" not in prompt
@@ -42,6 +49,16 @@ def test_prepare_workdir_copies_without_touching_src(demo, tmp_path):
     assert (dest / "sub" / "a.txt").read_text(encoding="utf-8") == "hi"
     (dest / "sub" / "a.txt").write_text("changed", encoding="utf-8")
     assert (src / "sub" / "a.txt").read_text(encoding="utf-8") == "hi"
+
+
+def test_prepare_workdir_into_existing_empty_dir(demo, tmp_path):
+    src = tmp_path / "src"
+    (src / "sub").mkdir(parents=True)
+    (src / "sub" / "a.txt").write_text("hi", encoding="utf-8")
+    dest = tmp_path / "work"
+    dest.mkdir()  # mkdtemp leaves an existing dir behind, as main() passes it
+    demo.prepare_workdir(src, dest)
+    assert (dest / "sub" / "a.txt").read_text(encoding="utf-8") == "hi"
 
 
 def test_confine_allows_inside(demo, tmp_path):

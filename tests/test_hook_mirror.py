@@ -110,6 +110,23 @@ EXFIL = {
 }
 
 
+UNGROUNDED_BENIGN = {
+    "risk_class": {"type": "choice", "choice": "benign", "confidence": 0.95},
+    "grounded": {"type": "noul", "noul": 0.1},
+}
+
+
+def test_hook_reads_empty_input_as_grounded():
+    httpd, thread = canned_server(UNGROUNDED_BENIGN)
+    try:
+        completed = run_hook({}, f"http://127.0.0.1:{httpd.server_port}")
+    finally:
+        httpd.shutdown()
+        thread.join(timeout=10)
+    assert completed.returncode == 0
+    assert completed.stdout.decode().strip() == ""
+
+
 def test_hook_approves_by_printing_nothing():
     httpd, thread = canned_server(BENIGN)
     try:

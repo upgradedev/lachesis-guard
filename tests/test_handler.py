@@ -16,7 +16,10 @@ MESSAGES = [
 
 def event(name="exec", args=None, messages=MESSAGES):
     return SimpleNamespace(
-        tool_use={"name": name, "input": args or {"command": "rm -rf /tmp/cache"}},
+        tool_use={
+            "name": name,
+            "input": args if args is not None else {"command": "rm -rf /tmp/cache"},
+        },
         agent=SimpleNamespace(messages=messages),
     )
 
@@ -135,6 +138,19 @@ def test_default_client_and_threshold():
     handler = LachesisHandler()
     assert handler._threshold == DEFAULT_THRESHOLD
     assert handler._client.url == "http://127.0.0.1:8099"
+
+
+def test_no_args_reads_as_grounded():
+    handler = LachesisHandler(client=Scripted("benign", 0.95, 0.1))
+    action = handler.before_tool_call(event(name="run_tests", args={}))
+    assert isinstance(action, Proceed)
+    assert handler.log[0]["grounded"] is True
+
+
+def test_no_args_destructive_still_confirms():
+    handler = LachesisHandler(client=Scripted("destructive_write", 0.95, 0.1))
+    action = handler.before_tool_call(event(name="factory_reset", args={}))
+    assert isinstance(action, Confirm)
 
 
 def test_missing_tool_use_and_agent_do_not_crash():

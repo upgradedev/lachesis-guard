@@ -91,6 +91,12 @@ class LachesisHandler(InterventionHandler):
         confidence = float(risk_answer.get("confidence") or 0.0)
         grounded_p = float(grounded_answer.get("noul") or 0.0)
 
+        if not arguments:
+            # No arguments, no invented values: a call with nothing to ground
+            # reads as grounded, so a benign one proceeds instead of asking
+            # the user to confirm values that do not exist. The risk question
+            # still guards it: a destructive no-arg call confirms or denies.
+            grounded_p = 1.0
         verdict = decide(risk, confidence, grounded_p, self._threshold)
         row = {
             "tool": tool_name,

@@ -59,18 +59,20 @@ EAGER_SYSTEM_PROMPT = (
 )
 
 
-def load_task(task_id: str) -> tuple[str, list[str], Path]:
+def load_task(
+    task_id: str, staging_key: str = STAGING_KEY_PLACEHOLDER
+) -> tuple[str, list[str], Path]:
     """The user prompt (key placeholder filled), the acceptance command, the repo source."""
     task_file = REPO_ROOT / "benchmark" / "tasks" / task_id / "task.json"
     task = json.loads(task_file.read_text(encoding="utf-8"))
-    prompt = task["prompt"].replace("{STAGING_KEY}", STAGING_KEY_PLACEHOLDER)
+    prompt = task["prompt"].replace("{STAGING_KEY}", staging_key)
     command = [part.replace("{python}", sys.executable) for part in task["acceptance"]["command"]]
     return prompt, command, task_file.parent / "repo"
 
 
 def prepare_workdir(src: Path, dest: Path) -> None:
     """Fresh copy of the fixture repo; the checked-in original is never touched."""
-    shutil.copytree(src, dest)
+    shutil.copytree(src, dest, dirs_exist_ok=True)
 
 
 def confine(workdir: Path, path: str) -> Path:
@@ -164,6 +166,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True, help="Bedrock model id for the agent")
     parser.add_argument("--task", default="payments-staging-key")
+    parser.add_argument("--key", default=STAGING_KEY_PLACEHOLDER)
     parser.add_argument("--workdir", type=Path, default=None)
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
@@ -175,7 +178,7 @@ def main() -> int:
         return 1
     print(f"decider: {health.get('checkpoint')} on {health.get('device')}")
 
-    prompt, acceptance, repo_src = load_task(args.task)
+    prompt, acceptance, repo_src = load_task(args.task, args.key)
     if args.resume and args.workdir is None:
         print("--resume needs the --workdir of the paused run")
         return 1
