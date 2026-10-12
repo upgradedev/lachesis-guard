@@ -113,3 +113,26 @@ def test_handler_mapping_matches(pattern):
         ).before_tool_call(event)
         assert type(mine) is type(theirs)
         assert mine.__dict__ == theirs.__dict__
+
+
+def test_handler_mapping_matches_without_args(pattern):
+    event = SimpleNamespace(
+        tool_use={"name": "t", "input": {}},
+        agent=SimpleNamespace(messages=[]),
+    )
+    for risk, confidence, grounded_p in [("benign", 0.95, 0.1), ("destructive_write", 0.95, 0.1)]:
+        ask = scripted_answers(risk, confidence, grounded_p)
+        mine = pattern.TriageHandler(ask=ask).before_tool_call(event)
+        theirs = lachesis.handler.LachesisHandler(
+            client=SimpleNamespace(
+                ask=lambda s, q, r=risk, c=confidence, g=grounded_p: SimpleNamespace(
+                    answers={
+                        "risk_class": {"choice": r, "confidence": c},
+                        "grounded": {"noul": g},
+                    },
+                    latency_ms=3.0,
+                )
+            )
+        ).before_tool_call(event)
+        assert type(mine) is type(theirs)
+        assert mine.__dict__ == theirs.__dict__

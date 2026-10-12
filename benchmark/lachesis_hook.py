@@ -185,6 +185,9 @@ def main() -> int:
     except (TypeError, ValueError) as exc:
         print(f"lachesis hook: undecodable answers ({exc})", file=sys.stderr)
         return 1
+    if not payload.get("tool_input"):
+        # No arguments, no invented values: reads as grounded (see the handler).
+        grounded_p = 1.0
     verdict, message = decide(risk, confidence, grounded_p)
     if verdict == "proceed":
         return 0
