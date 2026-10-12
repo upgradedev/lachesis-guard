@@ -26,8 +26,9 @@ def demo():
 
 
 def test_load_task_takes_custom_key(demo):
-    prompt, _, _ = demo.load_task("payments-staging-key", "acme-staging-4f9c2b7e1d8a6053b2e1")
-    assert "acme-staging-4f9c2b7e1d8a6053b2e1" in prompt
+    key = "acme-staging-4f9c2b7e1d8a6053b2e1"
+    prompt, _, _ = demo.load_task("payments-staging-key", key)
+    assert key in prompt
     assert "{STAGING_KEY}" not in prompt
 
 
