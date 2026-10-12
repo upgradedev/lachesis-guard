@@ -32,6 +32,21 @@ VerdictCallback = Callable[[Verdict, dict[str, Any]], None]
 """Called after every triage with the verdict and the logged row."""
 
 
+PROMPT_ARGS_CHARS = 2000
+"""How much of the proposed arguments a Confirm prompt shows a person."""
+
+
+def format_arguments(arguments: Any, limit: int = PROMPT_ARGS_CHARS) -> str:
+    """The proposed arguments as one JSON line, truncated with a note when long."""
+    try:
+        text = json.dumps(arguments)
+    except (TypeError, ValueError):
+        text = str(arguments)
+    if len(text) > limit:
+        return text[:limit] + f"... [{len(text) - limit} more characters]"
+    return text
+
+
 def render_state(messages: Any, tool_name: str, arguments: Any) -> str:
     """Flatten the conversation plus the proposed call into the state Decider reads."""
     lines: list[str] = []
@@ -117,4 +132,8 @@ class LachesisHandler(InterventionHandler):
             return Guide(feedback=verdict.message, reason=tag)
         if verdict.action == DENY:
             return Deny(reason=verdict.message)
-        return Confirm(prompt=verdict.message, reason=tag)
+        approval = (
+            "Tool call needs a person to approve it:\n"
+            f"tool: {tool_name}\narguments: {format_arguments(arguments)}\n\n{verdict.message}"
+        )
+        return Confirm(prompt=approval, reason=tag)
