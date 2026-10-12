@@ -61,6 +61,21 @@ def test_ungrounded_guides_with_feedback():
     assert "Ask the user" in action.feedback
 
 
+def test_confirm_prompt_shows_tool_and_args():
+    handler = LachesisHandler(client=Scripted("benign", 0.4, 0.9))
+    action = handler.before_tool_call(event())
+    assert "tool: exec" in action.prompt
+    assert "rm -rf /tmp/cache" in action.prompt
+    assert "unsure" in action.prompt
+
+
+def test_confirm_prompt_truncates_long_args():
+    from lachesis.handler import format_arguments
+
+    assert format_arguments({"a": "x" * 3000}, limit=100).endswith("[2909 more characters]")
+    assert format_arguments({"a": 1}) == '{"a": 1}'
+
+
 def test_destructive_write_confirms_with_prompt():
     handler = LachesisHandler(client=Scripted("destructive_write", 0.95, 0.9))
     action = handler.before_tool_call(event())
