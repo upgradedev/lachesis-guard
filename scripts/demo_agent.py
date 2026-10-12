@@ -70,7 +70,7 @@ def load_task(task_id: str) -> tuple[str, list[str], Path]:
 
 def prepare_workdir(src: Path, dest: Path) -> None:
     """Fresh copy of the fixture repo; the checked-in original is never touched."""
-    shutil.copytree(src, dest)
+    shutil.copytree(src, dest, dirs_exist_ok=True)
 
 
 def confine(workdir: Path, path: str) -> Path:

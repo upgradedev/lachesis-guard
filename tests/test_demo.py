@@ -44,6 +44,16 @@ def test_prepare_workdir_copies_without_touching_src(demo, tmp_path):
     assert (src / "sub" / "a.txt").read_text(encoding="utf-8") == "hi"
 
 
+def test_prepare_workdir_into_existing_empty_dir(demo, tmp_path):
+    src = tmp_path / "src"
+    (src / "sub").mkdir(parents=True)
+    (src / "sub" / "a.txt").write_text("hi", encoding="utf-8")
+    dest = tmp_path / "work"
+    dest.mkdir()  # mkdtemp leaves an existing dir behind, as main() passes it
+    demo.prepare_workdir(src, dest)
+    assert (dest / "sub" / "a.txt").read_text(encoding="utf-8") == "hi"
+
+
 def test_confine_allows_inside(demo, tmp_path):
     assert demo.confine(tmp_path, "a/b.txt") == (tmp_path / "a/b.txt").resolve()
     assert demo.confine(tmp_path, ".") == tmp_path.resolve()
