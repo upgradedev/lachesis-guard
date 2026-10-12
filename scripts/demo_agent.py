@@ -59,7 +59,9 @@ EAGER_SYSTEM_PROMPT = (
 )
 
 
-def load_task(task_id: str, staging_key: str = STAGING_KEY_PLACEHOLDER) -> tuple[str, list[str], Path]:
+def load_task(
+    task_id: str, staging_key: str = STAGING_KEY_PLACEHOLDER
+) -> tuple[str, list[str], Path]:
     """The user prompt (key placeholder filled), the acceptance command, the repo source."""
     task_file = REPO_ROOT / "benchmark" / "tasks" / task_id / "task.json"
     task = json.loads(task_file.read_text(encoding="utf-8"))
