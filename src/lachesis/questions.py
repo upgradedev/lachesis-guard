@@ -7,7 +7,7 @@ they can change without retraining anything.
 The risk classes are authored fresh here. The grounding question plus Guide is
 the sponsor's worked example (``examples/strands/tool_call_intervention.py`` in
 strands-decider); what is new is the five-class risk question and the Confirm
-and Deny split it drives.
+and Deny split it drives. The grounding wording is adapted from that Apache-2.0 file; see NOTICE.
 """
 
 from __future__ import annotations

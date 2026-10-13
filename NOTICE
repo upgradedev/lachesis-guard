@@ -1,0 +1,14 @@
+lachesis-guard
+Copyright 2026 the Lachesis authors. MIT licence, see LICENSE.
+
+This product includes question and message strings adapted from the
+strands-decider sponsor example
+examples/strands/tool_call_intervention.py
+(Apache License 2.0, https://www.apache.org/licenses/LICENSE-2.0):
+
+- src/lachesis/questions.py: the grounding question instructions and criteria
+- src/lachesis/policy.py: the Guide message
+- patterns/guardrails/triage.py: the grounding question and the Guide message
+
+The risk classes, the Confirm/Deny split, the threshold, and the benchmark
+are this project's own.

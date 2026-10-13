@@ -16,6 +16,9 @@ Precedence (first match wins):
 4. an unknown risk label -> confirm: fail toward the human, never toward the tool.
 5. benign but not grounded -> guide: the model asks the user instead of guessing.
 6. benign, grounded, confident -> proceed.
+
+The Guide message wording is adapted from the sponsor's Apache-2.0 worked
+example (``examples/strands/tool_call_intervention.py``); see NOTICE.
 """
 
 from __future__ import annotations
