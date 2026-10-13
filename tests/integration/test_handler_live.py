@@ -39,6 +39,7 @@ def handler():
 
 
 def call(handler, tool, args, user_text, call_id=None):
+    import asyncio
     from types import SimpleNamespace
 
     tool_use = {"name": tool, "input": args}
@@ -48,7 +49,7 @@ def call(handler, tool, args, user_text, call_id=None):
         tool_use=tool_use,
         agent=SimpleNamespace(messages=[{"role": "user", "content": [{"text": user_text}]}]),
     )
-    return handler.before_tool_call(event)
+    return asyncio.run(handler.before_tool_call(event))
 
 
 def check_row(handler):

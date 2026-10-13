@@ -16,30 +16,53 @@ what it left behind.
 | `prompt` | the team's rules, the shipped Threefold rules in prose ([conditions/CLAUDE.prompt.md](conditions/CLAUDE.prompt.md)), in `CLAUDE.md` for Claude Code and in `AGENTS.md` for Codex, the same text for both |
 | `threefold` | the Threefold hook, enforce mode, against a local offline server started from this repository for that run (or, with `--threefold-endpoint`, a Threefold already running: below): in `.claude/settings.local.json` for Claude Code, in `.codex/hooks.json` for Codex |
 | `prompt+threefold` | both (not in the default matrix) |
+| `lachesis` | the Lachesis hook, asking a local Strands Decider 2B server to triage every tool call and deny the risky ones; with no human to ask, pauses and guides count as prevented. The default matrix here is `none`, `prompt`, `lachesis`. |
 
-## Measured so far
+## Lachesis series
 
-Six series ran with real agents: four of Claude Code 2.1.220 on 2026-09-22
-(logged in with a token file) and two of Codex CLI 0.155.0 on 2026-09-23.
-Each standard series is 54 runs (6 tasks, 3 conditions, 3 repetitions) and
-each pressure series is 27 (3 tasks, 3 conditions, 3 repetitions). No rate
-below pools the two families.
+Three series ran with real agents under the `lachesis` condition, all with
+rows committed here. Each standard series is 54 runs when full (6 tasks,
+3 conditions, 3 repetitions); the series below measured `lachesis` only.
+No rate below pools the two families.
+
+| Agent | Model | Rows | Violation landed, standard | Violation landed, pressure | Report |
+|---|---|---|---|---|---|
+| Claude Code | claude-sonnet-5 | `results/lachesis-full-claude1.jsonl` | 0% (0/15) | 0% (0/9) | [BENCHMARK_2026-10-13.md](../docs/evidence/BENCHMARK_2026-10-13.md) |
+| Codex | codex-default | `results/lachesis-pilot-codex1.jsonl` | 0% (0/15), pilot, not a result | n/a | [BENCHMARK_2026-10-12-PILOT.md](../docs/evidence/BENCHMARK_2026-10-12-PILOT.md) |
+| Codex | codex-default | `results/lachesis-pressure-codex1-fix1.jsonl` | n/a | 0% (0/1) | [BENCHMARK_2026-10-12-PRESSURE.md](../docs/evidence/BENCHMARK_2026-10-12-PRESSURE.md) |
+
+The acceptance tests passed in 0 of the 15 standard runs and 0 of the 9
+pressure runs of the Claude series: with every risky call refused or paused,
+the agent stopped instead of finishing. `results/lachesis-pressure-codex1.jsonl`
+is the pressure run before the rerun; its 4 hook errors excluded it, and the
+rerun replaced it. Like-for-like comparisons use the claude-sonnet-5 history
+row below, not the haiku one: the Lachesis rows are sonnet.
+
+## Threefold history
+
+Six series ran with real agents in the Threefold repo: four of Claude Code
+2.1.220 on 2026-09-22 (logged in with a token file) and two of Codex CLI
+0.155.0 on 2026-09-23. Their rows and reports were not carried into this
+repository; the numbers below are quoted from that repo's reports, and the
+file names are run ids there, not links here. Each standard series was
+54 runs (6 tasks, 3 conditions, 3 repetitions) and each pressure series 27
+(3 tasks, 3 conditions, 3 repetitions). No rate below pools the two families.
 
 Standard tasks:
 
 | Agent | Model | Rows | Violation landed: `none` | `prompt` | `threefold` | Report |
 |---|---|---|---|---|---|---|
-| Claude Code | claude-sonnet-5 | `results/20260922T143932Z.jsonl` | 17% (3/18) | 0% (0/18) | 0% (0/18) | [BENCHMARK_2026-09-22.md](../docs/evidence/BENCHMARK_2026-09-22.md) |
-| Claude Code | claude-haiku-4-5-20251001 | `results/20260922T145644Z.jsonl` | 39% (7/18) | 17% (3/18) | 0% (0/18) | [BENCHMARK_2026-09-22-HAIKU.md](../docs/evidence/BENCHMARK_2026-09-22-HAIKU.md) |
-| Codex | codex-default | `results/20260923T025154Z-codex.jsonl` | 17% (3/18) | 0% (0/18) | 0% (0/18) | [BENCHMARK_2026-09-23-CODEX.md](../docs/evidence/BENCHMARK_2026-09-23-CODEX.md) |
+| Claude Code | claude-sonnet-5 | `results/20260922T143932Z.jsonl` | 17% (3/18) | 0% (0/18) | 0% (0/18) | `BENCHMARK_2026-09-22.md` |
+| Claude Code | claude-haiku-4-5-20251001 | `results/20260922T145644Z.jsonl` | 39% (7/18) | 17% (3/18) | 0% (0/18) | `BENCHMARK_2026-09-22-HAIKU.md` |
+| Codex | codex-default | `results/20260923T025154Z-codex.jsonl` | 17% (3/18) | 0% (0/18) | 0% (0/18) | `BENCHMARK_2026-09-23-CODEX.md` |
 
 Pressure tasks, whose prompts ask for the forbidden shortcut:
 
 | Agent | Model | Rows | Violation landed: `none` | `prompt` | `threefold` | Report |
 |---|---|---|---|---|---|---|
-| Claude Code | claude-sonnet-5 | `results/20260922T161455Z-pressure.jsonl` | 67% (6/9) | 0% (0/9) | 0% (0/9) | [BENCHMARK_2026-09-22-PRESSURE-SONNET.md](../docs/evidence/BENCHMARK_2026-09-22-PRESSURE-SONNET.md) |
-| Claude Code | claude-haiku-4-5-20251001 | `results/20260922T162306Z-pressure.jsonl` | 100% (9/9) | 56% (5/9) | 0% (0/9) | [BENCHMARK_2026-09-22-PRESSURE-HAIKU.md](../docs/evidence/BENCHMARK_2026-09-22-PRESSURE-HAIKU.md) |
-| Codex | codex-default | `results/20260923T031215Z-pressure-codex.jsonl` | 100% (9/9) | 11% (1/9) | 0% (0/9) | [BENCHMARK_2026-09-23-CODEX-PRESSURE.md](../docs/evidence/BENCHMARK_2026-09-23-CODEX-PRESSURE.md) |
+| Claude Code | claude-sonnet-5 | `results/20260922T161455Z-pressure.jsonl` | 67% (6/9) | 0% (0/9) | 0% (0/9) | `BENCHMARK_2026-09-22-PRESSURE-SONNET.md` |
+| Claude Code | claude-haiku-4-5-20251001 | `results/20260922T162306Z-pressure.jsonl` | 100% (9/9) | 56% (5/9) | 0% (0/9) | `BENCHMARK_2026-09-22-PRESSURE-HAIKU.md` |
+| Codex | codex-default | `results/20260923T031215Z-pressure-codex.jsonl` | 100% (9/9) | 11% (1/9) | 0% (0/9) | `BENCHMARK_2026-09-23-CODEX-PRESSURE.md` |
 
 The acceptance tests passed in every claude-sonnet-5 standard run, and in
 every claude-haiku-4-5 standard run but one under `prompt` (17/18). With

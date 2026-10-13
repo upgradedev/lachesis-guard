@@ -81,7 +81,8 @@ a README another builder can follow in five minutes.
   The server listens on 127.0.0.1 only; on the EC2 box the agent reaches it through an
   SSH tunnel, never over the open network.
 - The benchmark comparison is committed under `benchmark/results/`, with the evidence notes
-  in `docs/evidence/`.
+  in `docs/evidence/`; the series table is in
+  [`benchmark/README.md`](benchmark/README.md#lachesis-series).
 
 ## Run the demo
 

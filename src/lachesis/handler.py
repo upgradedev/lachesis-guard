@@ -28,6 +28,7 @@ human prompt) is rewritten after the fact to "a person declined this call".
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from collections.abc import Callable, Mapping
@@ -191,22 +192,27 @@ class LachesisHandler(InterventionHandler):
         self._session: dict[str, dict[str, Any]] = {}
         """Local verdict/refusal/pause stores, used when the agent has no state."""
 
-    def _window_tokens(self) -> int:
+    async def _window_tokens(self) -> int:
         """The server window for the state budget, cached after the first read."""
         if self._max_tokens is None:
             self._max_tokens = DEFAULT_MAX_TOKENS
             health = getattr(self._client, "health", None)
             if callable(health):
                 try:
-                    window = int(health().get("max_length", 0) or 0)
+                    info = await asyncio.to_thread(health)
+                    window = int(info.get("max_length", 0) or 0)
                 except (ValueError, TypeError, AttributeError, RuntimeError, OSError):
                     window = 0
                 if window > 0:
                     self._max_tokens = window
         return self._max_tokens
 
-    def before_tool_call(self, event: Any, **kwargs: Any) -> Any:
-        """Triage one proposed tool call; see the module docstring for the mapping."""
+    async def before_tool_call(self, event: Any, **kwargs: Any) -> Any:
+        """Triage one proposed tool call; see the module docstring for the mapping.
+
+        Async so the seconds-long server call runs in a worker thread instead of
+        blocking the agent's event loop; the SDK awaits either form.
+        """
         tool_use: Mapping[str, Any] = getattr(event, "tool_use", None) or {}
         tool_name = str(tool_use.get("name") or "")
         arguments = tool_use.get("input") or {}
@@ -232,8 +238,8 @@ class LachesisHandler(InterventionHandler):
                 tool_name, arguments, early, early.risk, early.confidence, None, call_id, agent
             )
 
-        state = render_state(messages, tool_name, arguments, self._window_tokens())
-        result = self._client.ask(state, lachesis_questions())
+        state = render_state(messages, tool_name, arguments, await self._window_tokens())
+        result = await asyncio.to_thread(self._client.ask, state, lachesis_questions())
         risk_answer = result.answers.get("risk_class", {})
         grounded_answer = result.answers.get("grounded", {})
         risk = str(risk_answer.get("choice") or "")

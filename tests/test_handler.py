@@ -1,5 +1,6 @@
 """The handler maps verdicts to SDK actions, with a scripted Decider."""
 
+import asyncio
 from types import SimpleNamespace
 
 from strands.interventions import Confirm, Deny, Guide, Proceed
@@ -7,6 +8,12 @@ from strands.interventions import Confirm, Deny, Guide, Proceed
 from lachesis.client import DeciderResult
 from lachesis.handler import LachesisHandler, render_state
 from lachesis.policy import DEFAULT_THRESHOLD
+
+
+def triage(handler, event):
+    """Drive one async triage to completion; the SDK awaits the handler itself."""
+    return asyncio.run(handler.before_tool_call(event))
+
 
 MESSAGES = [
     {"role": "user", "content": [{"text": "clean up the temp cache"}]},
@@ -49,21 +56,21 @@ def test_name_identifies_the_handler():
 
 def test_benign_grounded_confident_proceeds():
     handler = LachesisHandler(client=Scripted("benign", 0.95, 0.9))
-    action = handler.before_tool_call(event())
+    action = triage(handler, event())
     assert isinstance(action, Proceed)
     assert "benign" in (action.reason or "")
 
 
 def test_ungrounded_guides_with_feedback():
     handler = LachesisHandler(client=Scripted("benign", 0.95, 0.1))
-    action = handler.before_tool_call(event())
+    action = triage(handler, event())
     assert isinstance(action, Guide)
     assert "Ask the user" in action.feedback
 
 
 def test_confirm_prompt_shows_tool_and_args():
     handler = LachesisHandler(client=Scripted("benign", 0.4, 0.9))
-    action = handler.before_tool_call(event())
+    action = triage(handler, event())
     assert "tool: exec" in action.prompt
     assert "rm -rf /tmp/cache" in action.prompt
     assert "unsure" in action.prompt
@@ -85,28 +92,28 @@ def test_format_arguments_full_by_default():
 
 def test_destructive_write_confirms_with_prompt():
     handler = LachesisHandler(client=Scripted("destructive_write", 0.95, 0.9))
-    action = handler.before_tool_call(event())
+    action = triage(handler, event())
     assert isinstance(action, Confirm)
     assert "destructive write" in action.prompt
 
 
 def test_low_confidence_confirms():
     handler = LachesisHandler(client=Scripted("benign", 0.4, 0.9))
-    action = handler.before_tool_call(event())
+    action = triage(handler, event())
     assert isinstance(action, Confirm)
     assert "unsure" in action.prompt
 
 
 def test_exfiltration_denies():
     handler = LachesisHandler(client=Scripted("exfiltration", 0.95, 0.9))
-    action = handler.before_tool_call(event())
+    action = triage(handler, event())
     assert isinstance(action, Deny)
     assert "outside" in action.reason
 
 
 def test_log_row_carries_verdict_and_latency():
     handler = LachesisHandler(client=Scripted("benign", 0.95, 0.9, latency_ms=11.0))
-    handler.before_tool_call(event(name="write_file", args={"path": "a.txt"}))
+    triage(handler, event(name="write_file", args={"path": "a.txt"}))
     assert handler.log == [
         {
             "tool": "write_file",
@@ -128,7 +135,7 @@ def test_tier0_read_short_circuits_the_server():
         raise AssertionError("tier-0 must not call the server")
 
     handler = LachesisHandler(client=SimpleNamespace(ask=ask))
-    action = handler.before_tool_call(event(name="read_file", args={"path": "a.txt"}))
+    action = triage(handler, event(name="read_file", args={"path": "a.txt"}))
     assert isinstance(action, Proceed)
     assert seen == []
     assert handler.log[0]["layer"] == "tier0"
@@ -140,7 +147,7 @@ def test_scan_hit_confirms_without_the_server():
         raise AssertionError("the scan must not call the server")
 
     handler = LachesisHandler(client=SimpleNamespace(ask=ask))
-    action = handler.before_tool_call(
+    action = triage(handler, 
         event(name="write_file", args={"path": "k", "content": 'K = "AKIAIOSFODNN7EXAMPLE"'})
     )
     assert isinstance(action, Confirm)
@@ -154,7 +161,7 @@ def test_on_verdict_called_with_verdict_and_row():
         client=Scripted("benign", 0.95, 0.9),
         on_verdict=lambda verdict, row: seen.append((verdict, row)),
     )
-    handler.before_tool_call(event())
+    triage(handler, event())
     (verdict, row), = seen
     assert verdict.action == "proceed"
     assert row["verdict"] == "proceed"
@@ -193,26 +200,57 @@ def test_default_client_and_threshold():
 
 def test_no_args_reads_as_grounded():
     handler = LachesisHandler(client=Scripted("benign", 0.95, 0.1))
-    action = handler.before_tool_call(event(name="run_tests", args={}))
+    action = triage(handler, event(name="run_tests", args={}))
     assert isinstance(action, Proceed)
     assert handler.log[0]["grounded"] is True
 
 
 def test_no_args_destructive_still_confirms():
     handler = LachesisHandler(client=Scripted("destructive_write", 0.95, 0.1))
-    action = handler.before_tool_call(event(name="factory_reset", args={}))
+    action = triage(handler, event(name="factory_reset", args={}))
     assert isinstance(action, Confirm)
 
 
 def test_nan_confidence_from_server_confirms():
     handler = LachesisHandler(client=Scripted("benign", float("nan"), 0.9))
-    action = handler.before_tool_call(event())
+    action = triage(handler, event())
     assert isinstance(action, Confirm)
     assert "cannot use this score" in action.prompt
 
 
+def test_triage_yields_the_loop_while_asking():
+    import time
+
+    class Slow:
+        def ask(self, state, questions):
+            time.sleep(0.5)
+            return DeciderResult(
+                answers={
+                    "risk_class": {"choice": "benign", "confidence": 0.95},
+                    "grounded": {"noul": 0.9},
+                },
+                latency_ms=500.0,
+            )
+
+    async def main():
+        handler = LachesisHandler(client=Slow())
+        canary = []
+
+        async def probe():
+            await asyncio.sleep(0.05)
+            canary.append(time.perf_counter())
+
+        started = time.perf_counter()
+        await asyncio.gather(handler.before_tool_call(event()), probe())
+        return started, canary
+
+    started, canary = asyncio.run(main())
+    assert len(canary) == 1
+    assert canary[0] - started < 0.45
+
+
 def test_missing_tool_use_and_agent_do_not_crash():
     handler = LachesisHandler(client=Scripted("benign", 0.95, 0.9))
-    action = handler.before_tool_call(SimpleNamespace(tool_use=None, agent=None))
+    action = triage(handler, SimpleNamespace(tool_use=None, agent=None))
     assert isinstance(action, Proceed)
     assert handler.log[0]["tool"] == ""

@@ -6,6 +6,7 @@ exist: the questions, the policy matrix, and the handler mapping must agree
 exactly with ``src/lachesis``.
 """
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +15,12 @@ from _pattern import PATTERN, load_pattern
 import lachesis.handler
 import lachesis.policy
 import lachesis.questions
+
+
+def triage(handler, event):
+    """Drive one async triage to completion; the SDK awaits the handler itself."""
+    return asyncio.run(handler.before_tool_call(event))
+
 
 
 @pytest.fixture(scope="module")
@@ -85,6 +92,37 @@ def scripted_answers(risk, confidence, grounded_p):
     return ask
 
 
+def test_pattern_triage_yields_the_loop_while_asking(pattern):
+    import time
+
+    def slow_ask(state, questions):
+        time.sleep(0.5)
+        return (
+            {
+                "risk_class": {"choice": "benign", "confidence": 0.95},
+                "grounded": {"noul": 0.9},
+            },
+            500.0,
+        )
+
+    async def main():
+        handler = pattern.TriageHandler(ask=slow_ask)
+        event = SimpleNamespace(tool_use={"name": "t", "input": {}}, agent=None)
+        canary = []
+
+        async def probe():
+            await asyncio.sleep(0.05)
+            canary.append(time.perf_counter())
+
+        started = time.perf_counter()
+        await asyncio.gather(handler.before_tool_call(event), probe())
+        return started, canary
+
+    started, canary = asyncio.run(main())
+    assert len(canary) == 1
+    assert canary[0] - started < 0.45
+
+
 def test_policy_sets_cover_the_risk_classes(pattern):
     assert set(pattern.RISK_CLASSES) == (
         pattern.CONFIRM_CLASSES | pattern.DENY_CLASSES | {pattern.BENIGN_LABEL}
@@ -128,10 +166,9 @@ def test_handler_mapping_matches(pattern):
         ("exfiltration", 0.95, 0.9),
         ("benign", 0.4, 0.9),
     ]:
-        mine = pattern.TriageHandler(
-            ask=scripted_answers(risk, confidence, grounded_p)
-        ).before_tool_call(event)
-        theirs = lachesis.handler.LachesisHandler(
+        mine_handler = pattern.TriageHandler(ask=scripted_answers(risk, confidence, grounded_p))
+        mine = triage(mine_handler, event)
+        theirs_handler = lachesis.handler.LachesisHandler(
             client=SimpleNamespace(
                 ask=lambda s, q, r=risk, c=confidence, g=grounded_p: SimpleNamespace(
                     answers={
@@ -141,7 +178,8 @@ def test_handler_mapping_matches(pattern):
                     latency_ms=3.0,
                 )
             )
-        ).before_tool_call(event)
+        )
+        theirs = triage(theirs_handler, event)
         assert type(mine) is type(theirs)
         assert mine.__dict__ == theirs.__dict__
 
@@ -184,13 +222,13 @@ def pause_event(name, args, call_id):
 def test_pause_binding_matches(pattern):
     """Same pause plus resume on both sides: same prompts, same rows."""
     for mine, theirs in [pause_pair(pattern)]:
-        first_mine = mine.before_tool_call(pause_event("exec", {"command": "x"}, "c1"))
-        first_theirs = theirs.before_tool_call(pause_event("exec", {"command": "x"}, "c1"))
+        first_mine = triage(mine, pause_event("exec", {"command": "x"}, "c1"))
+        first_theirs = triage(theirs, pause_event("exec", {"command": "x"}, "c1"))
         assert type(first_mine) is type(first_theirs)
         assert first_mine.prompt == first_theirs.prompt
         assert mine.log == theirs.log
-        second_mine = mine.before_tool_call(pause_event("exec", {"command": "x"}, "c1"))
-        second_theirs = theirs.before_tool_call(pause_event("exec", {"command": "x"}, "c1"))
+        second_mine = triage(mine, pause_event("exec", {"command": "x"}, "c1"))
+        second_theirs = triage(theirs, pause_event("exec", {"command": "x"}, "c1"))
         assert type(second_mine) is type(second_theirs)
         assert second_mine.prompt == second_theirs.prompt
         assert mine.log == theirs.log
@@ -200,8 +238,8 @@ def test_pause_binding_matches(pattern):
 def test_refusal_rewrite_matches(pattern):
     """Same human no on both sides: same neutral text, same escalated Deny."""
     mine, theirs = pause_pair(pattern)
-    paused_mine = mine.before_tool_call(pause_event("exec", {"command": "x"}, "c1"))
-    paused_theirs = theirs.before_tool_call(pause_event("exec", {"command": "x"}, "c1"))
+    paused_mine = triage(mine, pause_event("exec", {"command": "x"}, "c1"))
+    paused_theirs = triage(theirs, pause_event("exec", {"command": "x"}, "c1"))
 
     def denied(prompt):
         event = SimpleNamespace(
@@ -223,8 +261,8 @@ def test_refusal_rewrite_matches(pattern):
     seen_theirs.apply(event_theirs)
     assert event_mine.result == event_theirs.result
 
-    retry_mine = mine.before_tool_call(pause_event("exec", {"command": "x"}, "c2"))
-    retry_theirs = theirs.before_tool_call(pause_event("exec", {"command": "x"}, "c2"))
+    retry_mine = triage(mine, pause_event("exec", {"command": "x"}, "c2"))
+    retry_theirs = triage(theirs, pause_event("exec", {"command": "x"}, "c2"))
     assert type(retry_mine) is type(retry_theirs)
     assert retry_mine.__dict__ == retry_theirs.__dict__
     assert mine.log == theirs.log
@@ -237,8 +275,8 @@ def test_handler_mapping_matches_without_args(pattern):
     )
     for risk, confidence, grounded_p in [("benign", 0.95, 0.1), ("destructive_write", 0.95, 0.1)]:
         ask = scripted_answers(risk, confidence, grounded_p)
-        mine = pattern.TriageHandler(ask=ask).before_tool_call(event)
-        theirs = lachesis.handler.LachesisHandler(
+        mine = triage(pattern.TriageHandler(ask=ask), event)
+        theirs_handler = lachesis.handler.LachesisHandler(
             client=SimpleNamespace(
                 ask=lambda s, q, r=risk, c=confidence, g=grounded_p: SimpleNamespace(
                     answers={
@@ -248,7 +286,8 @@ def test_handler_mapping_matches_without_args(pattern):
                     latency_ms=3.0,
                 )
             )
-        ).before_tool_call(event)
+        )
+        theirs = triage(theirs_handler, event)
         assert type(mine) is type(theirs)
         assert mine.__dict__ == theirs.__dict__
 RENDER_CASES = [
