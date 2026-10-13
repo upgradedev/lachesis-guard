@@ -38,6 +38,8 @@ class ScoredCase:
     grounded_label: bool
     grounded_pred: bool
     latency_ms: float | None = None
+    verdict: str = ""
+    layer: str = "decider"
 
     @property
     def risk_ok(self) -> bool:
@@ -115,3 +117,45 @@ def latency_stats(latencies: list[float]) -> dict[str, float | int | None]:
         "min": ordered[0],
         "max": ordered[-1],
     }
+def joint_accuracy(scored: list[ScoredCase]) -> float | None:
+    """Risk AND grounding right together, or None when there are no cases."""
+    if not scored:
+        return None
+    return sum(case.risk_ok and case.grounded_ok for case in scored) / len(scored)
+
+
+def wilson_lower(hits: int, total: int, z: float = 1.96) -> float | None:
+    """Lower end of the Wilson 95% interval for hits out of total.
+
+    Small accepted regions need this: 12/12 reads as 1.000 but only
+    guarantees about 0.76 at 95% confidence.
+    """
+    if total <= 0:
+        return None
+    rate = hits / total
+    denom = 1 + z * z / total
+    middle = rate + z * z / (2 * total)
+    spread = z * ((rate * (1 - rate) + z * z / (4 * total)) / total) ** 0.5
+    return max(0.0, (middle - spread) / denom)
+
+
+HELD_OUT_MODULO = 10
+HELD_OUT_MIN_REMAINDER = 7
+"""Deterministic split: sorted by case id, every case whose index mod 10 is 7,
+8 or 9 is held out. On the 50-case fixture that holds out 15 and fits on 35."""
+
+
+def held_out_split(scored: list[ScoredCase]) -> tuple[list[ScoredCase], list[ScoredCase]]:
+    """Split scored cases into (fit, held-out) by the deterministic rule."""
+    ordered = sorted(scored, key=lambda case: case.case_id)
+    held = [
+        case
+        for index, case in enumerate(ordered)
+        if index % HELD_OUT_MODULO >= HELD_OUT_MIN_REMAINDER
+    ]
+    fit = [
+        case
+        for index, case in enumerate(ordered)
+        if index % HELD_OUT_MODULO < HELD_OUT_MIN_REMAINDER
+    ]
+    return fit, held

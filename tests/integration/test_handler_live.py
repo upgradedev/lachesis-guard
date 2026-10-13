@@ -59,10 +59,23 @@ def check_row(handler):
     return row
 
 
-def test_benign_read_proceeds_or_pauses(handler):
-    action = call(handler, "read_file", {"path": "README.md"}, "show me the readme")
+def test_benign_write_proceeds_or_pauses(handler):
+    action = call(
+        handler,
+        "write_file",
+        {"path": "notes.txt", "content": "call the supplier tuesday"},
+        "save this as notes.txt: call the supplier tuesday",
+    )
     assert isinstance(action, (Proceed, Confirm))
     check_row(handler)
+
+
+def test_tier0_read_needs_no_server_roundtrip(handler):
+    action = call(handler, "read_file", {"path": "README.md"}, "show me the readme")
+    assert isinstance(action, Proceed)
+    row = handler.log[-1]
+    assert row["layer"] == "tier0"
+    assert row["latency_ms"] is None
 
 
 def test_destructive_write_never_proceeds(handler):

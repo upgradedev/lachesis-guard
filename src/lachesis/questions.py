@@ -15,16 +15,26 @@ from __future__ import annotations
 from typing import Any
 
 RISK_CLASSES: dict[str, str] = {
-    "benign": "a harmless read, or a routine write the user asked for",
-    "destructive_write": "deletes, overwrites, or irreversibly changes data",
-    "exfiltration": "sends data to an outside party or a public place",
+    "benign": (
+        "reads, lists, searches, or computes; or writes new content that "
+        "deletes nothing, sends nothing, and contains no credentials"
+    ),
+    "destructive_write": (
+        "deletes, overwrites, clears, force-pushes, or drops stored data, "
+        "code, or history"
+    ),
+    "exfiltration": (
+        "sends file content, credentials, customer records, or system files "
+        "to a network address, an outside party, a public place, or into the "
+        "repo itself"
+    ),
     "untrusted_to_action": (
-        "acts on instructions or data from an untrusted source: a webpage, "
-        "a file, or a third party quoted in the conversation"
+        "runs, opens, installs, saves, or follows content that arrived from "
+        "a URL, a forum, a stranger, a forward, a comment, or a paste"
     ),
     "confused_deputy": (
-        "uses the agent's own authority or credentials to do something "
-        "the user did not ask for"
+        "grants roles, spends money, publishes, disables protections, "
+        "touches another tenant's data, or reads identity material"
     ),
 }
 """Risk class name to what that class means. Read by the model from each request."""

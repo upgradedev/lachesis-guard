@@ -199,3 +199,53 @@ def test_hook_render_matches_package(hook, messages, tool, args, max_tokens):
     assert hook.render_state_from_messages(messages, tool, args, max_tokens) == (
         lachesis.handler.render_state(messages, tool, args, max_tokens)
     )
+def run_hook_named(tool_name, tool_input, url):
+    import os
+
+    env = dict(os.environ, STRANDS_DECIDER_URL=url)
+    payload = json.dumps(
+        {
+            "session_id": "s",
+            "transcript_path": "",
+            "cwd": "/tmp/x",
+            "hook_event_name": "PreToolUse",
+            "tool_name": tool_name,
+            "tool_input": tool_input,
+        }
+    )
+    return subprocess.run(
+        [sys.executable, str(HOOK)],
+        input=payload.encode(),
+        capture_output=True,
+        env=env,
+        timeout=60,
+    )
+
+
+def test_hook_scan_denies_without_server():
+    completed = run_hook_named(
+        "Write",
+        {"path": "k", "content": 'K = "AKIAIOSFODNN7EXAMPLE"'},
+        f"http://127.0.0.1:{closed_port()}",
+    )
+    assert completed.returncode == 0
+    printed = json.loads(completed.stdout.decode())
+    reason = printed["hookSpecificOutput"]["permissionDecisionReason"]
+    assert printed["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert reason.startswith("Lachesis refused: scan")
+
+
+def test_hook_tier0_read_allows_without_server():
+    completed = run_hook_named(
+        "Read", {"file_path": "a.txt"}, f"http://127.0.0.1:{closed_port()}"
+    )
+    assert completed.returncode == 0
+    assert completed.stdout.decode().strip() == ""
+
+
+def test_hook_secret_path_read_still_needs_the_server():
+    completed = run_hook_named(
+        "Read", {"file_path": ".env"}, f"http://127.0.0.1:{closed_port()}"
+    )
+    assert completed.returncode == 1
+    assert "no Decider server" in completed.stderr.decode()
