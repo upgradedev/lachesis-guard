@@ -35,7 +35,7 @@ jobs:
 
       - name: Serve the pinned model
         run: |
-          nohup python -m strands_decider serve StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --device cpu --port 8099 > server.log 2>&1 &
+          nohup strands-decider serve StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --device cpu --port 8099 > server.log 2>&1 &
           echo $! > server.pid
           for i in $(seq 1 60); do
             if curl -sf http://127.0.0.1:8099/health | grep -q ok; then
