@@ -121,6 +121,15 @@ def test_pending_interrupts_empty_when_no_session(demo):
     assert demo.pending_interrupts(manager, "s", "a") == []
 
 
+def test_build_agent_wires_the_triage_handler(demo, tmp_path, monkeypatch):
+    from lachesis.handler import LachesisHandler
+
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "eu-west-1")
+    triage = LachesisHandler()
+    agent = demo.build_agent("eu.test-model", [], triage, tmp_path / "sessions")
+    assert triage in agent._intervention_registry.handlers
+
+
 def test_print_verdict_shows_confidence(demo, capsys):
     demo.print_verdict(
         SimpleNamespace(action="confirm"),

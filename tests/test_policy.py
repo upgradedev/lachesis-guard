@@ -70,3 +70,28 @@ def test_empty_label_confirms():
 
 def test_default_threshold_is_the_measured_value():
     assert DEFAULT_THRESHOLD == 0.7  # fit 2026-10-11, run 38148045282
+
+
+@pytest.mark.parametrize("confidence", [float("nan"), float("inf"), float("-inf"), -0.1, 1.1])
+@pytest.mark.parametrize("risk", ["benign", "destructive_write", "exfiltration"])
+def test_malformed_confidence_confirms(risk, confidence):
+    verdict = decide(risk, confidence, 1.0)
+    assert verdict.action == CONFIRM
+    assert "cannot use this score" in verdict.message
+    assert "person decides" in verdict.message
+
+
+def test_nan_threshold_confirms():
+    verdict = decide("benign", 0.95, 1.0, threshold=float("nan"))
+    assert verdict.action == CONFIRM
+    assert "cannot use this threshold" in verdict.message
+
+
+def test_infinite_threshold_confirms_everything_without_error():
+    assert decide("benign", 0.95, 1.0, threshold=float("inf")).action == CONFIRM
+
+
+def test_nan_grounding_fails_toward_guide():
+    verdict = decide("benign", 0.95, float("nan"))
+    assert verdict.action == GUIDE
+    assert verdict.grounded is False

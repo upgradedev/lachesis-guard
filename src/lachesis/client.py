@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -31,9 +32,49 @@ DEFAULT_URL = "http://127.0.0.1:8099"
 SERVE_HINT = "strands-decider serve <model> --device cpu --port 8099"
 """How to start a server, shown when nothing is listening."""
 
+PINNED_CHECKPOINT = "StrandsAgents/strands-decider-2B-qwen3.5-v1-2610"
+"""The model the entry was measured on. Startups compare /health against it."""
+
 
 class DeciderUnavailable(RuntimeError):
-    """The Decider server is not answering. Raised with the command that starts one."""
+    """The Decider server is not answering. Raised saying what went wrong."""
+
+
+def serve_hint(url: str) -> str:
+    """The start command for the port the url points at (8099 when unparseable)."""
+    try:
+        port = urllib.parse.urlparse(url).port or 8099
+    except ValueError:
+        port = 8099
+    return f"strands-decider serve <model> --device cpu --port {port}"
+
+
+def _explain(url: str, exc: BaseException) -> DeciderUnavailable:
+    """One DeciderUnavailable that says what actually went wrong.
+
+    ``HTTPError`` is a ``URLError`` subclass, so it is caught first: a 500 is
+    the server failing, not the network missing. Stalls arrive as ``OSError``
+    (``TimeoutError`` since 3.10); unreadable payloads as ``ValueError``,
+    ``KeyError``, ``AttributeError`` or ``TypeError``.
+    """
+    if isinstance(exc, urllib.error.HTTPError):
+        try:
+            body = exc.read().decode("utf-8", "replace")
+        except OSError:
+            body = ""
+        snippet = " ".join(body.split())[:200]
+        return DeciderUnavailable(
+            f"Decider server at {url} answered HTTP {exc.code}: {snippet}"
+        )
+    if isinstance(exc, urllib.error.URLError):
+        return DeciderUnavailable(
+            f"no Decider server at {url} ({exc}). Start one with:\n    {serve_hint(url)}"
+        )
+    if isinstance(exc, OSError):
+        return DeciderUnavailable(
+            f"Decider server at {url} stalled or broke the connection ({exc})"
+        )
+    return DeciderUnavailable(f"Decider server at {url} answered nonsense ({exc})")
 
 
 @dataclass(frozen=True)
@@ -73,25 +114,24 @@ class DeciderClient:
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 payload = json.loads(response.read())
-        except urllib.error.URLError as exc:
-            raise DeciderUnavailable(
-                f"no Decider server at {self.url} ({exc}). Start one with:\n    {SERVE_HINT}"
-            ) from exc
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            raise _explain(self.url, exc) from exc
         self.calls += 1
-        usage = payload.get("usage", {})
-        return DeciderResult(
-            answers=payload["answers"],
-            latency_ms=payload.get("latency_ms"),
-            input_tokens=usage.get("input_tokens", 0),
-            output_tokens=usage.get("output_tokens", 0),
-        )
+        try:
+            usage = payload.get("usage", {})
+            return DeciderResult(
+                answers=payload["answers"],
+                latency_ms=payload.get("latency_ms"),
+                input_tokens=usage.get("input_tokens", 0),
+                output_tokens=usage.get("output_tokens", 0),
+            )
+        except (KeyError, AttributeError, TypeError) as exc:
+            raise _explain(self.url, exc) from exc
 
     def health(self) -> dict[str, Any]:
         """The loaded checkpoint, window and device. Raises if nothing is serving."""
         try:
             with urllib.request.urlopen(f"{self.url}/health", timeout=10) as response:
                 return json.loads(response.read())
-        except urllib.error.URLError as exc:
-            raise DeciderUnavailable(
-                f"no Decider server at {self.url} ({exc}). Start one with:\n    {SERVE_HINT}"
-            ) from exc
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            raise _explain(self.url, exc) from exc
