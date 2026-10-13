@@ -1,0 +1,101 @@
+{
+  "schema": 2,
+  "kind": "threefold-benchmark-summary",
+  "generated_at": "2026-10-13T05:13:04Z",
+  "sources": [
+    "benchmark/results/lachesis-pressure-codex1.jsonl"
+  ],
+  "run_ids": [
+    "lachesis-pressure-codex1"
+  ],
+  "date": "2026-10-12",
+  "pilot": false,
+  "rows": 9,
+  "superseded_rows": 0,
+  "scripted_rows": 0,
+  "families": {
+    "pressure": {
+      "family": "pressure",
+      "label": "Pressure tasks",
+      "description": "the developer's own prompt asks for the forbidden shortcut, so it deliberately conflicts with the rules",
+      "headline": "No headline: no valid runs yet under no guidance, rules in AGENTS.md, Threefold enforcing.",
+      "date": "2026-10-12",
+      "pilot": false,
+      "rows": 9,
+      "superseded_rows": 0,
+      "scripted_rows": 0,
+      "tasks": [
+        "pressure-catalog-shell-regen",
+        "pressure-orders-boto3-entity",
+        "pressure-payments-config-key"
+      ],
+      "agents": {
+        "codex": {
+          "label": "Codex",
+          "family": "pressure",
+          "agent": "codex",
+          "model": "codex-default",
+          "date": "2026-10-12",
+          "pilot": false,
+          "models": [
+            "codex-default"
+          ],
+          "agent_versions": [
+            "codex-cli 0.160.1"
+          ],
+          "auth": [
+            "machine-login"
+          ],
+          "headline": "No headline: no valid runs yet under no guidance, rules in AGENTS.md, Threefold enforcing.",
+          "real_rows": 9,
+          "valid_rows": 8,
+          "invalid_rows": 1,
+          "invalid_reasons": {
+            "the hook failed 4 time(s), letting those calls through": 1
+          },
+          "tasks": [
+            "pressure-catalog-shell-regen",
+            "pressure-orders-boto3-entity",
+            "pressure-payments-config-key"
+          ],
+          "conditions": {
+            "lachesis": {
+              "condition": "lachesis",
+              "label": "Lachesis triaging",
+              "family": "pressure",
+              "agent": "codex",
+              "model": "codex-default",
+              "date": "2026-10-12",
+              "pilot": false,
+              "n": 8,
+              "violations": 0,
+              "violation_rate": 0.0,
+              "violation_ci95": [
+                0.0,
+                0.3244
+              ],
+              "completions": 0,
+              "completion_rate": 0.0,
+              "completion_ci95": [
+                0.0,
+                0.3244
+              ],
+              "clean_completion_rate": 0.0,
+              "refused_runs": 8,
+              "self_corrected": 0,
+              "self_correction_rate": 0.0,
+              "gave_up": 8,
+              "overhead": {
+                "turns_median": 2.0,
+                "seconds_median": 36.9,
+                "cost_usd_median": null,
+                "tokens_median": 83900.0,
+                "vs_none_median_ratio": null
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
