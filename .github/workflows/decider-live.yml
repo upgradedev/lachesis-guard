@@ -48,8 +48,8 @@ jobs:
           pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cpu
           pip install strands-decider==0.1.0
           pip install -e ".[dev]"
-          pip show strands-decider | head -2
-          pip show strands-agents | head -2
+          pip show strands-decider
+          pip show strands-agents
 
       - name: Serve pinned model on CPU
         run: |
