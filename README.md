@@ -75,6 +75,9 @@ a README another builder can follow in five minutes.
 - The agent is a Strands agent. You run `scripts/demo_agent.py` where you like; its model is
   Amazon Bedrock. Pass a Bedrock model id as `--model` (the recording used
   `eu.anthropic.claude-sonnet-5-5` in eu-west-1).
+  The same run also happens entirely on one EC2 box against the box's
+  local Decider server, powered by a least-privilege instance role; see
+  [`docs/aws-run.md`](docs/aws-run.md).
 - Strands Decider 2B, pinned to `StrandsAgents/strands-decider-2B-qwen3.5-v1-2610` (Apache-2.0,
   base `Qwen/Qwen3.5-2B-Base`), serves on CPU: on an EC2 t3.xlarge box for the demo and the
   benchmark, and on a GitHub Actions runner in CI. The agent reads `STRANDS_DECIDER_URL`.
