@@ -29,9 +29,11 @@ human prompt) is rewritten after the fact to "a person declined this call".
 from __future__ import annotations
 
 import asyncio
+import datetime
 import hashlib
 import json
 from collections.abc import Callable, Mapping
+from pathlib import Path
 from typing import Any
 
 from strands.interventions import (
@@ -173,7 +175,13 @@ def _neutralize(declined: str) -> Callable[[Any], None]:
 
 
 class LachesisHandler(InterventionHandler):
-    """Score every tool call for risk before it runs, with Decider 2B."""
+    """Score every tool call for risk before it runs, with Decider 2B.
+
+    With ``audit_path`` set, each triage appends one JSON line there (tool,
+    arguments as a sha256 hash, risk, confidence, verdict, layer, latency),
+    and a paused call later gains a ``human_answer`` line with the person's
+    decision, joined by ``call_id``.
+    """
 
     name = "lachesis-guard"
 
@@ -183,14 +191,31 @@ class LachesisHandler(InterventionHandler):
         threshold: float = DEFAULT_THRESHOLD,
         on_verdict: VerdictCallback | None = None,
         max_tokens: int | None = None,
+        audit_path: str | Path | None = None,
     ) -> None:
         self._client = client or DeciderClient()
         self._threshold = threshold
         self._on_verdict = on_verdict
         self._max_tokens = max_tokens
+        self._audit_path = Path(audit_path) if audit_path is not None else None
         self.log: list[dict[str, Any]] = []
         self._session: dict[str, dict[str, Any]] = {}
         """Local verdict/refusal/pause stores, used when the agent has no state."""
+
+    def _audit(self, line: dict[str, Any]) -> None:
+        """Append one JSON audit line; a failed write never breaks triage."""
+        if self._audit_path is None:
+            return
+        try:
+            self._audit_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._audit_path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(line, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
+
+    @staticmethod
+    def _now() -> str:
+        return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
 
     async def _window_tokens(self) -> int:
         """The server window for the state budget, cached after the first read."""
@@ -225,7 +250,7 @@ class LachesisHandler(InterventionHandler):
             if isinstance(cached, dict) and cached.get("prompt"):
                 # Re-entry after a pause: the SAME Confirm, no new Decider call.
                 # Anything else would skip the stored human answer.
-                return self._resume_confirm(tool_name, cached)
+                return self._resume_confirm(tool_name, cached, call_id)
 
         if _refusal_key(tool_name, arguments) in self._session_dict(agent, STATE_REFUSALS):
             # An exact repeat of a refused call: denied, no new Decider call.
@@ -271,7 +296,18 @@ class LachesisHandler(InterventionHandler):
         call_id = str(tool_use.get("toolUseId") or tool_use.get("id") or "")
         agent = getattr(event, "agent", None)
         denied = _result_text(getattr(event, "result", None)).startswith(CONFIRM_DENIED_PREFIX)
-        if call_id and self._unmark_paused(agent, call_id) and denied:
+        was_paused = bool(call_id) and self._unmark_paused(agent, call_id)
+        if was_paused:
+            self._audit(
+                {
+                    "ts": self._now(),
+                    "tool": str(tool_use.get("name") or ""),
+                    "call_id": call_id,
+                    "event": "human_answer",
+                    "human": "denied" if denied else "approved",
+                }
+            )
+        if was_paused and denied:
             tool_name = str(tool_use.get("name") or "")
             self._add_refusal(agent, _refusal_key(tool_name, tool_use.get("input") or {}))
             if tool_name:
@@ -317,7 +353,7 @@ class LachesisHandler(InterventionHandler):
         verdicts[call_id] = record
         self._session_put(agent, STATE_VERDICTS, _cap(verdicts))
 
-    def _resume_confirm(self, tool_name: str, cached: dict[str, Any]) -> Any:
+    def _resume_confirm(self, tool_name: str, cached: dict[str, Any], call_id: str = "") -> Any:
         """Re-issue the cached Confirm after a pause, without calling Decider."""
         row = {
             "tool": tool_name,
@@ -330,6 +366,21 @@ class LachesisHandler(InterventionHandler):
             "cached": True,
         }
         self.log.append(row)
+        self._audit(
+            {
+                "ts": self._now(),
+                "tool": tool_name,
+                "call_id": call_id,
+                "risk": row["risk"],
+                "confidence": row["confidence"],
+                "grounded": row["grounded"],
+                "verdict": "confirm",
+                "layer": row["layer"],
+                "latency_ms": None,
+                "cached": True,
+                "human": None,
+            }
+        )
         if self._on_verdict is not None:
             self._on_verdict(
                 Verdict(
@@ -384,6 +435,21 @@ class LachesisHandler(InterventionHandler):
             "latency_ms": latency_ms,
         }
         self.log.append(row)
+        self._audit(
+            {
+                "ts": self._now(),
+                "tool": tool_name,
+                "args": _refusal_key(tool_name, arguments),
+                "call_id": call_id,
+                "risk": row["risk"],
+                "confidence": row["confidence"],
+                "grounded": row["grounded"],
+                "verdict": row["verdict"],
+                "layer": row["layer"],
+                "latency_ms": row["latency_ms"],
+                "human": None,
+            }
+        )
         if self._on_verdict is not None:
             self._on_verdict(verdict, row)
 
