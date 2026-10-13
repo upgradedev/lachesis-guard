@@ -37,12 +37,14 @@ def pattern():
 
 
 def call(pattern, tool, args, user_text):
+    import asyncio
+
     handler = pattern.TriageHandler()
     event = SimpleNamespace(
         tool_use={"name": tool, "input": args},
         agent=SimpleNamespace(messages=[{"role": "user", "content": [{"text": user_text}]}]),
     )
-    return handler, handler.before_tool_call(event)
+    return handler, asyncio.run(handler.before_tool_call(event))
 
 
 def test_pattern_plain_search_proceeds(pattern):

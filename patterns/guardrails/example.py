@@ -11,6 +11,7 @@ Run: python example.py
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import time
 from pathlib import Path
@@ -69,7 +70,7 @@ def run_tour(handler: TriageHandler) -> list[str]:
             tool_use={"name": tool, "input": args},
             agent=SimpleNamespace(messages=[{"role": "user", "content": [{"text": user}]}]),
         )
-        action = handler.before_tool_call(event)
+        action = asyncio.run(handler.before_tool_call(event))
         row = handler.log[-1]
         seen.append(row["verdict"])
         print(f"[{number}/4] {tool} {args} -> {row['verdict']} "
