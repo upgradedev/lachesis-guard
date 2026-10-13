@@ -136,3 +136,37 @@ def test_handler_mapping_matches_without_args(pattern):
         ).before_tool_call(event)
         assert type(mine) is type(theirs)
         assert mine.__dict__ == theirs.__dict__
+RENDER_CASES = [
+    ([{"role": "user", "content": [{"text": "hi"}]}], "t", {"a": 1}, 4096),
+    ([], "write", {"path": "a/b"}, 4096),
+    (
+        [
+            {"role": "user", "content": [{"text": "fetch it"}]},
+            {
+                "role": "assistant",
+                "content": [{"toolUse": {"toolUseId": "u1", "name": "fetch", "input": {}}}] ,
+            },
+            {
+                "role": "user",
+                "content": [{"toolResult": {"toolUseId": "u1", "content": "page"}}],
+            },
+        ],
+        "write",
+        {"path": "out"},
+        4096,
+    ),
+    (
+        [{"role": "user", "content": [{"type": "text", "text": "x"}]}],
+        "t",
+        {"k": "διάβασε"},
+        4096,
+    ),
+    ([{"role": "user", "content": [{"text": "a" * 5000}]}], "t", {}, 100),
+]
+
+
+@pytest.mark.parametrize("messages,tool,args,max_tokens", RENDER_CASES)
+def test_render_matches_on_every_shape(pattern, messages, tool, args, max_tokens):
+    assert pattern.render_state(messages, tool, args, max_tokens) == (
+        lachesis.handler.render_state(messages, tool, args, max_tokens)
+    )

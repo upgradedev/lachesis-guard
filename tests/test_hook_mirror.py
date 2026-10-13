@@ -176,3 +176,26 @@ def test_hook_rejects_non_json_stdin():
     )
     assert completed.returncode == 1
     assert "not JSON" in completed.stderr.decode()
+HOOK_RENDER_CASES = [
+    ([{"role": "user", "content": [{"text": "hi"}]}], "Write", {"a": 1}, 4096),
+    ([], "Bash", {"command": "ls"}, 4096),
+    (
+        [
+            {"role": "assistant", "content": [{"toolUse": {"toolUseId": "u", "name": "Read"}}]},
+            {"role": "user", "content": [{"toolResult": {"toolUseId": "u", "content": "f"}}]},
+        ],
+        "Edit",
+        {"p": "x"},
+        4096,
+    ),
+    ([{"role": "user", "content": [{"text": "z" * 9000}]}], "Bash", {}, 200),
+]
+
+
+@pytest.mark.parametrize("messages,tool,args,max_tokens", HOOK_RENDER_CASES)
+def test_hook_render_matches_package(hook, messages, tool, args, max_tokens):
+    import lachesis.handler
+
+    assert hook.render_state_from_messages(messages, tool, args, max_tokens) == (
+        lachesis.handler.render_state(messages, tool, args, max_tokens)
+    )

@@ -62,7 +62,9 @@ class DeciderClient:
         self, state: Any, questions: Mapping[str, Mapping[str, Any]]
     ) -> DeciderResult:
         """Evaluate ``state`` against ``questions``; answers come back under the same keys."""
-        body = json.dumps({"state": state, "questions": dict(questions)}).encode()
+        body = json.dumps(
+            {"state": state, "questions": dict(questions)}, ensure_ascii=False
+        ).encode()
         request = urllib.request.Request(
             f"{self.url}/v1/systemone",
             data=body,

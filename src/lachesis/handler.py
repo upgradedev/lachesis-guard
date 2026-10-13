@@ -27,6 +27,7 @@ from strands.interventions import Confirm, Deny, Guide, InterventionHandler, Pro
 from lachesis.client import DeciderClient
 from lachesis.policy import DEFAULT_THRESHOLD, DENY, GUIDE, PROCEED, Verdict, decide
 from lachesis.questions import lachesis_questions
+from lachesis.render import DEFAULT_MAX_TOKENS, render_state
 
 VerdictCallback = Callable[[Verdict, dict[str, Any]], None]
 """Called after every triage with the verdict and the logged row."""
@@ -39,40 +40,12 @@ PROMPT_ARGS_CHARS = 2000
 def format_arguments(arguments: Any, limit: int = PROMPT_ARGS_CHARS) -> str:
     """The proposed arguments as one JSON line, truncated with a note when long."""
     try:
-        text = json.dumps(arguments)
+        text = json.dumps(arguments, ensure_ascii=False)
     except (TypeError, ValueError):
         text = str(arguments)
     if len(text) > limit:
         return text[:limit] + f"... [{len(text) - limit} more characters]"
     return text
-
-
-def render_state(messages: Any, tool_name: str, arguments: Any) -> str:
-    """Flatten the conversation plus the proposed call into the state Decider reads."""
-    lines: list[str] = []
-    if isinstance(messages, list):
-        for message in messages:
-            if not isinstance(message, dict):
-                continue
-            role = message.get("role", "unknown")
-            content = message.get("content", [])
-            blocks = content if isinstance(content, list) else [content]
-            for block in blocks:
-                if isinstance(block, dict) and "text" in block:
-                    lines.append(f"{role}: {block['text']}")
-                elif isinstance(block, str):
-                    lines.append(f"{role}: {block}")
-    conversation = "\n".join(lines) if lines else "(no conversation yet)"
-    try:
-        args = json.dumps(arguments)
-    except (TypeError, ValueError):
-        args = str(arguments)
-    return (
-        "A conversation between a user and an AI assistant is below, followed by a "
-        "tool call the assistant now wants to make.\n\n"
-        f"--- CONVERSATION ---\n{conversation}\n\n"
-        f"--- PROPOSED TOOL CALL ---\ntool: {tool_name}\narguments: {args}"
-    )
 
 
 class LachesisHandler(InterventionHandler):
@@ -85,11 +58,27 @@ class LachesisHandler(InterventionHandler):
         client: DeciderClient | None = None,
         threshold: float = DEFAULT_THRESHOLD,
         on_verdict: VerdictCallback | None = None,
+        max_tokens: int | None = None,
     ) -> None:
         self._client = client or DeciderClient()
         self._threshold = threshold
         self._on_verdict = on_verdict
+        self._max_tokens = max_tokens
         self.log: list[dict[str, Any]] = []
+
+    def _window_tokens(self) -> int:
+        """The server window for the state budget, cached after the first read."""
+        if self._max_tokens is None:
+            self._max_tokens = DEFAULT_MAX_TOKENS
+            health = getattr(self._client, "health", None)
+            if callable(health):
+                try:
+                    window = int(health().get("max_length", 0) or 0)
+                except (ValueError, TypeError, AttributeError, RuntimeError, OSError):
+                    window = 0
+                if window > 0:
+                    self._max_tokens = window
+        return self._max_tokens
 
     def before_tool_call(self, event: Any, **kwargs: Any) -> Any:
         """Triage one proposed tool call; see the module docstring for the mapping."""
@@ -98,7 +87,7 @@ class LachesisHandler(InterventionHandler):
         arguments = tool_use.get("input") or {}
         messages = getattr(getattr(event, "agent", None), "messages", [])
 
-        state = render_state(messages, tool_name, arguments)
+        state = render_state(messages, tool_name, arguments, self._window_tokens())
         result = self._client.ask(state, lachesis_questions())
         risk_answer = result.answers.get("risk_class", {})
         grounded_answer = result.answers.get("grounded", {})
