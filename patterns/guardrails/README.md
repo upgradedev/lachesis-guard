@@ -52,9 +52,9 @@ python example.py
 The tour drives four scripted tool calls through the handler and prints each
 verdict: a Proceed, a Guide, a Confirm with the pause a person would see, and
 a Deny. It takes about 40 seconds on CPU once the server is up (40.7 s on an
-EC2 t3.xlarge; the CI tour job prints its own time), plus the one-off model
-download. It needs no AWS account. A clean-container CI job runs these exact
-commands and fails unless all four verdicts fire.
+EC2 t3.xlarge, 40.2 s in CI run 38383159931), plus the one-off model download.
+It needs no AWS account. A clean-container CI job runs these exact commands
+and fails unless all four verdicts fire.
 
 The server needs a machine that fits the 2B model in fp32 on CPU: we run an
 EC2 t3.xlarge (4 vCPU, 16 GB RAM); a t3.large (2 vCPU, 8 GB) OOM-killed while
