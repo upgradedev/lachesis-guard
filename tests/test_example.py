@@ -76,6 +76,17 @@ def test_confine_keeps_tools_in_the_notebook(example, tmp_path):
         example.confine(tmp_path, "sub/../../..")
 
 
+def test_turn_budget_stops_past_the_cap(example):
+    budget = example.TurnBudget(max_turns=1)
+    budget._count(None)
+    try:
+        budget._count(None)
+    except RuntimeError as exc:
+        assert "example budget" in str(exc)
+    else:
+        raise AssertionError("the budget did not stop the run")
+
+
 def test_agent_mode_needs_a_model_in_env(example, monkeypatch, capsys):
     monkeypatch.delenv("LACHESIS_EXAMPLE_MODEL", raising=False)
     assert example.main(["example.py", "--agent"]) == 1

@@ -26,7 +26,9 @@ Every triage prints its verdict line with the confidence: that is the footage.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -38,7 +40,10 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "patterns" / "guardrails"))
 
+from botocore.config import Config  # noqa: E402
 from strands import Agent, tool  # noqa: E402
+from strands.hooks import BeforeModelCallEvent  # noqa: E402
+from strands.models import BedrockModel  # noqa: E402
 from strands.session import FileSessionManager  # noqa: E402
 from triage import run_with_human  # noqa: E402  # the pattern's resume loop, shared
 
@@ -53,6 +58,33 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 AGENT_ID = "demo"
 SESSION_ID = "demo"
 STAGING_KEY_PLACEHOLDER = "<staging-key>"
+MAX_TURNS = 40
+"""Model-turn budget for one demo run (M15): runaway loops stop here."""
+MAX_RESPONSE_TOKENS = 4096
+"""Per-response output cap; MAX_TURNS times this bounds total output."""
+
+_WORKDIR: Path | None = None
+_BASELINE: dict[str, str] = {}
+
+
+class TurnBudget:
+    """Counts model turns and stops the demo past its budget.
+
+    The demo is a recording prop, not a service; a confused agent must not
+    bill Bedrock all afternoon while a person decides.
+    """
+
+    def __init__(self, max_turns: int = MAX_TURNS) -> None:
+        self.max_turns = max_turns
+        self.turns = 0
+
+    def register_hooks(self, registry: Any, **kwargs: Any) -> None:
+        registry.add_callback(BeforeModelCallEvent, self._count)
+
+    def _count(self, event: Any) -> None:
+        self.turns += 1
+        if self.turns > self.max_turns:
+            raise RuntimeError(f"demo budget: more than {self.max_turns} model turns")
 
 # Deliberately bad instruction, modeling the failure mode: an agent that takes
 # the forbidden shortcut instead of asking. Lachesis exists to catch exactly this.
@@ -87,8 +119,54 @@ def confine(workdir: Path, path: str) -> Path:
     return target
 
 
+def scrubbed_env() -> dict[str, str]:
+    """Environment for agent-written code: no AWS credentials reachable.
+
+    run_tests executes code the agent wrote, so it gets the owner's shell
+    minus the AWS keys, and the AWS config and credentials files point at
+    the null device: boto in the child finds no profile and no keys.
+    """
+    env = {key: value for key, value in os.environ.items() if not key.startswith("AWS_")}
+    env["AWS_CONFIG_FILE"] = os.devnull
+    env["AWS_SHARED_CREDENTIALS_FILE"] = os.devnull
+    return env
+
+
+def snapshot(workdir: Path) -> dict[str, str]:
+    """Content hash of every workdir file, for change reports."""
+    hashes: dict[str, str] = {}
+    for path in sorted(workdir.rglob("*")):
+        if path.is_file() and path.relative_to(workdir).parts[0] != ".sessions":
+            hashes[str(path.relative_to(workdir))] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return hashes
+
+
+def changed_since(workdir: Path, baseline: dict[str, str]) -> list[str]:
+    """Files created, modified or deleted since the baseline snapshot."""
+    now = snapshot(workdir)
+    changed = [name for name, digest in now.items() if baseline.get(name) != digest]
+    changed += [name for name in baseline if name not in now]
+    return sorted(changed)
+
+
+def sessions_dir(workdir: Path) -> Path:
+    """Session store NEXT TO the workdir, never inside the agent's jail.
+
+    Interrupt state and approvals live here (M14): a confined tool cannot
+    rewrite the record of its own pauses.
+    """
+    return workdir.parent / f"{workdir.name}.sessions"
+
+
 def make_tools(workdir: Path, acceptance: list[str]) -> list:
-    """File tools bound to the workdir. No raw shell: the agent cannot leave it."""
+    """Tools bound to the workdir.
+
+    The file tools confine their paths to the workdir. run_tests executes
+    the task's acceptance suite over files the agent wrote, with AWS
+    credentials scrubbed (see scrubbed_env): confinement guards paths, it
+    does not make arbitrary test code safe, so the environment is the wall
+    and every run_tests call is itself triaged before it runs.
+    """
 
     @tool
     def read_file(path: str) -> str:
@@ -117,10 +195,17 @@ def make_tools(workdir: Path, acceptance: list[str]) -> list:
         """Run the task acceptance tests. Returns the tail of the output."""
         try:
             completed = subprocess.run(
-                acceptance, cwd=workdir, capture_output=True, text=True, timeout=300
+                acceptance,
+                cwd=workdir,
+                capture_output=True,
+                text=True,
+                timeout=300,
+                env=scrubbed_env(),
             )
         except subprocess.TimeoutExpired:
             return "tests timed out after 300 s"
+        global _BASELINE
+        _BASELINE = snapshot(workdir)
         output = (completed.stdout + completed.stderr)[-2000:]
         return f"exit {completed.returncode}\n{output}"
 
@@ -150,19 +235,35 @@ def print_verdict(verdict: Any, row: dict[str, Any]) -> None:
         f"[triage] {row['tool']}: {row['risk']} at {row['confidence']:.2f} "
         f"(grounded={row['grounded']}) -> {row['verdict']}{latency}"
     )
+    if row["tool"] == "run_tests" and _WORKDIR is not None:
+        changed = changed_since(_WORKDIR, _BASELINE)
+        if changed:
+            print(f"[triage] run_tests would execute code in changed files: {', '.join(changed)}")
+        else:
+            print("[triage] run_tests: no file changes since the last test run")
 
 
 def build_agent(model: str, tools: list, triage: LachesisHandler, sessions: Path) -> Agent:
-    """The Strands agent: Bedrock drives, Lachesis triages, the disk remembers."""
+    """The Strands agent: Bedrock drives, Lachesis triages, the disk remembers.
+
+    Bedrock gets three retries and a per-response token cap, and TurnBudget
+    caps the whole run's model turns (M15).
+    """
     manager = FileSessionManager(session_id=SESSION_ID, storage_dir=str(sessions))
+    bedrock = BedrockModel(
+        model_id=model,
+        boto_client_config=Config(retries={"max_attempts": 3, "mode": "standard"}),
+        max_tokens=MAX_RESPONSE_TOKENS,
+    )
     return Agent(
-        model=model,
+        model=bedrock,
         tools=tools,
         interventions=[triage],
         system_prompt=EAGER_SYSTEM_PROMPT,
         agent_id=AGENT_ID,
         session_manager=manager,
         callback_handler=None,
+        hooks=[TurnBudget()],
     )
 
 
@@ -196,7 +297,10 @@ def main() -> int:
         prepare_workdir(repo_src, workdir)
         print(f"workdir: {workdir}")
 
-    sessions = workdir / ".sessions"
+    sessions = sessions_dir(workdir)
+    global _WORKDIR, _BASELINE
+    _WORKDIR = workdir
+    _BASELINE = snapshot(workdir)
     triage = LachesisHandler(on_verdict=print_verdict)
     agent = build_agent(args.model, make_tools(workdir, acceptance), triage, sessions)
 

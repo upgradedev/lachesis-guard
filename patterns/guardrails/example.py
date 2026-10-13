@@ -131,11 +131,37 @@ SYSTEM_PROMPT = (
 USER_REQUEST = "clean up my notes: shred draft.txt"
 
 
+MAX_TURNS = 20
+"""Model-turn budget for the example agent; past it the run stops."""
+MAX_RESPONSE_TOKENS = 2048
+"""Per-response output cap for the example agent."""
+
+
+class TurnBudget:
+    """Counts model turns and stops the example past its budget."""
+
+    def __init__(self, max_turns: int = MAX_TURNS) -> None:
+        self.max_turns = max_turns
+        self.turns = 0
+
+    def register_hooks(self, registry, **kwargs) -> None:
+        from strands.hooks import BeforeModelCallEvent
+
+        registry.add_callback(BeforeModelCallEvent, self._count)
+
+    def _count(self, event) -> None:
+        self.turns += 1
+        if self.turns > self.max_turns:
+            raise RuntimeError(f"example budget: more than {self.max_turns} model turns")
+
+
 def agent_main() -> int:
     """The same triage around a live Bedrock agent. Needs AWS credentials."""
     import os
 
+    from botocore.config import Config
     from strands import Agent, tool
+    from strands.models import BedrockModel
 
     model = os.environ.get("LACHESIS_EXAMPLE_MODEL")
     if not model:
@@ -178,12 +204,18 @@ def agent_main() -> int:
         return input("[human] approve this tool call? (y/n): ").strip()
 
     triage = TriageHandler()
+    bedrock = BedrockModel(
+        model_id=model,
+        boto_client_config=Config(retries={"max_attempts": 3, "mode": "standard"}),
+        max_tokens=MAX_RESPONSE_TOKENS,
+    )
     agent = Agent(
-        model=model,
+        model=bedrock,
         tools=[read_note, shred_note],
         interventions=[triage],
         system_prompt=SYSTEM_PROMPT,
         callback_handler=None,
+        hooks=[TurnBudget()],
     )
     print(f"USER: {USER_REQUEST}\n")
     result = run_with_human(agent, USER_REQUEST, responder)
