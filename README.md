@@ -63,16 +63,36 @@ a README another builder can follow in five minutes.
   Reference only; Lachesis builds on the newer `InterventionHandler` seam.
 - `benchmark/`: the Threefold benchmark fixtures (nine task dirs) and harness (Apache-2.0, ours),
   with the repo-root LICENSE carried over. Prior result rows were not copied.
+- LastTake (MIT, ours): the resume-across-process-death session pattern behind the demo.
+  No code copied; FileSessionManager is a Strands built-in.
 - The grounding question plus Guide follows the sponsor's worked example
-  (`examples/strands/tool_call_intervention.py` in strands-decider). The five-class risk question,
-  the Confirm and Deny split with the human pause, the measured threshold, and the benchmark table
-  are this build's own.
+  (`examples/strands/tool_call_intervention.py` in strands-decider, Apache-2.0; see NOTICE).
+  The five-class risk question, the Confirm and Deny split with the human pause, the measured
+  threshold, and the benchmark table are this build's own.
 
-## Status
+## What runs where
 
-Handler, client, policy, questions, tests, and the CI measurement loop are built and green. The
-Strands plus Bedrock demo agent and the benchmark comparison land next.
+- The agent is a Strands agent. You run `scripts/demo_agent.py` where you like; its model is
+  Amazon Bedrock. Pass a Bedrock model id as `--model` (the recording used
+  `eu.anthropic.claude-sonnet-5-5` in eu-west-1).
+- Strands Decider 2B, pinned to `StrandsAgents/strands-decider-2B-qwen3.5-v1-2610` (Apache-2.0,
+  base `Qwen/Qwen3.5-2B-Base`), serves on CPU: on an EC2 t3.xlarge box for the demo and the
+  benchmark, and on a GitHub Actions runner in CI. The agent reads `STRANDS_DECIDER_URL`.
+- The benchmark comparison is committed under `benchmark/results/`, with the evidence notes
+  in `docs/evidence/`.
+
+## Run the demo
+
+Needs: Bedrock credentials, a Decider server at `STRANDS_DECIDER_URL`, and strands-agents
+installed.
+
+```
+python scripts/demo_agent.py --model <bedrock-model-id>
+```
+
+Every triage prints its verdict line with the confidence. A pause survives process death:
+re-run with `--resume --workdir <dir>` and answer again.
 
 ## Licence
 
-MIT. See `LICENSE`.
+MIT. See `LICENSE`. Third-party strings are attributed in `NOTICE`.

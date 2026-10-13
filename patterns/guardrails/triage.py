@@ -25,6 +25,7 @@ traffic before you trust it for your agent.
 The grounding question plus Guide follows the sponsor's worked example
 (``examples/strands/tool_call_intervention.py`` in strands-decider). The
 five-class risk question and the Confirm/Deny split are this pattern's own.
+The grounding wording is adapted from that Apache-2.0 file; see NOTICE.
 """
 
 from __future__ import annotations
