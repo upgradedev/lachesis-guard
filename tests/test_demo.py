@@ -94,6 +94,81 @@ def test_run_tests_reports_exit_code(demo, tmp_path):
     assert run_tests().startswith("exit 3")
 
 
+def test_scrubbed_env_drops_aws_credentials(demo, monkeypatch):
+    import os
+
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIAFAKE")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "fake-secret")
+    monkeypatch.setenv("AWS_SESSION_TOKEN", "fake-token")
+    monkeypatch.setenv("KEEP_ME", "yes")
+    env = demo.scrubbed_env()
+    assert "AWS_ACCESS_KEY_ID" not in env
+    assert "AWS_SECRET_ACCESS_KEY" not in env
+    assert "AWS_SESSION_TOKEN" not in env
+    assert env["KEEP_ME"] == "yes"
+    assert env["AWS_CONFIG_FILE"] == os.devnull
+    assert env["AWS_SHARED_CREDENTIALS_FILE"] == os.devnull
+
+
+def test_run_tests_child_sees_no_aws_keys(demo, tmp_path, monkeypatch):
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIAFAKE")
+    probe = "import os, sys; sys.exit(0 if 'AWS_ACCESS_KEY_ID' not in os.environ else 3)"
+    _, _, run_tests = demo.make_tools(tmp_path, [sys.executable, "-c", probe])
+    assert run_tests().startswith("exit 0")
+
+
+def test_sessions_dir_lives_outside_the_workdir(demo, tmp_path):
+    sessions = demo.sessions_dir(tmp_path / "work")
+    assert sessions == tmp_path / "work.sessions"
+    assert sessions != tmp_path / "work" / ".sessions"
+
+
+def test_changed_since_reports_create_modify_delete(demo, tmp_path):
+    (tmp_path / "keep.txt").write_text("same", encoding="utf-8")
+    (tmp_path / "edit.txt").write_text("before", encoding="utf-8")
+    (tmp_path / "gone.txt").write_text("bye", encoding="utf-8")
+    baseline = demo.snapshot(tmp_path)
+    (tmp_path / "edit.txt").write_text("after", encoding="utf-8")
+    (tmp_path / "gone.txt").unlink()
+    (tmp_path / "new.txt").write_text("hi", encoding="utf-8")
+    assert demo.changed_since(tmp_path, baseline) == ["edit.txt", "gone.txt", "new.txt"]
+
+
+def test_turn_budget_stops_past_the_cap(demo):
+    budget = demo.TurnBudget(max_turns=2)
+    callbacks = {}
+    registry = SimpleNamespace(
+        add_callback=lambda event, cb: callbacks.setdefault(event, cb)
+    )
+    budget.register_hooks(registry)
+    budget._count(None)
+    budget._count(None)
+    with pytest.raises(RuntimeError, match="demo budget"):
+        budget._count(None)
+
+
+def test_print_verdict_run_tests_names_changed_files(demo, tmp_path, capsys):
+    (tmp_path / "tests").mkdir()
+    target = tmp_path / "tests" / "test_new.py"
+    demo._WORKDIR = tmp_path
+    demo._BASELINE = demo.snapshot(tmp_path)
+    target.write_text("def test_x():\n    pass\n", encoding="utf-8")
+    demo.print_verdict(
+        SimpleNamespace(action="confirm"),
+        {
+            "tool": "run_tests",
+            "risk": "untrusted_to_action",
+            "confidence": 0.5,
+            "grounded": True,
+            "verdict": "confirm",
+            "latency_ms": 1200.0,
+        },
+    )
+    out = capsys.readouterr().out
+    assert "test_new.py" in out
+    assert "changed files" in out
+
+
 def stored_agent(*interrupts):
     return SimpleNamespace(
         _internal_state={
