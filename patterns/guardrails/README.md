@@ -34,14 +34,37 @@ First match wins. `decide` in `triage.py` owns this table, not the model.
 Measure the threshold on your own traffic before you trust it; 0.9 is the
 model card's figure for short classification, not a measured value for you.
 
-## Five minutes
+Pauses bind: a Confirm is cached under the call id and re-issued verbatim on
+resume without calling Decider, so the human answer stays bound to the call.
+Exact repeats of refused calls are denied outright. The model never sees a
+score: Deny and Guide texts are neutral, and a denied pause reads "a person
+declined this call".
 
-1. `pip install strands-agents`
-2. `strands-decider serve <model> --device cpu --port 8099`
-3. `python example.py`, with AWS credentials for Bedrock. The eager agent tries
-   to shred a note; the triage pauses it, you answer `y` or `n`, and the log at
-   the end shows every proposed call with its risk class and confidence.
-4. Wire it into your agent:
+## About a minute
+
+```sh
+pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cpu
+pip install strands-decider==0.1.0 strands-agents
+strands-decider serve StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --device cpu --port 8099
+python example.py
+```
+
+The tour drives four scripted tool calls through the handler and prints each
+verdict: a Proceed, a Guide, a Confirm with the pause a person would see, and
+a Deny. It takes about 40 seconds on CPU once the server is up (40.7 s on an
+EC2 t3.xlarge, 40.2 s in CI run 38383159931), plus the one-off model download.
+It needs no AWS account. A clean-container CI job runs these exact commands
+and fails unless all four verdicts fire.
+
+The server needs a machine that fits the 2B model in fp32 on CPU: we run an
+EC2 t3.xlarge (4 vCPU, 16 GB RAM); a t3.large (2 vCPU, 8 GB) OOM-killed while
+loading the model.
+
+With AWS credentials, `python example.py --agent` runs the same triage around
+a small Bedrock agent instead. The model comes from `LACHESIS_EXAMPLE_MODEL`
+and the region from the usual AWS variables; there are no other knobs.
+
+Wire it into your agent:
 
 ```python
 from strands import Agent
@@ -57,9 +80,11 @@ cannot be triaged does not run unguarded.
 
 ## Make it yours
 
-- Rename the risk classes and rewrite the criteria in `RISK_CLASSES` to match
-  the calls your agent makes. The `true`/`false` descriptions on the grounding
-  question carry most of its signal; write them carefully.
+- Rename the risk classes in `RISK_CLASSES` and rewrite the criteria to match
+  the calls your agent makes, and rename them in `CONFIRM_CLASSES`,
+  `DENY_CLASSES` and `BENIGN_LABEL` in the same edit: importing `triage.py`
+  fails loudly if the names disagree. The `true`/`false` descriptions on the
+  grounding question carry most of its signal; write them carefully.
 - Pick the threshold by measurement: run your own tool calls through, plot
   confidence against right and wrong, and set the line where a person should
   take over. Our own measurement is in the repo README under Threshold: 0.7,

@@ -205,6 +205,18 @@ DEFAULT_THRESHOLD = 0.7
 your own traffic before you trust it for your agent."""
 
 CONFIRM_CLASSES = frozenset({"destructive_write", "untrusted_to_action", "confused_deputy"})
+"""Risk classes that pause for a person when confident."""
+
+DENY_CLASSES = frozenset({"exfiltration"})
+"""Risk classes refused outright when confident."""
+
+BENIGN_LABEL = "benign"
+"""The risk class that may proceed when grounded and confident."""
+
+assert set(RISK_CLASSES) == CONFIRM_CLASSES | DENY_CLASSES | {BENIGN_LABEL}, (
+    "RISK_CLASSES and the policy sets disagree: when you rename a risk class, "
+    "rename it in CONFIRM_CLASSES, DENY_CLASSES or BENIGN_LABEL too."
+)
 
 PROCEED = "proceed"
 GUIDE = "guide"
@@ -340,7 +352,7 @@ def decide(risk: str, confidence: float, grounded_p: float, threshold: float = D
             confidence,
             grounded,
         )
-    if risk == "exfiltration":
+    if risk in DENY_CLASSES:
         # Neutral on purpose: the Deny reason reaches the model verbatim (the
         # SDK prefixes "DENIED: "), so the score stays in the log row, not here.
         return TriageVerdict(
@@ -359,7 +371,7 @@ def decide(risk: str, confidence: float, grounded_p: float, threshold: float = D
             confidence,
             grounded,
         )
-    if risk != "benign":
+    if risk != BENIGN_LABEL:
         return TriageVerdict(
             "confirm",
             f"Lachesis does not know the risk class {risk!r}, so a person "
