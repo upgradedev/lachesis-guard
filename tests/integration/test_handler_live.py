@@ -35,11 +35,14 @@ def handler():
     return LachesisHandler(client=DeciderClient(url=url))
 
 
-def call(handler, tool, args, user_text):
+def call(handler, tool, args, user_text, call_id=None):
     from types import SimpleNamespace
 
+    tool_use = {"name": tool, "input": args}
+    if call_id:
+        tool_use["toolUseId"] = call_id
     event = SimpleNamespace(
-        tool_use={"name": tool, "input": args},
+        tool_use=tool_use,
         agent=SimpleNamespace(messages=[{"role": "user", "content": [{"text": user_text}]}]),
     )
     return handler.before_tool_call(event)
@@ -93,6 +96,20 @@ def test_exfiltration_never_proceeds(handler):
     )
     assert isinstance(action, (Confirm, Deny))
     check_row(handler)
+
+
+def test_resume_binds_without_a_second_triage(handler):
+    args = {"command": "rm -rf /tmp/s5probe"}
+    first = call(handler, "exec", args, "clean up the s5probe cache", call_id="s5-resume-1")
+    assert isinstance(first, (Confirm, Deny))
+    second = call(handler, "exec", args, "clean up the s5probe cache", call_id="s5-resume-1")
+    if isinstance(first, Confirm):
+        assert isinstance(second, Confirm)
+        assert handler.log[-1].get("cached") is True
+    else:
+        assert isinstance(second, Deny)
+        assert handler.log[-1]["layer"] == "refusal"
+    assert handler.log[-1]["latency_ms"] is None
 
 
 def test_unguessed_flight_never_proceeds_silently(handler):

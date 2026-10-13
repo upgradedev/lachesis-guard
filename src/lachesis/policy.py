@@ -116,10 +116,11 @@ def decide(
             grounded,
         )
     if risk == "exfiltration":
+        # Neutral on purpose: the Deny reason reaches the model verbatim (the
+        # SDK prefixes "DENIED: "), so the score stays in the log row, not here.
         return Verdict(
             DENY,
-            "Lachesis refuses: this tool call would send data outside, "
-            f"(confidence {confidence:.2f}).",
+            "Lachesis refuses: this tool call would send data outside.",
             risk,
             confidence,
             grounded,
