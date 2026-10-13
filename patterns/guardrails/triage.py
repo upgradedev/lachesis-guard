@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
@@ -89,16 +90,26 @@ def check_server(url: str = SERVER_URL) -> dict[str, Any]:
 # criteria to fit your agent without retraining anything.
 
 RISK_CLASSES: dict[str, str] = {
-    "benign": "a harmless read, or a routine write the user asked for",
-    "destructive_write": "deletes, overwrites, or irreversibly changes data",
-    "exfiltration": "sends data to an outside party or a public place",
+    "benign": (
+        "reads, lists, searches, or computes; or writes new content that "
+        "deletes nothing, sends nothing, and contains no credentials"
+    ),
+    "destructive_write": (
+        "deletes, overwrites, clears, force-pushes, or drops stored data, "
+        "code, or history"
+    ),
+    "exfiltration": (
+        "sends file content, credentials, customer records, or system files "
+        "to a network address, an outside party, a public place, or into the "
+        "repo itself"
+    ),
     "untrusted_to_action": (
-        "acts on instructions or data from an untrusted source: a webpage, "
-        "a file, or a third party quoted in the conversation"
+        "runs, opens, installs, saves, or follows content that arrived from "
+        "a URL, a forum, a stranger, a forward, a comment, or a paste"
     ),
     "confused_deputy": (
-        "uses the agent's own authority or credentials to do something "
-        "the user did not ask for"
+        "grants roles, spends money, publishes, disables protections, "
+        "touches another tenant's data, or reads identity material"
     ),
 }
 
@@ -145,6 +156,41 @@ your own traffic before you trust it for your agent."""
 
 CONFIRM_CLASSES = frozenset({"destructive_write", "untrusted_to_action", "confused_deputy"})
 
+PROCEED = "proceed"
+GUIDE = "guide"
+CONFIRM = "confirm"
+DENY = "deny"
+
+TIER0_READ_TOOLS = frozenset({"read_file", "Read"})
+"""Tool names tier-0 may allow without asking Decider. Reads change nothing;
+the model seeing file content is the agent's job. Secret paths still go on."""
+
+SECRET_PATHS = (".env", "key", "secret", "credential", "passwd", ".pem", "id_rsa", ".aws/", "token")
+"""Lowercase substrings: a read path containing one is not tier-0."""
+
+PATH_KEYS = ("path", "file_path", "file")
+"""Argument names tier-0 reads the path from, first string wins."""
+
+# Credential shapes, adapted from benchmark/checks.py CREDENTIAL_PATTERNS (ours)
+# plus a generic *-key assignment the staging-key hero needs.
+SECRET_PATTERNS = (
+    ("an AWS access key id", re.compile(r"(?<![A-Z0-9])(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Z0-9])")),
+    ("an sk- secret key", re.compile(r"(?<![A-Za-z0-9_\-])sk-[A-Za-z0-9_\-]{20,}")),
+    ("a GitHub token", re.compile(r"(?<![A-Za-z0-9_])gh[pousr]_[A-Za-z0-9]{36,}")),
+    ("a Slack token", re.compile(r"(?<![A-Za-z0-9_])xox[abposr]-[A-Za-z0-9\-]{10,}")),
+    ("a Google API key", re.compile(r"(?<![A-Za-z0-9_])AIza[0-9A-Za-z_\-]{35}")),
+    ("a private key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    ("a long secret assigned to a secret-like name", re.compile(
+        r"(?i)\b(?:password|passwd|secret|token|api[_\-]?key)\b[\"'\']?\s*[:=]\s*[\"'\'][^\"'\s]{20,}[\"'\']")),
+    ("a long value assigned to a key-like name", re.compile(
+        r"(?i)\b[\w\-]*(?:key|secret|token|password|passwd)[\w\-]*\b[\"'\']?\s*[:=]\s*[\"'\'][^\"'\s]{16,}[\"'\']")),
+    ("a password inside a connection string", re.compile(r"://[^/\s:@]{1,64}:[^/\s@]{1,64}@")),
+    ("a bearer token", re.compile(r"(?i)bearer [A-Za-z0-9_\-\.~+/]{4,}={0,2}")),
+)
+
+SCAN_CHARS = 20000
+"""The scan reads at most this many characters of arguments, then stops."""
+
 
 @dataclass(frozen=True)
 class TriageVerdict:
@@ -155,8 +201,61 @@ class TriageVerdict:
     risk: str
     confidence: float
     grounded: bool
+    layer: str = "decider"
 
 
+def _walk_strings(value: Any, budget: list[int]):
+    """Yield string leaves of JSON-shaped arguments, up to the char budget."""
+    if budget[0] <= 0:
+        return
+    if isinstance(value, str):
+        budget[0] -= len(value)
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _walk_strings(item, budget)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _walk_strings(item, budget)
+
+
+def _scan_hit(arguments: Any) -> str | None:
+    """The first credential-pattern name matching the arguments, if any."""
+    budget = [SCAN_CHARS]
+    for value in _walk_strings(arguments, budget):
+        for name, pattern in SECRET_PATTERNS:
+            if pattern.search(value):
+                return name
+    return None
+
+
+def prescan(tool: str, arguments: Any) -> TriageVerdict | None:
+    """The deterministic tiers: tier-0 allows safe reads, the scan pauses secrets.
+
+    Returns a verdict without calling Decider, or None when the call needs
+    the model. A scan hit confirms rather than denies: the scan is a dumb
+    regex and a person decides whether the match is a real secret.
+    """
+    if tool in TIER0_READ_TOOLS and isinstance(arguments, dict):
+        for key in PATH_KEYS:
+            found = arguments.get(key)
+            if isinstance(found, str):
+                lowered = found.lower()
+                if not any(part in lowered for part in SECRET_PATHS):
+                    return TriageVerdict(PROCEED, "", "benign", 1.0, True, "tier0")
+                break
+    hit = _scan_hit(arguments)
+    if hit is not None:
+        return TriageVerdict(
+            CONFIRM,
+            f"Deterministic scan: the arguments contain {hit}; "
+            "a person decides whether it is a real secret.",
+            "",
+            1.0,
+            True,
+            "secretscan",
+        )
+    return None
 def decide(risk: str, confidence: float, grounded_p: float, threshold: float = DEFAULT_THRESHOLD):
     """Map one pair of Decider answers to a verdict. P(true) of 0.5 reads as grounded."""
     grounded = grounded_p >= 0.5
@@ -416,6 +515,10 @@ class TriageHandler(InterventionHandler):
         arguments = tool_use.get("input") or {}
         messages = getattr(getattr(event, "agent", None), "messages", [])
 
+        early = prescan(tool_name, arguments)
+        if early is not None:
+            return self._act(tool_name, arguments, early, early.risk, early.confidence, None)
+
         state = render_state(messages, tool_name, arguments, self._window_tokens())
         answers, latency_ms = self._ask(state, triage_questions())
         risk_answer = answers.get("risk_class", {})
@@ -431,19 +534,35 @@ class TriageHandler(InterventionHandler):
             # still guards it: a destructive no-arg call confirms or denies.
             grounded_p = 1.0
         verdict = decide(risk, confidence, grounded_p, self._threshold)
+        return self._act(tool_name, arguments, verdict, risk, confidence, latency_ms)
+
+    def _act(
+        self,
+        tool_name: str,
+        arguments: Any,
+        verdict: TriageVerdict,
+        risk: str,
+        confidence: float,
+        latency_ms: Any,
+    ) -> Any:
+        """Log one verdict and map it to the SDK action, whichever layer decided."""
         row = {
             "tool": tool_name,
             "risk": verdict.risk,
             "confidence": round(verdict.confidence, 4),
             "grounded": verdict.grounded,
             "verdict": verdict.action,
+            "layer": verdict.layer,
             "latency_ms": latency_ms,
         }
         self.log.append(row)
         if self._on_verdict is not None:
             self._on_verdict(verdict, row)
 
-        tag = f"lachesis: {risk} at {confidence:.2f}"
+        if verdict.layer == "decider":
+            tag = f"lachesis: {risk} at {confidence:.2f}"
+        else:
+            tag = f"lachesis:{verdict.layer}"
         if verdict.action == "proceed":
             return Proceed(reason=tag)
         if verdict.action == "guide":

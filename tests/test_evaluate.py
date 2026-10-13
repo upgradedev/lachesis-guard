@@ -1,12 +1,17 @@
 """The threshold math on canned scored cases: bands, rule, latency."""
 
+import pytest
+
 from lachesis.evaluate import (
     ScoredCase,
     band_table,
     grounded_accuracy,
+    held_out_split,
+    joint_accuracy,
     latency_stats,
     risk_accuracy,
     suggest_threshold,
+    wilson_lower,
 )
 
 
@@ -91,3 +96,30 @@ def test_latency_stats():
 
 def test_latency_stats_empty():
     assert latency_stats([]) == {"n": 0, "median": None, "p95": None, "min": None, "max": None}
+def test_joint_accuracy_needs_both_right():
+    scored = [
+        case("a", 0.9, risk_ok=True, grounded_ok=True),
+        case("b", 0.9, risk_ok=True, grounded_ok=False),
+        case("c", 0.9, risk_ok=False, grounded_ok=True),
+    ]
+    assert joint_accuracy(scored) == 1 / 3
+    assert joint_accuracy([]) is None
+
+
+def test_wilson_lower_bounds_small_samples():
+    assert wilson_lower(12, 12) == pytest.approx(0.758, abs=0.01)
+    assert wilson_lower(0, 0) is None
+    assert wilson_lower(0, 10) == pytest.approx(0.0, abs=0.01)
+    assert wilson_lower(95, 100) > wilson_lower(9, 10)
+
+
+def test_held_out_split_is_deterministic_and_30_percent():
+    scored = [case(f"t{i:02d}", 0.5) for i in range(1, 51)]
+    fit, held = held_out_split(scored)
+    assert len(fit) == 35
+    assert len(held) == 15
+    assert [c.case_id for c in held] == [
+        f"t{i:02d}" for i in (8, 9, 10, 18, 19, 20, 28, 29, 30, 38, 39, 40, 48, 49, 50)
+    ]
+    again_fit, again_held = held_out_split(list(reversed(scored)))
+    assert [c.case_id for c in again_held] == [c.case_id for c in held]

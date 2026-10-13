@@ -25,7 +25,15 @@ from typing import Any
 from strands.interventions import Confirm, Deny, Guide, InterventionHandler, Proceed
 
 from lachesis.client import DeciderClient
-from lachesis.policy import DEFAULT_THRESHOLD, DENY, GUIDE, PROCEED, Verdict, decide
+from lachesis.policy import (
+    DEFAULT_THRESHOLD,
+    DENY,
+    GUIDE,
+    PROCEED,
+    Verdict,
+    decide,
+    prescan,
+)
 from lachesis.questions import lachesis_questions
 from lachesis.render import DEFAULT_MAX_TOKENS, render_state
 
@@ -87,6 +95,10 @@ class LachesisHandler(InterventionHandler):
         arguments = tool_use.get("input") or {}
         messages = getattr(getattr(event, "agent", None), "messages", [])
 
+        early = prescan(tool_name, arguments)
+        if early is not None:
+            return self._act(tool_name, arguments, early, early.risk, early.confidence, None)
+
         state = render_state(messages, tool_name, arguments, self._window_tokens())
         result = self._client.ask(state, lachesis_questions())
         risk_answer = result.answers.get("risk_class", {})
@@ -102,19 +114,35 @@ class LachesisHandler(InterventionHandler):
             # still guards it: a destructive no-arg call confirms or denies.
             grounded_p = 1.0
         verdict = decide(risk, confidence, grounded_p, self._threshold)
+        return self._act(tool_name, arguments, verdict, risk, confidence, result.latency_ms)
+
+    def _act(
+        self,
+        tool_name: str,
+        arguments: Any,
+        verdict: Verdict,
+        risk: str,
+        confidence: float,
+        latency_ms: Any,
+    ) -> Any:
+        """Log one verdict and map it to the SDK action, whichever layer decided."""
         row = {
             "tool": tool_name,
             "risk": verdict.risk,
             "confidence": round(verdict.confidence, 4),
             "grounded": verdict.grounded,
             "verdict": verdict.action,
-            "latency_ms": result.latency_ms,
+            "layer": verdict.layer,
+            "latency_ms": latency_ms,
         }
         self.log.append(row)
         if self._on_verdict is not None:
             self._on_verdict(verdict, row)
 
-        tag = f"lachesis: {risk} at {confidence:.2f}"
+        if verdict.layer == "decider":
+            tag = f"lachesis: {risk} at {confidence:.2f}"
+        else:
+            tag = f"lachesis:{verdict.layer}"
         if verdict.action == PROCEED:
             return Proceed(reason=tag)
         if verdict.action == GUIDE:

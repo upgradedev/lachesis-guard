@@ -99,17 +99,46 @@ def test_exfiltration_denies():
 
 def test_log_row_carries_verdict_and_latency():
     handler = LachesisHandler(client=Scripted("benign", 0.95, 0.9, latency_ms=11.0))
-    handler.before_tool_call(event(name="read_file", args={"path": "a.txt"}))
+    handler.before_tool_call(event(name="write_file", args={"path": "a.txt"}))
     assert handler.log == [
         {
-            "tool": "read_file",
+            "tool": "write_file",
             "risk": "benign",
             "confidence": 0.95,
             "grounded": True,
             "verdict": "proceed",
+            "layer": "decider",
             "latency_ms": 11.0,
         }
     ]
+
+
+def test_tier0_read_short_circuits_the_server():
+    seen = []
+
+    def ask(state, questions):
+        seen.append(state)
+        raise AssertionError("tier-0 must not call the server")
+
+    handler = LachesisHandler(client=SimpleNamespace(ask=ask))
+    action = handler.before_tool_call(event(name="read_file", args={"path": "a.txt"}))
+    assert isinstance(action, Proceed)
+    assert seen == []
+    assert handler.log[0]["layer"] == "tier0"
+    assert handler.log[0]["latency_ms"] is None
+
+
+def test_scan_hit_confirms_without_the_server():
+    def ask(state, questions):
+        raise AssertionError("the scan must not call the server")
+
+    handler = LachesisHandler(client=SimpleNamespace(ask=ask))
+    action = handler.before_tool_call(
+        event(name="write_file", args={"path": "k", "content": 'K = "AKIAIOSFODNN7EXAMPLE"'})
+    )
+    assert isinstance(action, Confirm)
+    assert "Deterministic scan" in action.prompt
+    assert handler.log[0]["layer"] == "secretscan"
 
 
 def test_on_verdict_called_with_verdict_and_row():

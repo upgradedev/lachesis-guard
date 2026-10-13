@@ -1,15 +1,19 @@
 """Measure the confidence threshold on labeled tool calls.
 
-Reads the labeled cases, asks the Decider server both Lachesis questions about
-each one (rendering the state exactly the way the handler does), and prints
-the accuracy-by-confidence table, the latency stats, and the threshold the
-pre-registered rule suggests. Writes one JSON row per case for the record.
+Reads the labeled cases, runs each through the full pipeline (deterministic
+prescan, then both Lachesis questions rendered exactly the way the handler
+does), and prints the accuracy-by-confidence table on a 70% fit split, the
+held-out report, the latency stats, the verdict mix by layer, and the
+threshold the pre-registered rule suggests. Writes one JSON row per case.
 
 The rule (fixed before the first run, in lachesis.evaluate): the lowest edge
 among 0.9, 0.8, 0.7 whose accepted region holds at least 10 cases at accuracy
 0.95 or better; otherwise keep 0.9. The 0.0 row is reported but never
 suggested: trusting everything on one small fixture would switch the
 confirm-when-unsure path off, which is gate-widening whatever the data says.
+
+Measurement asks the server about every case including prescan hits, so the
+record shows what Decider would have said; production short-circuits hits.
 
 Usage (needs a server; STRANDS_DECIDER_URL or http://127.0.0.1:8099):
 
@@ -30,11 +34,15 @@ from lachesis.evaluate import (  # noqa: E402
     ScoredCase,
     band_table,
     grounded_accuracy,
+    held_out_split,
+    joint_accuracy,
     latency_stats,
     risk_accuracy,
     suggest_threshold,
+    wilson_lower,
 )
 from lachesis.handler import render_state  # noqa: E402
+from lachesis.policy import decide, prescan  # noqa: E402
 from lachesis.questions import lachesis_questions  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -55,17 +63,30 @@ def load_cases(path: Path) -> list[dict]:
 def score_case(client: DeciderClient, case: dict) -> ScoredCase:
     messages = [{"role": "user", "content": [{"text": case["user"]}]}]
     state = render_state(messages, case["tool"], case["args"])
+    early = prescan(case["tool"], case["args"])
     result = client.ask(state, lachesis_questions())
     risk_answer = result.answers.get("risk_class", {})
     grounded_answer = result.answers.get("grounded", {})
+    grounded_p = float(grounded_answer.get("noul") or 0.0)
+    if not case["args"]:
+        grounded_p = 1.0
+    risk_pred = str(risk_answer.get("choice") or "")
+    confidence = float(risk_answer.get("confidence") or 0.0)
+    if early is not None:
+        verdict, layer = early.action, early.layer
+    else:
+        verdict = decide(risk_pred, confidence, grounded_p).action
+        layer = "decider"
     return ScoredCase(
         case_id=case["id"],
         risk_label=case["risk"],
-        risk_pred=str(risk_answer.get("choice") or ""),
-        confidence=float(risk_answer.get("confidence") or 0.0),
+        risk_pred=risk_pred,
+        confidence=confidence,
         grounded_label=bool(case["grounded"]),
-        grounded_pred=float(grounded_answer.get("noul") or 0.0) >= 0.5,
+        grounded_pred=grounded_p >= 0.5,
         latency_ms=result.latency_ms,
+        verdict=verdict,
+        layer=layer,
     )
 
 
@@ -90,15 +111,18 @@ def main() -> int:
         print(
             f"{item.case_id} {mark} risk={item.risk_label}->{item.risk_pred} "
             f"@{item.confidence:.2f} grounded={item.grounded_label}->{item.grounded_pred} "
-            f"{latency}"
+            f"{item.verdict}/{item.layer} {latency}"
         )
 
-    print("\ncumulative risk accuracy at-or-above each edge:")
-    for row in band_table(scored):
+    fit, held = held_out_split(scored)
+    print(f"\nfit: {len(fit)} cases, held out: {len(held)} cases")
+    print("cumulative risk accuracy at-or-above each edge (fit split):")
+    for row in band_table(fit):
         accuracy = f"{row.accuracy:.3f}" if row.accuracy is not None else "n/a"
         print(f"  >= {row.edge:.1f}: n={row.accepted} accuracy={accuracy}")
     print(f"\nrisk accuracy: {risk_accuracy(scored):.3f}")
     print(f"grounding accuracy: {grounded_accuracy(scored):.3f}")
+    print(f"joint accuracy: {joint_accuracy(scored):.3f}")
 
     latencies = [item.latency_ms for item in scored if item.latency_ms is not None]
     stats = latency_stats(latencies)
@@ -107,8 +131,24 @@ def main() -> int:
         f"p95={stats['p95']:.0f} min={stats['min']:.0f} max={stats['max']:.0f}"
     )
 
-    threshold, reason = suggest_threshold(scored)
+    print("\nverdict mix (action/layer):")
+    mix: dict[str, int] = {}
+    for item in scored:
+        key = f"{item.verdict}/{item.layer}"
+        mix[key] = mix.get(key, 0) + 1
+    for key in sorted(mix):
+        print(f"  {key}: {mix[key]}")
+
+    threshold, reason = suggest_threshold(fit)
     print(f"\nSUGGESTED_THRESHOLD={threshold} ({reason})")
+    accepted = [item for item in held if item.confidence >= threshold]
+    hits = sum(item.risk_ok for item in accepted)
+    lower = wilson_lower(hits, len(accepted))
+    lower_text = f"{lower:.3f}" if lower is not None else "n/a"
+    print(
+        f"held-out at {threshold}: n={len(accepted)} "
+        f"accuracy={hits}/{len(accepted)} wilson-lower={lower_text}"
+    )
 
     if args.out:
         with open(args.out, "w", encoding="utf-8") as handle:
@@ -123,6 +163,8 @@ def main() -> int:
                             "grounded_label": item.grounded_label,
                             "grounded_pred": item.grounded_pred,
                             "latency_ms": item.latency_ms,
+                            "verdict": item.verdict,
+                            "layer": item.layer,
                         }
                     )
                     + "\n"

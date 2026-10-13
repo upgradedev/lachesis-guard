@@ -222,6 +222,7 @@ REFUSAL_KINDS = (
     ("HALTED_SESSION", ("circuit_breaker", "halted")),
     ("LACHESIS_DENY", ("lachesis refused: deny",)),
     ("LACHESIS_CONFIRM", ("lachesis refused: confirm",)),
+    ("LACHESIS_SCAN", ("lachesis refused: scan",)),
     ("LACHESIS_GUIDE", ("lachesis refused: guide",)),
 )
 # What the hook writes to stderr when it could not judge a call and let it through.
