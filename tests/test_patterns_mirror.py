@@ -56,8 +56,8 @@ RISKS = [
 
 
 @pytest.mark.parametrize("risk", RISKS)
-@pytest.mark.parametrize("confidence", [0.0, 0.5, 0.89, 0.9, 0.99])
-@pytest.mark.parametrize("grounded_p", [0.0, 0.49, 0.5, 1.0])
+@pytest.mark.parametrize("confidence", [0.0, 0.5, 0.89, 0.9, 0.99, float("inf"), -1.0, 1.5])
+@pytest.mark.parametrize("grounded_p", [0.0, 0.49, 0.5, 1.0, float("nan")])
 def test_policy_matrix_matches(pattern, risk, confidence, grounded_p):
     assert as_tuple(pattern.decide(risk, confidence, grounded_p)) == as_tuple(
         lachesis.policy.decide(risk, confidence, grounded_p)
@@ -83,6 +83,20 @@ def scripted_answers(risk, confidence, grounded_p):
         )
 
     return ask
+
+
+def test_nan_confidence_confirms_on_both_sides(pattern):
+    mine = pattern.decide("benign", float("nan"), 1.0)
+    theirs = lachesis.policy.decide("benign", float("nan"), 1.0)
+    assert (mine.action, mine.message) == (theirs.action, theirs.message)
+    assert mine.action == "confirm"
+
+
+def test_nan_threshold_confirms_on_both_sides(pattern):
+    mine = pattern.decide("benign", 0.95, 1.0, threshold=float("nan"))
+    theirs = lachesis.policy.decide("benign", 0.95, 1.0, threshold=float("nan"))
+    assert (mine.action, mine.message) == (theirs.action, theirs.message)
+    assert mine.action == "confirm"
 
 
 def test_handler_mapping_matches(pattern):

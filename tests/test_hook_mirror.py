@@ -45,12 +45,26 @@ def test_questions_match(hook):
         "other",
     ],
 )
-@pytest.mark.parametrize("confidence", [0.0, 0.5, 0.69, 0.7, 0.99])
-@pytest.mark.parametrize("grounded_p", [0.0, 0.49, 0.5, 1.0])
+@pytest.mark.parametrize("confidence", [0.0, 0.5, 0.69, 0.7, 0.99, float("inf"), -1.0, 1.5])
+@pytest.mark.parametrize("grounded_p", [0.0, 0.49, 0.5, 1.0, float("nan")])
 def test_policy_matrix_matches(hook, risk, confidence, grounded_p):
     verdict, message = hook.decide(risk, confidence, grounded_p)
     theirs = lachesis.policy.decide(risk, confidence, grounded_p)
     assert (verdict, message) == (theirs.action, theirs.message)
+
+
+def test_nan_confidence_confirms_on_both_sides(hook):
+    mine = hook.decide("benign", float("nan"), 1.0)
+    theirs = lachesis.policy.decide("benign", float("nan"), 1.0)
+    assert mine == (theirs.action, theirs.message)
+    assert mine[0] == "confirm"
+
+
+def test_nan_threshold_confirms_on_both_sides(hook):
+    mine = hook.decide("benign", 0.95, 1.0, threshold=float("nan"))
+    theirs = lachesis.policy.decide("benign", 0.95, 1.0, threshold=float("nan"))
+    assert mine == (theirs.action, theirs.message)
+    assert mine[0] == "confirm"
 
 
 def canned_server(answers):
@@ -162,8 +176,10 @@ def closed_port():
 
 def test_hook_fails_closed_without_server():
     completed = run_hook({"file_path": "a.txt"}, f"http://127.0.0.1:{closed_port()}")
-    assert completed.returncode == 1
-    assert "no Decider server" in completed.stderr.decode()
+    assert completed.returncode == 2
+    stderr = completed.stderr.decode()
+    assert "no Decider server" in stderr
+    assert "could not check this call" in stderr
     assert completed.stdout.decode().strip() == ""
 
 
@@ -174,8 +190,10 @@ def test_hook_rejects_non_json_stdin():
     completed = subprocess.run(
         [sys.executable, str(HOOK)], input=b"not json", capture_output=True, env=env, timeout=60
     )
-    assert completed.returncode == 1
-    assert "not JSON" in completed.stderr.decode()
+    assert completed.returncode == 2
+    stderr = completed.stderr.decode()
+    assert "not JSON" in stderr
+    assert "could not check this call" in stderr
 HOOK_RENDER_CASES = [
     ([{"role": "user", "content": [{"text": "hi"}]}], "Write", {"a": 1}, 4096),
     ([], "Bash", {"command": "ls"}, 4096),
@@ -247,5 +265,5 @@ def test_hook_secret_path_read_still_needs_the_server():
     completed = run_hook_named(
         "Read", {"file_path": ".env"}, f"http://127.0.0.1:{closed_port()}"
     )
-    assert completed.returncode == 1
+    assert completed.returncode == 2
     assert "no Decider server" in completed.stderr.decode()

@@ -78,6 +78,8 @@ a README another builder can follow in five minutes.
 - Strands Decider 2B, pinned to `StrandsAgents/strands-decider-2B-qwen3.5-v1-2610` (Apache-2.0,
   base `Qwen/Qwen3.5-2B-Base`), serves on CPU: on an EC2 t3.xlarge box for the demo and the
   benchmark, and on a GitHub Actions runner in CI. The agent reads `STRANDS_DECIDER_URL`.
+  The server listens on 127.0.0.1 only; on the EC2 box the agent reaches it through an
+  SSH tunnel, never over the open network.
 - The benchmark comparison is committed under `benchmark/results/`, with the evidence notes
   in `docs/evidence/`.
 

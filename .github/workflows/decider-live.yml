@@ -11,12 +11,16 @@ on:
     paths:
       - "src/**"
       - "tests/**"
+      - "patterns/**"
+      - "scripts/**"
       - "pyproject.toml"
       - ".github/workflows/decider-live.yml"
   pull_request:
     paths:
       - "src/**"
       - "tests/**"
+      - "patterns/**"
+      - "scripts/**"
       - "pyproject.toml"
       - ".github/workflows/decider-live.yml"
   workflow_dispatch:
@@ -40,11 +44,12 @@ jobs:
 
       - name: Install package, CPU torch, Decider 0.1.0
         run: |
+          set -o pipefail
           pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cpu
           pip install strands-decider==0.1.0
           pip install -e ".[dev]"
-          pip show strands-decider | head -2
-          pip show strands-agents | head -2
+          pip show strands-decider
+          pip show strands-agents
 
       - name: Serve pinned model on CPU
         run: |
@@ -69,6 +74,7 @@ jobs:
 
       - name: Live integration suite (must run, not skip)
         run: |
+          set -o pipefail
           pytest tests/integration -p no:cacheprovider --no-cov -q -rs | tee live.txt
           if grep -qiE "skipped|no tests ran" live.txt; then
             echo "::error::the live suite skipped. The handler seam is unproven."

@@ -29,6 +29,7 @@ example (``examples/strands/tool_call_intervention.py``); see NOTICE.
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -106,6 +107,28 @@ def decide(
             our own traffic before it is trusted; see DEFAULT_THRESHOLD.
     """
     grounded = grounded_p >= 0.5
+    if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
+        # A malformed score must never proceed: NaN fails every comparison, so
+        # without this guard NaN plus benign would fall through to proceed.
+        return Verdict(
+            CONFIRM,
+            f"Lachesis cannot use this score (confidence {confidence} is not "
+            "between 0 and 1), so a person decides whether this tool call runs.",
+            risk,
+            confidence,
+            grounded,
+        )
+    if isinstance(threshold, float) and math.isnan(threshold):
+        # NaN threshold likewise poisons every comparison below; an infinite
+        # one is strict but well-defined, so only NaN is refused.
+        return Verdict(
+            CONFIRM,
+            f"Lachesis cannot use this threshold (threshold {threshold} is not "
+            "a number), so a person decides whether this tool call runs.",
+            risk,
+            confidence,
+            grounded,
+        )
     if confidence < threshold:
         return Verdict(
             CONFIRM,

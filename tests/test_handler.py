@@ -204,6 +204,13 @@ def test_no_args_destructive_still_confirms():
     assert isinstance(action, Confirm)
 
 
+def test_nan_confidence_from_server_confirms():
+    handler = LachesisHandler(client=Scripted("benign", float("nan"), 0.9))
+    action = handler.before_tool_call(event())
+    assert isinstance(action, Confirm)
+    assert "cannot use this score" in action.prompt
+
+
 def test_missing_tool_use_and_agent_do_not_crash():
     handler = LachesisHandler(client=Scripted("benign", 0.95, 0.9))
     action = handler.before_tool_call(SimpleNamespace(tool_use=None, agent=None))

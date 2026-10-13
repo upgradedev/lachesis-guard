@@ -42,7 +42,11 @@ from strands import Agent, tool  # noqa: E402
 from strands.session import FileSessionManager  # noqa: E402
 from triage import run_with_human  # noqa: E402  # the pattern's resume loop, shared
 
-from lachesis.client import DeciderClient, DeciderUnavailable  # noqa: E402
+from lachesis.client import (  # noqa: E402
+    PINNED_CHECKPOINT,
+    DeciderClient,
+    DeciderUnavailable,
+)
 from lachesis.handler import LachesisHandler  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -176,6 +180,9 @@ def main() -> int:
     except DeciderUnavailable as exc:
         print(exc)
         return 1
+    if health.get("checkpoint") != PINNED_CHECKPOINT:
+        print(f"decider serves {health.get('checkpoint')}, not the pinned {PINNED_CHECKPOINT}")
+        return 1
     print(f"decider: {health.get('checkpoint')} on {health.get('device')}")
 
     prompt, acceptance, repo_src = load_task(args.task, args.key)
@@ -211,10 +218,15 @@ def main() -> int:
             for item in stored
         ]
         # The helper's first call accepts any agent input, responses included.
-        result = run_with_human(agent, first, console_responder)
+        agent_input = first
     else:
         print(f"\nUSER: {prompt}\n")
-        result = run_with_human(agent, prompt, console_responder)
+        agent_input = prompt
+    try:
+        result = run_with_human(agent, agent_input, console_responder)
+    except DeciderUnavailable as exc:
+        print(f"decider failed mid-run: {exc}".replace("\n", " "))
+        return 1
 
     print("\n--- triage log: every proposed call, its risk, its confidence ---")
     for row in triage.log:

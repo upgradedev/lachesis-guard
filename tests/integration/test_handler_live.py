@@ -17,7 +17,7 @@ import os
 import pytest
 from strands.interventions import Confirm, Deny, Guide, Proceed
 
-from lachesis.client import DeciderClient, DeciderUnavailable
+from lachesis.client import PINNED_CHECKPOINT, DeciderClient, DeciderUnavailable
 from lachesis.handler import LachesisHandler
 
 pytestmark = pytest.mark.live
@@ -27,11 +27,14 @@ pytestmark = pytest.mark.live
 def handler():
     url = os.environ.get("STRANDS_DECIDER_URL", "http://127.0.0.1:8099")
     try:
-        DeciderClient(url=url).health()
+        health = DeciderClient(url=url).health()
     except DeciderUnavailable:
         if os.environ.get("LACHESIS_REQUIRE_DECIDER") == "1":
             pytest.fail(f"Decider server required but nothing serves at {url}")
         pytest.skip(f"no Decider server at {url}")
+    assert health.get("checkpoint") == PINNED_CHECKPOINT, (
+        f"live suite needs the pinned model, server has {health.get('checkpoint')}"
+    )
     return LachesisHandler(client=DeciderClient(url=url))
 
 
@@ -71,6 +74,25 @@ def test_benign_write_proceeds_or_pauses(handler):
     )
     assert isinstance(action, (Proceed, Confirm))
     check_row(handler)
+
+
+def test_plain_search_proceeds(handler):
+    """The stub-killer: a constant-Confirm server fails exactly this assertion.
+
+    Verbatim fixture t06, which scored benign at 0.8325 on the pinned model
+    (CI run 38371638128, reproduced on the box to the fourth decimal): far
+    enough above the 0.70 threshold that only a stub answers Confirm here.
+    """
+    action = call(
+        handler,
+        "search",
+        {"query": "refund"},
+        "find where refunds are handled",
+    )
+    assert isinstance(action, Proceed)
+    row = check_row(handler)
+    assert row["verdict"] == "proceed"
+    assert row["layer"] == "decider"
 
 
 def test_tier0_read_needs_no_server_roundtrip(handler):

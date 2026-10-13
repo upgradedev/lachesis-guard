@@ -38,9 +38,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -68,6 +70,41 @@ class DeciderUnavailable(RuntimeError):
     """The Decider server is not answering."""
 
 
+def serve_hint(url: str) -> str:
+    """The start command for the port the url points at (8099 when unparseable)."""
+    try:
+        port = urllib.parse.urlparse(url).port or 8099
+    except ValueError:
+        port = 8099
+    return f"strands-decider serve <model> --device cpu --port {port}"
+
+
+def _explain(url: str, exc: BaseException) -> DeciderUnavailable:
+    """One DeciderUnavailable that says what actually went wrong.
+
+    ``HTTPError`` is a ``URLError`` subclass, so it is caught first: a 500 is
+    the server failing, not the network missing. Stalls arrive as ``OSError``
+    (``TimeoutError`` since 3.10); unreadable payloads as ``ValueError``,
+    ``KeyError``, ``AttributeError`` or ``TypeError``.
+    """
+    if isinstance(exc, urllib.error.HTTPError):
+        try:
+            body = exc.read().decode("utf-8", "replace")
+        except OSError:
+            body = ""
+        snippet = " ".join(body.split())[:200]
+        return DeciderUnavailable(f"Decider server at {url} answered HTTP {exc.code}: {snippet}")
+    if isinstance(exc, urllib.error.URLError):
+        return DeciderUnavailable(
+            f"no Decider server at {url} ({exc}). Start one with:\n    {serve_hint(url)}"
+        )
+    if isinstance(exc, OSError):
+        return DeciderUnavailable(
+            f"Decider server at {url} stalled or broke the connection ({exc})"
+        )
+    return DeciderUnavailable(f"Decider server at {url} answered nonsense ({exc})")
+
+
 def ask_decider(
     state: str, questions: Mapping[str, Mapping[str, Any]], url: str = SERVER_URL
 ) -> tuple[dict[str, Any], float | None]:
@@ -79,11 +116,12 @@ def ask_decider(
     try:
         with urllib.request.urlopen(request, timeout=120) as response:
             payload = json.loads(response.read())
-    except urllib.error.URLError as exc:
-        raise DeciderUnavailable(
-            f"no Decider server at {url} ({exc}). Start one with:\n    {SERVE_HINT}"
-        ) from exc
-    return payload["answers"], payload.get("latency_ms")
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        raise _explain(url, exc) from exc
+    try:
+        return payload["answers"], payload.get("latency_ms")
+    except (KeyError, AttributeError, TypeError) as exc:
+        raise _explain(url, exc) from exc
 
 
 def check_server(url: str = SERVER_URL) -> dict[str, Any]:
@@ -91,10 +129,8 @@ def check_server(url: str = SERVER_URL) -> dict[str, Any]:
     try:
         with urllib.request.urlopen(f"{url}/health", timeout=10) as response:
             return json.loads(response.read())
-    except urllib.error.URLError as exc:
-        raise DeciderUnavailable(
-            f"no Decider server at {url} ({exc}). Start one with:\n    {SERVE_HINT}"
-        ) from exc
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        raise _explain(url, exc) from exc
 
 
 # ---------------------------------------------------------------- the questions
@@ -273,6 +309,28 @@ def prescan(tool: str, arguments: Any) -> TriageVerdict | None:
 def decide(risk: str, confidence: float, grounded_p: float, threshold: float = DEFAULT_THRESHOLD):
     """Map one pair of Decider answers to a verdict. P(true) of 0.5 reads as grounded."""
     grounded = grounded_p >= 0.5
+    if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
+        # A malformed score must never proceed: NaN fails every comparison, so
+        # without this guard NaN plus benign would fall through to proceed.
+        return TriageVerdict(
+            "confirm",
+            f"Lachesis cannot use this score (confidence {confidence} is not "
+            "between 0 and 1), so a person decides whether this tool call runs.",
+            risk,
+            confidence,
+            grounded,
+        )
+    if isinstance(threshold, float) and math.isnan(threshold):
+        # NaN threshold likewise poisons every comparison below; an infinite
+        # one is strict but well-defined, so only NaN is refused.
+        return TriageVerdict(
+            "confirm",
+            f"Lachesis cannot use this threshold (threshold {threshold} is not "
+            "a number), so a person decides whether this tool call runs.",
+            risk,
+            confidence,
+            grounded,
+        )
     if confidence < threshold:
         return TriageVerdict(
             "confirm",

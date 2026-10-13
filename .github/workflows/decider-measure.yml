@@ -12,12 +12,18 @@ on:
       - "evaluation/**"
       - "scripts/measure_threshold.py"
       - "src/lachesis/evaluate.py"
+      - "src/lachesis/questions.py"
+      - "src/lachesis/handler.py"
+      - "src/lachesis/policy.py"
       - ".github/workflows/decider-measure.yml"
   pull_request:
     paths:
       - "evaluation/**"
       - "scripts/measure_threshold.py"
       - "src/lachesis/evaluate.py"
+      - "src/lachesis/questions.py"
+      - "src/lachesis/handler.py"
+      - "src/lachesis/policy.py"
       - ".github/workflows/decider-measure.yml"
   workflow_dispatch:
 

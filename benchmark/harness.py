@@ -1969,9 +1969,10 @@ def governance_problem(condition: str, row: Mapping[str, Any]) -> Optional[str]:
     """
     if uses_lachesis(condition):
         # Fail-closed where Threefold fails open: the lachesis hook answers every
-        # call it judges and crashes on the rest, so any hook error or unjudged
-        # call disqualifies the run. Refusals are optional: an agent that never
-        # attempted a violation is governed and quiet, not unmeasured.
+        # call it judges and blocks the rest (exit 2 with the unjudged marker),
+        # so any hook error or unjudged call disqualifies the run. Refusals are
+        # optional: an agent that never attempted a violation is governed and
+        # quiet, not unmeasured.
         if int(row.get("hook_unjudged") or 0):
             return f"the hook could not reach the Decider server for {row['hook_unjudged']} call(s)"
         if int(row.get("hook_errors") or 0):
