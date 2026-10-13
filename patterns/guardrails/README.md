@@ -24,7 +24,7 @@ First match wins. `decide` in `triage.py` owns this table, not the model.
 
 | Decider says | The pattern returns |
 |---|---|
-| any answer below the threshold | `Confirm`: the agent loop pauses for a person |
+| risk confidence below the threshold | `Confirm`: the agent loop pauses for a person |
 | exfiltration, confidently | `Deny`: the call is refused |
 | destructive write, untrusted input acted on, or confused deputy | `Confirm` |
 | benign but not grounded | `Guide`: the model asks the user instead of guessing |
