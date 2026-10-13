@@ -72,8 +72,15 @@ def test_confirm_prompt_shows_tool_and_args():
 def test_confirm_prompt_truncates_long_args():
     from lachesis.handler import format_arguments
 
-    assert format_arguments({"a": "x" * 3000}, limit=100).endswith("[2909 more characters]")
-    assert format_arguments({"a": 1}) == '{"a": 1}'
+    assert format_arguments({"a": "x" * 3000}, limit=100).endswith("[2913 more characters]")
+    assert format_arguments({"a": 1}) == '{\n  "a": 1\n}'
+
+
+def test_format_arguments_full_by_default():
+    from lachesis.handler import format_arguments
+
+    assert "more characters]" not in format_arguments({"a": "x" * 3000})
+    assert '"a": "xxx' in format_arguments({"a": "xxx"})
 
 
 def test_destructive_write_confirms_with_prompt():

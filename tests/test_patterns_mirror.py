@@ -115,6 +115,90 @@ def test_handler_mapping_matches(pattern):
         assert mine.__dict__ == theirs.__dict__
 
 
+def pause_pair(pattern, risk="benign", confidence=0.4, grounded_p=0.9):
+    """A pattern handler and a package handler answering the same script."""
+    from lachesis.handler import LachesisHandler
+
+    def ask(state, questions):
+        return (
+            {
+                "risk_class": {"choice": risk, "confidence": confidence},
+                "grounded": {"noul": grounded_p},
+            },
+            3.0,
+        )
+
+    mine = pattern.TriageHandler(ask=ask)
+    theirs = LachesisHandler(
+        client=SimpleNamespace(
+            ask=lambda s, q: SimpleNamespace(
+                answers={
+                    "risk_class": {"choice": risk, "confidence": confidence},
+                    "grounded": {"noul": grounded_p},
+                },
+                latency_ms=3.0,
+            )
+        )
+    )
+    return mine, theirs
+
+
+def pause_event(name, args, call_id):
+    return SimpleNamespace(
+        tool_use={"name": name, "input": args, "toolUseId": call_id},
+        agent=SimpleNamespace(messages=[]),
+    )
+
+
+def test_pause_binding_matches(pattern):
+    """Same pause plus resume on both sides: same prompts, same rows."""
+    for mine, theirs in [pause_pair(pattern)]:
+        first_mine = mine.before_tool_call(pause_event("exec", {"command": "x"}, "c1"))
+        first_theirs = theirs.before_tool_call(pause_event("exec", {"command": "x"}, "c1"))
+        assert type(first_mine) is type(first_theirs)
+        assert first_mine.prompt == first_theirs.prompt
+        assert mine.log == theirs.log
+        second_mine = mine.before_tool_call(pause_event("exec", {"command": "x"}, "c1"))
+        second_theirs = theirs.before_tool_call(pause_event("exec", {"command": "x"}, "c1"))
+        assert type(second_mine) is type(second_theirs)
+        assert second_mine.prompt == second_theirs.prompt
+        assert mine.log == theirs.log
+        assert mine.log[-1]["cached"] is True
+
+
+def test_refusal_rewrite_matches(pattern):
+    """Same human no on both sides: same neutral text, same escalated Deny."""
+    mine, theirs = pause_pair(pattern)
+    paused_mine = mine.before_tool_call(pause_event("exec", {"command": "x"}, "c1"))
+    paused_theirs = theirs.before_tool_call(pause_event("exec", {"command": "x"}, "c1"))
+
+    def denied(prompt):
+        event = SimpleNamespace(
+            tool_use={"name": "exec", "input": {"command": "x"}, "toolUseId": "c1"},
+            agent=SimpleNamespace(messages=[]),
+            result={
+                "toolUseId": "c1",
+                "status": "error",
+                "content": [{"text": f"CONFIRMATION_FAILED: {prompt}"}],
+            },
+        )
+        return event
+
+    event_mine, event_theirs = denied(paused_mine.prompt), denied(paused_theirs.prompt)
+    seen_mine = mine.after_tool_call(event_mine)
+    seen_theirs = theirs.after_tool_call(event_theirs)
+    assert type(seen_mine) is type(seen_theirs)
+    seen_mine.apply(event_mine)
+    seen_theirs.apply(event_theirs)
+    assert event_mine.result == event_theirs.result
+
+    retry_mine = mine.before_tool_call(pause_event("exec", {"command": "x"}, "c2"))
+    retry_theirs = theirs.before_tool_call(pause_event("exec", {"command": "x"}, "c2"))
+    assert type(retry_mine) is type(retry_theirs)
+    assert retry_mine.__dict__ == retry_theirs.__dict__
+    assert mine.log == theirs.log
+
+
 def test_handler_mapping_matches_without_args(pattern):
     event = SimpleNamespace(
         tool_use={"name": "t", "input": {}},

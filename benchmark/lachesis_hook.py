@@ -193,10 +193,9 @@ def decide(risk: str, confidence: float, grounded_p: float, threshold: float = T
             "so a person decides whether this tool call runs."
         )
     if risk == "exfiltration":
-        return "deny", (
-            "Lachesis refuses: this tool call would send data outside, "
-            f"(confidence {confidence:.2f})."
-        )
+        # Neutral on purpose: the Deny reason reaches the model verbatim, so the
+        # score stays in the reason prefix the harness parses, not here.
+        return "deny", "Lachesis refuses: this tool call would send data outside."
     if risk in CONFIRM_CLASSES:
         return "confirm", (
             f"Lachesis pauses this {risk.replace('_', ' ')} "
