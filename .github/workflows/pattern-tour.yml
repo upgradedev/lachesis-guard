@@ -1,0 +1,56 @@
+name: pattern-tour
+
+# The reusable pattern proves itself: a clean container installs ONLY what the
+# pattern README names, serves the pinned model, and runs the tour verbatim.
+# The tour must print all four verdicts and exit 0.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "patterns/**"
+      - ".github/workflows/pattern-tour.yml"
+  pull_request:
+    paths:
+      - "patterns/**"
+      - ".github/workflows/pattern-tour.yml"
+  workflow_dispatch:
+
+jobs:
+  tour:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install only what the pattern README names
+        run: |
+          set -o pipefail
+          pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cpu
+          pip install strands-decider==0.1.0 strands-agents
+
+      - name: Serve the pinned model
+        run: |
+          nohup python -m strands_decider serve StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --device cpu --port 8099 > server.log 2>&1 &
+          echo $! > server.pid
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:8099/health | grep -q ok; then
+              head -c 400 server.log; echo; break
+            fi
+            if ! kill -0 "$(cat server.pid)" 2>/dev/null; then
+              echo "server died:"; tail -40 server.log; exit 1
+            fi
+            sleep 5
+          done
+          curl -sf http://127.0.0.1:8099/health | tee health.json
+
+      - name: Run the tour verbatim
+        run: |
+          set -o pipefail
+          cd patterns/guardrails
+          python example.py | tee tour.txt
+          grep -q "tour: proceed guide confirm deny" tour.txt

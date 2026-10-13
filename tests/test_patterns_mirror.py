@@ -85,6 +85,23 @@ def scripted_answers(risk, confidence, grounded_p):
     return ask
 
 
+def test_policy_sets_cover_the_risk_classes(pattern):
+    assert set(pattern.RISK_CLASSES) == (
+        pattern.CONFIRM_CLASSES | pattern.DENY_CLASSES | {pattern.BENIGN_LABEL}
+    )
+
+
+def test_rename_without_policy_fails_at_import(pattern):
+    import pathlib
+
+    source = pathlib.Path(pattern.__file__).read_text(encoding="utf-8")
+    broken = source.replace('    "destructive_write": (', '    "shredder": (', 1)
+    assert broken != source
+    namespace: dict = {"__name__": "lachesis_triage_renamed"}
+    with pytest.raises(AssertionError, match="rename it in CONFIRM_CLASSES"):
+        exec(compile(broken, "triage_renamed.py", "exec"), namespace)
+
+
 def test_nan_confidence_confirms_on_both_sides(pattern):
     mine = pattern.decide("benign", float("nan"), 1.0)
     theirs = lachesis.policy.decide("benign", float("nan"), 1.0)
