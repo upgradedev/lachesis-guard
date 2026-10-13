@@ -11,7 +11,40 @@ model.
 
 Built for the Agent Experience Hackathon: Strands Decider on AWS Builder Center, pattern `#guardrails`.
 
-**Lachesis is never the gate.** The gate behind it is deterministic.
+**Lachesis is never the gate.** Decider only measures. The gate is the
+deterministic code around it: two pre-checks that never call the model
+(safe reads proceed, secret-shaped arguments pause), and a small policy
+table that maps the model's answers to Proceed, Guide, Confirm or Deny.
+
+```mermaid
+flowchart LR
+    A["Bedrock agent proposes a tool call"] --> B["before_tool_call: Lachesis handler"]
+    B --> C{"deterministic pre-checks"}
+    C -->|safe read| P["Proceed"]
+    C -->|secret-shaped arguments| H["Confirm: a person decides"]
+    C -->|anything else| D["Strands Decider 2B: risk class + grounding"]
+    D --> T["policy table, plain Python"]
+    T --> P
+    T --> G["Guide: ask the user"]
+    T --> H
+    T --> X["Deny: refused"]
+```
+
+## Quickstart
+
+Install, serve the pinned model, and watch all four verdicts fire in the
+pattern tour (about 40 seconds on a small CPU box):
+
+```sh
+pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cpu
+pip install strands-decider==0.1.0 strands-agents
+strands-decider serve StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --device cpu --port 8099
+python patterns/guardrails/example.py
+```
+
+Then run the same triage around a live Bedrock agent with
+`python patterns/guardrails/example.py --agent`, or the full demo with
+`python scripts/demo_agent.py --model <bedrock-model-id>`.
 
 ## Threshold
 

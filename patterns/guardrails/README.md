@@ -30,7 +30,9 @@ First match wins. `decide` in `triage.py` owns this table, not the model.
 | benign but not grounded | `Guide`: the model asks the user instead of guessing |
 | benign, grounded, confident | `Proceed` |
 
-**This pattern is never the gate.** The gate behind it is deterministic.
+**This pattern is never the gate.** Decider only measures. The gate is the
+deterministic code in `triage.py`: two pre-checks that never call the model
+(safe reads proceed, secret-shaped arguments pause), and the table above.
 Measure the threshold on your own traffic before you trust it; 0.9 is the
 model card's figure for short classification, not a measured value for you.
 
