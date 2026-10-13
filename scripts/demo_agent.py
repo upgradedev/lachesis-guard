@@ -301,7 +301,7 @@ def main() -> int:
     global _WORKDIR, _BASELINE
     _WORKDIR = workdir
     _BASELINE = snapshot(workdir)
-    triage = LachesisHandler(on_verdict=print_verdict)
+    triage = LachesisHandler(on_verdict=print_verdict, audit_path=sessions / "audit.jsonl")
     agent = build_agent(args.model, make_tools(workdir, acceptance), triage, sessions)
 
     if args.resume:
