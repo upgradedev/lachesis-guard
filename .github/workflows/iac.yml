@@ -1,0 +1,86 @@
+name: iac
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "What to run"
+        type: choice
+        options:
+          - oidc-check
+          - synth
+          - deploy-foundation
+          - deploy-decider
+          - deploy-agent
+          - deploy-approvals
+          - destroy
+        default: oidc-check
+      confirm:
+        description: "Type DESTROY to confirm destroy"
+        type: string
+        default: ""
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  iac:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.action == 'destroy' && 'aws-destroy' || 'aws-deploy' }}
+    env:
+      AWS_REGION: eu-west-1
+      AWS_DEFAULT_REGION: eu-west-1
+    steps:
+      - name: Assume LachesisCiRole
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_CI_ROLE_ARN }}
+          aws-region: eu-west-1
+      - name: Print assumed role (A0 acceptance)
+        run: aws sts get-caller-identity
+      - name: Checkout
+        if: inputs.action != 'oidc-check'
+        uses: actions/checkout@v4
+      - name: Set up Python
+        if: inputs.action != 'oidc-check'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Set up Node
+        if: inputs.action != 'oidc-check'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install CDK
+        if: inputs.action != 'oidc-check'
+        run: |
+          pip install -r infra/requirements.txt
+          npm install -g aws-cdk@2
+      - name: Synth
+        if: inputs.action == 'synth'
+        working-directory: infra
+        run: cdk synth --all --output ../cdk.out.synth && ls ../cdk.out.synth
+      - name: Deploy foundation
+        if: inputs.action == 'deploy-foundation'
+        working-directory: infra
+        run: cdk deploy LachesisFoundation --require-approval never
+      - name: Deploy decider
+        if: inputs.action == 'deploy-decider'
+        working-directory: infra
+        run: cdk deploy LachesisDecider --require-approval never
+      - name: Deploy agent
+        if: inputs.action == 'deploy-agent'
+        working-directory: infra
+        run: cdk deploy LachesisAgent --require-approval never
+      - name: Deploy approvals
+        if: inputs.action == 'deploy-approvals'
+        working-directory: infra
+        run: cdk deploy LachesisApprovals --require-approval never
+      - name: Destroy (allow-listed Lachesis stacks only)
+        if: inputs.action == 'destroy' && inputs.confirm == 'DESTROY'
+        working-directory: infra
+        run: |
+          for stack in LachesisApprovals LachesisAgent LachesisDecider LachesisFoundation; do
+            cdk destroy "$stack" --force || true
+          done
