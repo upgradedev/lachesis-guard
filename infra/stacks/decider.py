@@ -49,6 +49,9 @@ class DeciderStack(cdk.Stack):
         )
 
         image_uri = foundation.decider_repo.repository_uri_for_tag("latest")
+        # SageMaker validates the pull when the model is created, so the
+        # role's pull policy must exist first.
+        _default_policy = role.node.try_find_child("DefaultPolicy")
 
         model = sagemaker.CfnModel(
             self,
@@ -60,6 +63,8 @@ class DeciderStack(cdk.Stack):
             ),
             tags=[cdk.CfnTag(key="app", value="lachesis-guard")],
         )
+        if _default_policy is not None:
+            model.node.add_dependency(_default_policy)
 
         endpoint_config = sagemaker.CfnEndpointConfig(
             self,

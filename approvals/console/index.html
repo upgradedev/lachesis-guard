@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lachesis Approvals</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 44rem; padding: 0 1rem; background: #0b0e14; color: #e6e6e6; }
+  h1 { font-size: 1.4rem; }
+  .card { border: 1px solid #2a3242; border-radius: 8px; padding: 1rem; margin: 1rem 0; background: #121722; }
+  button { background: #2f6fed; color: white; border: 0; border-radius: 6px; padding: 0.5rem 1rem; cursor: pointer; margin-right: 0.5rem; }
+  button.decline { background: #8a3033; }
+  button.secondary { background: #2a3242; }
+  input { display: block; margin: 0.4rem 0 0.8rem; padding: 0.5rem; width: 100%; box-sizing: border-box; }
+  pre { white-space: pre-wrap; word-break: break-word; background: #0b0e14; padding: 0.6rem; border-radius: 6px; }
+  .muted { color: #8b94a3; }
+  .gauge { height: 8px; background: #2a3242; border-radius: 4px; margin: 0.4rem 0; }
+  .gauge > div { height: 8px; background: #e0a458; border-radius: 4px; }
+</style>
+</head>
+<body>
+<h1>Lachesis Approvals</h1>
+<p class="muted">A person decides every paused tool call. Lachesis is never the gate.</p>
+
+<section id="login" class="card">
+  <h2>Approver sign-in</h2>
+  <label>Username <input id="username" autocomplete="username"></label>
+  <label>Password <input id="password" type="password" autocomplete="current-password"></label>
+  <button id="signin">Sign in</button>
+  <span id="login-state" class="muted"></span>
+</section>
+
+<section class="card">
+  <h2>Try the demo (no account)</h2>
+  <p class="muted">Starts the canned run: the agent tries to paste a staging key into a test file and Lachesis pauses it for a person. On this public lane nobody is emailed; the pause shows here.</p>
+  <button id="try">Start the demo run</button>
+  <div id="try-state" class="muted"></div>
+  <pre id="try-result"></pre>
+</section>
+
+<section id="pending-wrap" class="card" hidden>
+  <h2>Paused calls waiting for you</h2>
+  <button id="refresh" class="secondary">Refresh</button>
+  <button id="start" class="secondary">Start a demo run (approver lane)</button>
+  <div id="pending"></div>
+</section>
+
+<script src="config.js"></script>
+<script>
+const cfg = window.LACHESIS_CONFIG;
+let idToken = null;
+
+async function api(path, options = {}) {
+  const headers = { "content-type": "application/json" };
+  if (idToken) headers.authorization = idToken;
+  const res = await fetch(cfg.apiUrl + path, { ...options, headers });
+  return { status: res.status, body: await res.json().catch(() => ({})) };
+}
+
+function gauge(confidence) {
+  const pct = Math.round((confidence || 0) * 100);
+  return '<div class="gauge"><div style="width:' + pct + '%"></div></div>';
+}
+
+function renderApproval(item) {
+  const div = document.createElement("div");
+  div.className = "card";
+  const reason = (item.card && item.card.reason) || "";
+  const match = reason.match(/confidence\s+([0-9.]+)/i);
+  div.innerHTML = "<strong>" + item.approval_id + "</strong> " + gauge(match ? parseFloat(match[1]) : 0) +
+    "<pre></pre>" +
+    '<button data-act="approve">Approve</button><button class="decline" data-act="decline">Decline</button> ' +
+    '<span class="muted"></span>';
+  div.querySelector("pre").textContent = reason;
+  div.querySelectorAll("button").forEach(btn => btn.addEventListener("click", async () => {
+    const out = await api("/approvals/" + item.approval_id + "/decision", {
+      method: "POST", body: JSON.stringify({ decision: btn.dataset.act })
+    });
+    div.querySelector("span.muted").textContent = out.status === 202 ? "Recorded. The agent is resuming." : "Refused: " + (out.body.error || out.status);
+    if (out.status === 202) setTimeout(loadPending, 1500);
+  }));
+  return div;
+}
+
+async function loadPending() {
+  const out = await api("/approvals");
+  const wrap = document.getElementById("pending");
+  wrap.textContent = "";
+  if (out.status !== 200) { wrap.textContent = "Sign in as an approver to see paused calls."; return; }
+  if (!out.body.approvals.length) wrap.textContent = "Nothing is paused right now.";
+  out.body.approvals.forEach(item => wrap.appendChild(renderApproval(item)));
+}
+
+document.getElementById("signin").addEventListener("click", async () => {
+  const state = document.getElementById("login-state");
+  state.textContent = "Signing in...";
+  const res = await fetch("https://cognito-idp." + cfg.region + ".amazonaws.com/", {
+    method: "POST",
+    headers: { "content-type": "application/x-amz-json-1.1", "x-amz-target": "AWSCognitoIdentityProviderService.InitiateAuth" },
+    body: JSON.stringify({
+      AuthFlow: "USER_PASSWORD_AUTH",
+      ClientId: cfg.clientId,
+      AuthParameters: {
+        USERNAME: document.getElementById("username").value,
+        PASSWORD: document.getElementById("password").value
+      }
+    })
+  });
+  const body = await res.json();
+  if (body.AuthenticationResult && body.AuthenticationResult.IdToken) {
+    idToken = body.AuthenticationResult.IdToken;
+    state.textContent = "Signed in.";
+    document.getElementById("pending-wrap").hidden = false;
+    loadPending();
+  } else {
+    state.textContent = "Sign-in failed: " + (body.message || res.status);
+  }
+});
+
+document.getElementById("refresh").addEventListener("click", loadPending);
+document.getElementById("start").addEventListener("click", async () => {
+  await api("/approvals/start", { method: "POST", body: "{}" });
+  setTimeout(loadPending, 2000);
+});
+
+document.getElementById("try").addEventListener("click", async () => {
+  const state = document.getElementById("try-state");
+  const result = document.getElementById("try-result");
+  state.textContent = "Starting...";
+  result.textContent = "";
+  const out = await api("/try", { method: "POST", body: "{}" });
+  if (out.status !== 202) { state.textContent = "Refused: " + (out.body.error || out.status); return; }
+  const token = out.body.token;
+  state.textContent = "Running with token " + token + " ...";
+  for (let i = 0; i < 90; i++) {
+    await new Promise(r => setTimeout(r, 4000));
+    const poll = await api("/try/" + token);
+    if (poll.status !== 200) continue;
+    state.textContent = "Status: " + poll.body.status;
+    if (poll.body.status === "PENDING") {
+      result.textContent = (poll.body.card && poll.body.card.reason) || "The agent is paused for a person.";
+      state.textContent = "Status: PENDING. In the hosted run an approver decides in this console; on the public lane the pause simply waits and then expires refused.";
+      return;
+    }
+    if (["DONE", "REFUSED_DONE", "EXPIRED"].includes(poll.body.status)) {
+      result.textContent = poll.body.result_text || poll.body.status;
+      return;
+    }
+  }
+  state.textContent = "Still running; poll again later with the token above.";
+});
+</script>
+</body>
+</html>
