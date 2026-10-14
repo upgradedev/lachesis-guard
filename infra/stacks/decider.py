@@ -69,6 +69,9 @@ class DeciderStack(cdk.Stack):
         endpoint_config = sagemaker.CfnEndpointConfig(
             self,
             "DeciderEndpointConfig",
+            # Required for inference-component endpoints: the config-level
+            # role is what pulls the component's image.
+            execution_role_arn=role.role_arn,
             production_variants=[
                 # No model_name: an endpoint whose variant names a model
                 # cannot host inference components ("Inference Components
