@@ -17,12 +17,12 @@ phases:
   build:
     commands:
       - cd decider-image
-      - docker build -t $REPO_URI:$IMAGE_TAG -t $REPO_URI:latest .
+      - "docker build -t $REPO_URI:$IMAGE_TAG -t $REPO_URI:latest ."
   post_build:
     commands:
-      - docker push $REPO_URI:$IMAGE_TAG
-      - docker push $REPO_URI:latest
-      - echo "{\"image\": \"$REPO_URI:$IMAGE_TAG\"}" > ../image.json
+      - "printf '{\"image\": \"%s\"}' $REPO_URI:$IMAGE_TAG > ../image.json"
+      - "docker push $REPO_URI:$IMAGE_TAG"
+      - "docker push $REPO_URI:latest"
 
 artifacts:
   files:

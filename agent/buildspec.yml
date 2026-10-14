@@ -1,0 +1,27 @@
+version: 0.2
+
+# Builds the ARM64 agent image and pushes it to ECR as :<git-sha> and
+# :latest. Runs on the CodeBuild ARM project (lachesis-agent-image).
+env:
+  variables:
+    AWS_DEFAULT_REGION: eu-west-1
+
+phases:
+  pre_build:
+    commands:
+      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - REPO_URI=$ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+      - IMAGE_TAG=${CODEBUILD_RESOLVED_SOURCE_VERSION:-latest}
+  build:
+    commands:
+      - "docker buildx create --name lachesis --driver docker-container --use || docker buildx use lachesis"
+      - "docker buildx build --platform linux/arm64 -f agent/Dockerfile -t $REPO_URI:$IMAGE_TAG -t $REPO_URI:latest --push ."
+  post_build:
+    commands:
+      - "printf '{\"image\": \"%s\"}' $REPO_URI:$IMAGE_TAG > image.json"
+
+artifacts:
+  files:
+    - image.json
+  base-directory: .
