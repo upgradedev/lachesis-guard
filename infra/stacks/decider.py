@@ -107,12 +107,17 @@ class DeciderStack(cdk.Stack):
                 container=sagemaker.CfnInferenceComponent.InferenceComponentContainerSpecificationProperty(
                     image=image_uri,
                 ),
+                # Proven against the live service by hand before it was
+                # baked in (2026-10-14): the scheduler's allocatable
+                # envelope on ml.g5.xlarge is far below the raw instance
+                # size. 4 cores or a max above ~6 GB is rejected or
+                # never schedules; 2 cores and 2048-6144 MB is InService.
                 compute_resource_requirements=(
                     sagemaker.CfnInferenceComponent.InferenceComponentComputeResourceRequirementsProperty(
                         number_of_accelerator_devices_required=1,
-                        number_of_cpu_cores_required=4,
-                        min_memory_required_in_mb=6144,
-                        max_memory_required_in_mb=13312,
+                        number_of_cpu_cores_required=2,
+                        min_memory_required_in_mb=2048,
+                        max_memory_required_in_mb=6144,
                     )
                 ),
                 startup_parameters=sagemaker.CfnInferenceComponent.InferenceComponentStartupParametersProperty(
