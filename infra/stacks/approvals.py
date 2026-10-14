@@ -10,6 +10,8 @@ SES sends the approval card; GET never approves.
 
 from __future__ import annotations
 
+import pathlib
+
 import aws_cdk as cdk
 from aws_cdk import aws_apigatewayv2 as apigw
 from aws_cdk import aws_cloudfront as cloudfront
@@ -24,8 +26,9 @@ from aws_cdk import aws_s3 as s3
 from aws_cdk import aws_s3_deployment as s3deploy
 from constructs import Construct
 
-LAMBDA_ASSET = "approvals/lambda"
-CONSOLE_ASSET = "approvals/console"
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+LAMBDA_ASSET = str(_REPO_ROOT / "approvals" / "lambda")
+CONSOLE_ASSET = str(_REPO_ROOT / "approvals" / "console")
 
 
 class ApprovalsStack(cdk.Stack):
