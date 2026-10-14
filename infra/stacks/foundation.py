@@ -11,10 +11,20 @@ from __future__ import annotations
 import aws_cdk as cdk
 from aws_cdk import (
     aws_budgets as budgets,
+)
+from aws_cdk import (
     aws_codebuild as codebuild,
+)
+from aws_cdk import (
     aws_ecr as ecr,
+)
+from aws_cdk import (
     aws_kms as kms,
+)
+from aws_cdk import (
     aws_s3 as s3,
+)
+from aws_cdk import (
     aws_sns as sns,
 )
 from constructs import Construct
@@ -75,7 +85,9 @@ class FoundationStack(cdk.Stack):
             ),
             environment_variables={
                 "AWS_DEFAULT_REGION": codebuild.BuildEnvironmentVariable(value="eu-west-1"),
-                "IMAGE_REPO": codebuild.BuildEnvironmentVariable(value=self.decider_repo.repository_name),
+                "IMAGE_REPO": codebuild.BuildEnvironmentVariable(
+                    value=self.decider_repo.repository_name
+                ),
             },
         )
         self.decider_repo.grant_pull_push(self.decider_build)
@@ -92,7 +104,9 @@ class FoundationStack(cdk.Stack):
             ),
             environment_variables={
                 "AWS_DEFAULT_REGION": codebuild.BuildEnvironmentVariable(value="eu-west-1"),
-                "IMAGE_REPO": codebuild.BuildEnvironmentVariable(value=self.agent_repo.repository_name),
+                "IMAGE_REPO": codebuild.BuildEnvironmentVariable(
+                    value=self.agent_repo.repository_name
+                ),
             },
         )
         self.agent_repo.grant_pull_push(self.agent_build)

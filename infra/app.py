@@ -17,12 +17,11 @@ from __future__ import annotations
 import aws_cdk as cdk
 from aws_cdk import Aspects, Tags
 from cdk_nag import AwsSolutionsChecks
-
 from stacks.foundation import FoundationStack
 
 try:
-    from stacks.approvals import ApprovalsStack
     from stacks.agent import AgentStack
+    from stacks.approvals import ApprovalsStack
     from stacks.decider import DeciderStack
     from stacks.observability import ObservabilityStack
     HAVE_ALL_STACKS = True
