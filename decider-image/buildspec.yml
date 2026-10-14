@@ -1,0 +1,30 @@
+version: 0.2
+
+# Builds the Decider BYOC image and pushes it to ECR as :<git-sha> and
+# :latest. Runs on CodeBuild (project lachesis-decider-image) because the
+# layer that bakes the model is several GB; nothing is built locally.
+env:
+  variables:
+    AWS_DEFAULT_REGION: eu-west-1
+
+phases:
+  pre_build:
+    commands:
+      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - REPO_URI=$ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+      - IMAGE_TAG=${CODEBUILD_RESOLVED_SOURCE_VERSION:-latest}
+  build:
+    commands:
+      - cd decider-image
+      - docker build -t $REPO_URI:$IMAGE_TAG -t $REPO_URI:latest .
+  post_build:
+    commands:
+      - docker push $REPO_URI:$IMAGE_TAG
+      - docker push $REPO_URI:latest
+      - echo "{\"image\": \"$REPO_URI:$IMAGE_TAG\"}" > ../image.json
+
+artifacts:
+  files:
+    - image.json
+  base-directory: .

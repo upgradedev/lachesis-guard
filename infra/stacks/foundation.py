@@ -56,6 +56,18 @@ class FoundationStack(cdk.Stack):
             auto_delete_objects=True,
         )
 
+        self.source_bucket = s3.Bucket(
+            self,
+            "SourceBucket",
+            encryption=s3.BucketEncryption.KMS,
+            encryption_key=self.key,
+            versioned=True,
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            enforce_ssl=True,
+            removal_policy=cdk.RemovalPolicy.DESTROY,
+            auto_delete_objects=True,
+        )
+
         self.decider_repo = ecr.Repository(
             self,
             "DeciderRepo",
@@ -77,6 +89,10 @@ class FoundationStack(cdk.Stack):
             self,
             "DeciderImageBuild",
             project_name="lachesis-decider-image",
+            source=codebuild.Source.s3(
+                bucket=self.source_bucket,
+                path="decider-image-source.zip",
+            ),
             build_spec=codebuild.BuildSpec.from_source_filename("decider-image/buildspec.yml"),
             environment=codebuild.BuildEnvironment(
                 build_image=codebuild.LinuxBuildImage.STANDARD_7_0,
@@ -96,6 +112,10 @@ class FoundationStack(cdk.Stack):
             self,
             "AgentImageBuild",
             project_name="lachesis-agent-image",
+            source=codebuild.Source.s3(
+                bucket=self.source_bucket,
+                path="agent-image-source.zip",
+            ),
             build_spec=codebuild.BuildSpec.from_source_filename("agent/buildspec.yml"),
             environment=codebuild.BuildEnvironment(
                 build_image=codebuild.LinuxBuildImage.STANDARD_7_0,
@@ -152,6 +172,7 @@ class FoundationStack(cdk.Stack):
         )
 
         cdk.CfnOutput(self, "SessionsBucketName", value=self.sessions_bucket.bucket_name)
+        cdk.CfnOutput(self, "SourceBucketName", value=self.source_bucket.bucket_name)
         cdk.CfnOutput(self, "DeciderRepoUri", value=self.decider_repo.repository_uri)
         cdk.CfnOutput(self, "AgentRepoUri", value=self.agent_repo.repository_uri)
         cdk.CfnOutput(self, "KmsKeyArn", value=self.key.key_arn)
