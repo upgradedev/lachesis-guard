@@ -43,8 +43,8 @@ SPECIFICATION = {
 }
 
 
-def _image_uri(sm) -> str:
-    account = boto3.client("sts").get_caller_identity()["Account"]
+def _image_uri(session: boto3.Session) -> str:
+    account = session.client("sts").get_caller_identity()["Account"]
     return f"{account}.dkr.ecr.{REGION}.amazonaws.com/lachesis-decider:latest"
 
 
@@ -64,12 +64,12 @@ def _wait_gone(sm) -> None:
         time.sleep(20)
 
 
-def ensure_component(sm) -> str:
+def ensure_component(sm, session: boto3.Session) -> str:
     status = _component_status(sm)
     if status == "InService":
         return status
     specification = dict(SPECIFICATION)
-    specification["Container"] = {"Image": _image_uri(sm)}
+    specification["Container"] = {"Image": _image_uri(session)}
     for attempt in range(1, MAX_ATTEMPTS + 1):
         if _component_status(sm) is not None:
             sm.delete_inference_component(InferenceComponentName=COMPONENT)
@@ -95,8 +95,8 @@ def ensure_component(sm) -> str:
     raise SystemExit(f"inference component never reached InService after {MAX_ATTEMPTS} attempts")
 
 
-def ensure_scaling() -> None:
-    aas = boto3.client("application-autoscaling", region_name=REGION)
+def ensure_scaling(session: boto3.Session) -> None:
+    aas = session.client("application-autoscaling", region_name=REGION)
     aas.register_scalable_target(
         ServiceNamespace="sagemaker",
         ResourceId=RESOURCE_ID,
@@ -122,10 +122,32 @@ def ensure_scaling() -> None:
     print("scaling target 0..1 and target-tracking policy registered")
 
 
+def _deploy_session() -> boto3.Session:
+    """Assume the CDK deploy role: the CI principal (LachesisCiRole) may
+    only assume the cdk-hnb659fds-* roles, and this script runs with its
+    credentials, so SageMaker calls go through that same role the CDK
+    deploy itself uses. Locally (owner credentials) no assumption is
+    needed and none is attempted."""
+    sts = boto3.client("sts")
+    account = sts.get_caller_identity()["Account"]
+    arn = sts.get_caller_identity()["Arn"]
+    if ":assumed-role/LachesisCiRole/" not in arn:
+        return boto3.Session(region_name=REGION)
+    role_arn = f"arn:aws:iam::{account}:role/cdk-hnb659fds-deploy-role-{account}-{REGION}"
+    creds = sts.assume_role(RoleArn=role_arn, RoleSessionName="lachesis-ic-apply")["Credentials"]
+    return boto3.Session(
+        aws_access_key_id=creds["AccessKeyId"],
+        aws_secret_access_key=creds["SecretAccessKey"],
+        aws_session_token=creds["SessionToken"],
+        region_name=REGION,
+    )
+
+
 def main() -> int:
-    sm = boto3.client("sagemaker", region_name=REGION)
-    print("component:", ensure_component(sm))
-    ensure_scaling()
+    session = _deploy_session()
+    sm = session.client("sagemaker", region_name=REGION)
+    print("component:", ensure_component(sm, session))
+    ensure_scaling(session)
     return 0
 
 
