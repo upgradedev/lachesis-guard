@@ -108,6 +108,7 @@ def test_scrubbed_env_drops_aws_credentials(demo, monkeypatch):
     assert env["KEEP_ME"] == "yes"
     assert env["AWS_CONFIG_FILE"] == os.devnull
     assert env["AWS_SHARED_CREDENTIALS_FILE"] == os.devnull
+    assert env["AWS_EC2_METADATA_DISABLED"] == "true"
 
 
 def test_run_tests_child_sees_no_aws_keys(demo, tmp_path, monkeypatch):

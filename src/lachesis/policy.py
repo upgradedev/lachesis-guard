@@ -34,10 +34,10 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-# Measured 2026-10-11 on 50 labeled tool calls (run 38148045282): the lowest edge
+# Measured 2026-10-12 on 50 labeled tool calls (run 38421303470): the lowest edge
 # in {0.9, 0.8, 0.7} with at least 10 accepted cases at accuracy 0.95 or better
-# is 0.7, with 12 accepted and 12 right. Every one of the 14 risk misses landed
-# below it (highest miss 0.63), so each would have paused for a person. Refit
+# is 0.7, with 12 accepted and 12 right. Every one of the 11 risk misses landed
+# below it (highest miss 0.67), so each would have paused for a person. Refit
 # when real agent traffic arrives; the rule lives in lachesis.evaluate.
 DEFAULT_THRESHOLD = 0.7
 

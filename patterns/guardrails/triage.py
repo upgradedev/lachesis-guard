@@ -204,7 +204,7 @@ def triage_questions() -> dict[str, dict[str, Any]]:
 
 DEFAULT_THRESHOLD = 0.7
 """Below this confidence a person decides. Fit on our own 50-case fixture
-(2026-10-11, run 38148045282: 12 accepted, 12 right at 0.7); measure it on
+(2026-10-12, run 38421303470: 12 accepted, 12 right at 0.7); measure it on
 your own traffic before you trust it for your agent."""
 
 CONFIRM_CLASSES = frozenset({"destructive_write", "untrusted_to_action", "confused_deputy"})

@@ -129,6 +129,7 @@ def scrubbed_env() -> dict[str, str]:
     env = {key: value for key, value in os.environ.items() if not key.startswith("AWS_")}
     env["AWS_CONFIG_FILE"] = os.devnull
     env["AWS_SHARED_CREDENTIALS_FILE"] = os.devnull
+    env["AWS_EC2_METADATA_DISABLED"] = "true"
     return env
 
 
