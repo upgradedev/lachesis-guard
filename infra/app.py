@@ -15,8 +15,7 @@ by scripts/create_ci_role.py, per the ADDENDUM day-one blocker list.
 from __future__ import annotations
 
 import aws_cdk as cdk
-from aws_cdk import Aspects, Tags
-from cdk_nag import AwsSolutionsChecks
+from aws_cdk import Tags
 from stacks.foundation import FoundationStack
 
 try:
@@ -45,6 +44,9 @@ for stack in app.node.find_all():
     if isinstance(stack, cdk.Stack):
         Tags.of(stack).add("app", "lachesis-guard")
 
-Aspects.of(app).add(AwsSolutionsChecks())
+# Policy checks run on the synthesized templates in CI
+# (tests/test_iac_templates.py): cdk-nag 3.0.2's AwsSolutionsChecks
+# aspect crashes under the aws-cdk-lib 2.273 jsii runtime
+# (run 38628707230), so the checks are ours and version-proof.
 
 app.synth()
