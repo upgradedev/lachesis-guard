@@ -29,6 +29,7 @@ class _Backend(BaseHTTPRequestHandler):
     last_body = b""
     gate = threading.Event()
     gate.set()
+    entered = threading.Event()
 
     def log_message(self, *args):
         pass
@@ -43,7 +44,8 @@ class _Backend(BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):  # noqa: N802
-        type(self).gate.wait(timeout=10)
+        type(self).entered.set()
+        type(self).gate.wait(timeout=30)
         type(self).last_body = self.rfile.read(int(self.headers.get("content-length") or 0))
         payload = json.dumps({"answers": {"risk": {"choice": "benign", "p": 0.9}}}).encode()
         self.send_response(200)
@@ -103,21 +105,18 @@ def test_invocations_forward_verbatim(adapter):
 def test_busy_forward_pass_answers_503(adapter):
     _, port = adapter
     _Backend.gate.clear()
+    _Backend.entered.clear()
     body = b'{"state": "s", "questions": {}}'
     first = threading.Thread(
         target=lambda: _call(port, "POST", "/invocations", body), daemon=True
     )
     first.start()
     try:
-        deadline = threading.Event()
-        status = None
-        for _ in range(50):
-            probe = _call(port, "POST", "/invocations", body)
-            if probe[0] == 503:
-                status = 503
-                break
-            deadline.wait(0.1)
+        # Deterministic: probe only once the first request is inside the
+        # backend, which means the adapter lock is already held.
+        assert _Backend.entered.wait(timeout=15)
+        status, _ = _call(port, "POST", "/invocations", body)
         assert status == 503
     finally:
         _Backend.gate.set()
-        first.join(timeout=15)
+        first.join(timeout=20)

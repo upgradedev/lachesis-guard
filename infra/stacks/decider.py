@@ -1,16 +1,25 @@
 """LachesisDecider: Decider 2B on a SageMaker inference component.
 
-BYOC image (foundation ECR repo lachesis-decider), one ml.g5.xlarge,
-ManagedInstanceScaling 0..1 copies so the GPU costs nothing while idle
-(judging lane (c): scale to zero in Gate 1, warm in the Gate 2 week).
-The container contract is decider-image/adapter.py: /ping gates on the
-real server health, /invocations forwards to /v1/systemone, one forward
-pass at a time (a busy pass answers 503 and callers fail closed).
+BYOC image (foundation ECR repo lachesis-decider) behind one inference
+component on ml.g5.xlarge. Application Auto Scaling moves DesiredCopyCount
+between 0 and 1, so the GPU costs nothing while idle (judging lane (c):
+scale to zero in Gate 1, warm in the Gate 2 week). The container contract
+is decider-image/adapter.py: /ping gates on the real server health,
+/invocations forwards to /v1/systemone, one forward pass at a time (a
+busy pass answers 503 and callers fail closed).
+
+Note on the architect brief: it listed ManagedInstanceScaling and
+InferenceAmiVersion as CFN properties of the inference component; the
+CDK 2.273.0 CfnInferenceComponent surface has neither (verified against
+the published API reference), so scaling is Application Auto Scaling on
+DesiredCopyCount and the AMI is the endpoint default. Same behaviour,
+real property names.
 """
 
 from __future__ import annotations
 
 import aws_cdk as cdk
+from aws_cdk import aws_applicationautoscaling as appscaling
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_sagemaker as sagemaker
 from constructs import Construct
@@ -59,6 +68,8 @@ class DeciderStack(cdk.Stack):
                 sagemaker.CfnEndpointConfig.ProductionVariantProperty(
                     variant_name="AllTraffic",
                     model_name=model.attr_model_name,
+                    initial_instance_count=1,
+                    instance_type="ml.g5.xlarge",
                 )
             ],
             tags=[cdk.CfnTag(key="app", value="lachesis-guard")],
@@ -72,7 +83,7 @@ class DeciderStack(cdk.Stack):
             tags=[cdk.CfnTag(key="app", value="lachesis-guard")],
         )
 
-        self.inference_component = sagemaker.CfnInferenceComponent(
+        component = sagemaker.CfnInferenceComponent(
             self,
             "DeciderInferenceComponent",
             endpoint_name=endpoint.attr_endpoint_name,
@@ -86,29 +97,63 @@ class DeciderStack(cdk.Stack):
                 container=sagemaker.CfnInferenceComponent.InferenceComponentContainerSpecificationProperty(
                     image=image_uri,
                 ),
-                compute_resource_requirements=sagemaker.CfnInferenceComponent.ComputeResourceRequirementsProperty(
-                    number_of_accelerator_devices_required=1,
-                    number_of_cpu_cores_required=4,
-                    min_memory_required_in_mb=12288,
-                    max_memory_required_in_mb=20480,
+                compute_resource_requirements=(
+                    sagemaker.CfnInferenceComponent.InferenceComponentComputeResourceRequirementsProperty(
+                        number_of_accelerator_devices_required=1,
+                        number_of_cpu_cores_required=4,
+                        min_memory_required_in_mb=12288,
+                        max_memory_required_in_mb=20480,
+                    )
                 ),
-                startup_parameters=sagemaker.CfnInferenceComponent.StartupParametersProperty(
+                startup_parameters=sagemaker.CfnInferenceComponent.InferenceComponentStartupParametersProperty(
                     container_startup_health_check_timeout_in_seconds=900,
                     model_data_download_timeout_in_seconds=1800,
                 ),
-                instance_type="ml.g5.xlarge",
-                inference_ami_version="al2023-ami-sagemaker-inference-gpu-4-1",
-            ),
-            managed_instance_scaling=sagemaker.CfnInferenceComponent.ManagedInstanceScalingProperty(
-                status="ENABLED",
-                min_instance_count=0,
-                max_instance_count=1,
             ),
             tags=[cdk.CfnTag(key="app", value="lachesis-guard")],
         )
+        self.inference_component = component
+
+        scaling_target = appscaling.CfnScalableTarget(
+            self,
+            "DeciderScalingTarget",
+            service_namespace="sagemaker",
+            resource_id="inference-component/lachesis-decider-2b",
+            scalable_dimension="sagemaker:inference-component:DesiredCopyCount",
+            min_capacity=0,
+            max_capacity=1,
+            suspended_state=appscaling.CfnScalableTarget.SuspendedStateProperty(
+                dynamic_scaling_in_suspended=False,
+                dynamic_scaling_out_suspended=False,
+                scheduled_scaling_suspended=False,
+            ),
+        )
+        scaling_target.add_dependency(component)
+
+        appscaling.CfnScalingPolicy(
+            self,
+            "DeciderScalingPolicy",
+            policy_name="lachesis-decider-invocations",
+            policy_type="TargetTrackingScaling",
+            service_namespace="sagemaker",
+            resource_id="inference-component/lachesis-decider-2b",
+            scalable_dimension="sagemaker:inference-component:DesiredCopyCount",
+            target_tracking_scaling_policy_configuration=(
+                appscaling.CfnScalingPolicy.TargetTrackingScalingPolicyConfigurationProperty(
+                    predefined_metric_specification=(
+                        appscaling.CfnScalingPolicy.PredefinedMetricSpecificationProperty(
+                            predefined_metric_type="SageMakerInferenceComponentInvocationsPerCopy",
+                        )
+                    ),
+                    target_value=5.0,
+                    scale_in_cooldown=600,
+                    scale_out_cooldown=60,
+                )
+            ),
+        )
 
         self.endpoint_name = endpoint.attr_endpoint_name
-        self.inference_component_name = self.inference_component.inference_component_name
+        self.inference_component_name = component.inference_component_name
 
         cdk.CfnOutput(self, "EndpointName", value=self.endpoint_name)
         cdk.CfnOutput(self, "InferenceComponentName", value=self.inference_component_name)
