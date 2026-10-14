@@ -98,7 +98,7 @@ def main() -> int:
         "# Well-Architected review: Lachesis",
         "",
         (
-            f"Generated {datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')} "
+            f"on {datetime.date.today().isoformat()} "
             f"by `python scripts/wa_review.py` (workload {workload_id}, eu-west-1)."
         ),
         "Self-attested: evidence notes cite file:line in this repo; no choice was",
