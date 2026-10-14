@@ -111,8 +111,8 @@ class DeciderStack(cdk.Stack):
                     sagemaker.CfnInferenceComponent.InferenceComponentComputeResourceRequirementsProperty(
                         number_of_accelerator_devices_required=1,
                         number_of_cpu_cores_required=4,
-                        min_memory_required_in_mb=8192,
-                        max_memory_required_in_mb=14336,
+                        min_memory_required_in_mb=6144,
+                        max_memory_required_in_mb=13312,
                     )
                 ),
                 startup_parameters=sagemaker.CfnInferenceComponent.InferenceComponentStartupParametersProperty(
