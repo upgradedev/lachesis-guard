@@ -23,7 +23,8 @@ from typing import Any
 def _policies(template: dict[str, Any]) -> list[tuple[str, dict]]:
     found = []
     for logical_id, resource in (template.get("Resources") or {}).items():
-        if resource.get("Type") in {"AWS::IAM::Policy", "AWS::IAM::Role", "AWS::IAM::ManagedPolicy"}:
+        iam_types = {"AWS::IAM::Policy", "AWS::IAM::Role", "AWS::IAM::ManagedPolicy"}
+        if resource.get("Type") in iam_types:
             found.append((logical_id, resource))
     return found
 
@@ -55,7 +56,10 @@ def check(template: dict[str, Any], name: str) -> list[str]:
         props = resource.get("Properties") or {}
         if rtype == "AWS::S3::Bucket":
             block = props.get("PublicAccessBlockConfiguration") or {}
-            for flag in ("BlockPublicAcls", "BlockPublicPolicy", "IgnorePublicAcls", "RestrictPublicBuckets"):
+            flags = (
+                "BlockPublicAcls", "BlockPublicPolicy", "IgnorePublicAcls", "RestrictPublicBuckets"
+            )
+            for flag in flags:
                 if block.get(flag) is not True:
                     errors.append(f"{name}:{logical_id} S3 public access flag {flag} is not true")
         if rtype == "AWS::KMS::Key" and props.get("EnableKeyRotation") is not True:
