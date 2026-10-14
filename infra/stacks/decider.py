@@ -70,9 +70,12 @@ class DeciderStack(cdk.Stack):
             self,
             "DeciderEndpointConfig",
             production_variants=[
+                # No model_name: an endpoint whose variant names a model
+                # cannot host inference components ("Inference Components
+                # are not supported in this Endpoint", first deploy). The
+                # component below carries the container instead.
                 sagemaker.CfnEndpointConfig.ProductionVariantProperty(
                     variant_name="AllTraffic",
-                    model_name=model.attr_model_name,
                     initial_instance_count=1,
                     instance_type="ml.g5.xlarge",
                 )
