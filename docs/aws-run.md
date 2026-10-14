@@ -25,11 +25,11 @@ one EC2 box.
 
 ## The instance role
 
-Role `lachesis-demo-box` (account 308857099262), attached to the box as an
+Role `lachesis-demo-box`, attached to the box as an
 instance profile. Its only policy allows `bedrock:InvokeModel` and
 `bedrock:InvokeModelWithResponseStream` on:
 
-- `arn:aws:bedrock:eu-west-1:308857099262:inference-profile/eu.anthropic.claude-sonnet-5-5`
+- `arn:aws:bedrock:eu-west-1:<account-id>:inference-profile/eu.anthropic.claude-sonnet-5-5`
 - `arn:aws:bedrock:eu-*::foundation-model/anthropic.claude-sonnet-5-5`
 
 The second resource is not optional: a cross-region inference profile

@@ -44,6 +44,8 @@ declined this call".
 
 ## About a minute
 
+Run the serve line in a second terminal; it stays in the foreground:
+
 ```sh
 pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cpu
 pip install strands-decider==0.1.0 strands-agents
