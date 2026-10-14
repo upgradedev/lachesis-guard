@@ -98,7 +98,6 @@ class DeciderStack(cdk.Stack):
                 copy_count=1,
             ),
             specification=sagemaker.CfnInferenceComponent.InferenceComponentSpecificationProperty(
-                model_name=model.attr_model_name,
                 container=sagemaker.CfnInferenceComponent.InferenceComponentContainerSpecificationProperty(
                     image=image_uri,
                 ),

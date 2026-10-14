@@ -9,10 +9,13 @@ FROM pytorch/pytorch:2.7.1-cuda12.8-cudnn9-runtime
 ARG CHECKPOINT=StrandsAgents/strands-decider-2B-qwen3.5-v1-2610
 
 RUN pip install --no-cache-dir strands-decider==0.1.0 \
-    && python -c "from huggingface_hub import snapshot_download; snapshot_download('${CHECKPOINT}')"
+    && python -c "from huggingface_hub import snapshot_download; snapshot_download('${CHECKPOINT}', local_dir='/opt/model')"
 
+# Serve the baked-in local directory, not a hub id: the hub cache path
+# is not where the runtime looks, and the endpoint has no reason to
+# phone home (first deploy failed exactly there; see STATE.md).
 ENV HF_HUB_OFFLINE=1 \
-    STRANDS_DECIDER_MODEL=${CHECKPOINT} \
+    STRANDS_DECIDER_MODEL=/opt/model \
     DECIDER_DEVICE=cuda
 
 COPY adapter.py /opt/program/adapter.py
