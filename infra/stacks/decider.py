@@ -19,7 +19,6 @@ real property names.
 from __future__ import annotations
 
 import aws_cdk as cdk
-from aws_cdk import aws_applicationautoscaling as appscaling
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_sagemaker as sagemaker
 from constructs import Construct
@@ -94,83 +93,17 @@ class DeciderStack(cdk.Stack):
             tags=[cdk.CfnTag(key="app", value="lachesis-guard")],
         )
 
-        component = sagemaker.CfnInferenceComponent(
-            self,
-            "DeciderInferenceComponent",
-            endpoint_name=endpoint.attr_endpoint_name,
-            inference_component_name="lachesis-decider-2b",
-            variant_name="AllTraffic",
-            runtime_config=sagemaker.CfnInferenceComponent.InferenceComponentRuntimeConfigProperty(
-                copy_count=1,
-            ),
-            specification=sagemaker.CfnInferenceComponent.InferenceComponentSpecificationProperty(
-                container=sagemaker.CfnInferenceComponent.InferenceComponentContainerSpecificationProperty(
-                    image=image_uri,
-                ),
-                # Proven against the live service by hand before it was
-                # baked in (2026-10-14): the scheduler's allocatable
-                # envelope on ml.g5.xlarge is far below the raw instance
-                # size. 4 cores or a max above ~6 GB is rejected or
-                # never schedules; 2 cores and 2048-6144 MB is InService.
-                compute_resource_requirements=(
-                    sagemaker.CfnInferenceComponent.InferenceComponentComputeResourceRequirementsProperty(
-                        number_of_accelerator_devices_required=1,
-                        number_of_cpu_cores_required=2,
-                        min_memory_required_in_mb=2048,
-                        max_memory_required_in_mb=6144,
-                    )
-                ),
-                startup_parameters=sagemaker.CfnInferenceComponent.InferenceComponentStartupParametersProperty(
-                    container_startup_health_check_timeout_in_seconds=900,
-                    model_data_download_timeout_in_seconds=1800,
-                ),
-            ),
-            tags=[cdk.CfnTag(key="app", value="lachesis-guard")],
-        )
-        self.inference_component = component
-
-        scaling_target = appscaling.CfnScalableTarget(
-            self,
-            "DeciderScalingTarget",
-            service_namespace="sagemaker",
-            resource_id="inference-component/lachesis-decider-2b",
-            scalable_dimension="sagemaker:inference-component:DesiredCopyCount",
-            min_capacity=0,
-            max_capacity=1,
-            suspended_state=appscaling.CfnScalableTarget.SuspendedStateProperty(
-                dynamic_scaling_in_suspended=False,
-                dynamic_scaling_out_suspended=False,
-                scheduled_scaling_suspended=False,
-            ),
-        )
-        scaling_target.add_dependency(component)
-
-        policy = appscaling.CfnScalingPolicy(
-            self,
-            "DeciderScalingPolicy",
-            policy_name="lachesis-decider-invocations",
-            policy_type="TargetTrackingScaling",
-            service_namespace="sagemaker",
-            resource_id="inference-component/lachesis-decider-2b",
-            scalable_dimension="sagemaker:inference-component:DesiredCopyCount",
-            target_tracking_scaling_policy_configuration=(
-                appscaling.CfnScalingPolicy.TargetTrackingScalingPolicyConfigurationProperty(
-                    predefined_metric_specification=(
-                        appscaling.CfnScalingPolicy.PredefinedMetricSpecificationProperty(
-                            predefined_metric_type="SageMakerInferenceComponentInvocationsPerCopy",
-                        )
-                    ),
-                    target_value=5.0,
-                    scale_in_cooldown=600,
-                    scale_out_cooldown=60,
-                )
-            ),
-        )
-
-        policy.add_dependency(scaling_target)
+        # The inference component itself is applied by
+        # scripts/apply_decider_ic.py right after this stack deploys:
+        # a fresh endpoint refuses component creation with "not enough
+        # memory available" for its first minutes (proven by hand,
+        # 2026-10-14), and CloudFormation has no retry for that. The
+        # script mirrors this specification and retries until the
+        # endpoint settles; the scaling target and policy live there too.
+        self.inference_component = None
 
         self.endpoint_name = endpoint.attr_endpoint_name
-        self.inference_component_name = component.inference_component_name
+        self.inference_component_name = "lachesis-decider-2b"
 
         cdk.CfnOutput(self, "EndpointName", value=self.endpoint_name)
         cdk.CfnOutput(self, "InferenceComponentName", value=self.inference_component_name)
