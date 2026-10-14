@@ -47,7 +47,9 @@ def main() -> int:
     client = boto3.client("bedrock-agentcore", region_name=REGION)
     session_id = f"lachesis-smoke-{uuid.uuid4().hex}"  # 48 chars, >= 33
 
-    first = _invoke(client, args.runtime_arn, session_id, {"prompt": PROMPT, "session_id": session_id})
+    first = _invoke(
+        client, args.runtime_arn, session_id, {"prompt": PROMPT, "session_id": session_id}
+    )
     print("first:", json.dumps(first)[:600])
     assert first.get("status") == "interrupt", f"expected a pause, got: {first.get('status')}"
     interrupts = first["interrupts"]

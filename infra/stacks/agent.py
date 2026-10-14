@@ -72,9 +72,7 @@ class AgentStack(cdk.Stack):
             network_configuration=agentcore.CfnRuntime.NetworkConfigurationProperty(
                 network_mode="PUBLIC",
             ),
-            protocol_configuration=[
-                agentcore.CfnRuntime.ProtocolConfigurationProperty(server_protocol="HTTP")
-            ],
+            protocol_configuration="HTTP",
             role_arn=role.role_arn,
             environment_variables={
                 "SESSIONS_BUCKET": foundation.sessions_bucket.bucket_name,
