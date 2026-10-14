@@ -4,7 +4,10 @@
 # measurement in this repo used (0.1.0 plus the adapter lock is the
 # ADDENDUM fallback for the package risk, taken from the start). The
 # pinned checkpoint is baked in at build time and served offline.
-FROM pytorch/pytorch:2.7.1-cuda12.8-cudnn9-runtime
+# cu118, not cu12x: the SageMaker inference AMI on ml.g5 ships NVIDIA
+# driver 11.4 (endpoint logs, 2026-10-14), which rejects CUDA 12
+# runtimes. This is the ADDENDUM driver fallback, taken on evidence.
+FROM pytorch/pytorch:2.7.1-cuda11.8-cudnn9-runtime
 
 ARG CHECKPOINT=StrandsAgents/strands-decider-2B-qwen3.5-v1-2610
 
