@@ -130,7 +130,7 @@ class DeciderStack(cdk.Stack):
         )
         scaling_target.add_dependency(component)
 
-        appscaling.CfnScalingPolicy(
+        policy = appscaling.CfnScalingPolicy(
             self,
             "DeciderScalingPolicy",
             policy_name="lachesis-decider-invocations",
@@ -151,6 +151,8 @@ class DeciderStack(cdk.Stack):
                 )
             ),
         )
+
+        policy.add_dependency(scaling_target)
 
         self.endpoint_name = endpoint.attr_endpoint_name
         self.inference_component_name = component.inference_component_name
