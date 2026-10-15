@@ -126,7 +126,12 @@ class DeciderIcStack(cdk.Stack):
                         )
                     ],
                     cooldown=120,
-                    metric_aggregation_type="Sum",
+                    # Application Auto Scaling accepts only
+                    # Maximum, Minimum or Average here (not the
+                    # CloudWatch statistic "Sum"); the wake alarm
+                    # itself sums the metric. "Sum" failed stack
+                    # creation on 2026-10-15.
+                    metric_aggregation_type="Maximum",
                 )
             ),
         )
