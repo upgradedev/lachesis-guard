@@ -151,7 +151,12 @@ class ApprovalsStack(cdk.Stack):
             code=code,
             timeout=cdk.Duration.seconds(29),
             memory_size=256,
-            environment={**common_env, "RUNNER_ARN": runner.function_arn},
+            environment={
+                **common_env,
+                "RUNNER_ARN": runner.function_arn,
+                "TRY_DAILY_CAP": "100",
+                "TRY_IP_DAILY_CAP": "5",
+            },
         )
         table.grant_read_write_data(api_fn)
         runner.grant_invoke(api_fn)
@@ -226,6 +231,12 @@ class ApprovalsStack(cdk.Stack):
             api_id=api.attr_api_id,
             stage_name="$default",
             auto_deploy=True,
+            route_settings={
+                "POST /try": apigw.CfnStage.RouteSettingsProperty(
+                    throttling_rate_limit=0.2,
+                    throttling_burst_limit=2,
+                )
+            },
         )
         lambda_.CfnPermission(
             self,

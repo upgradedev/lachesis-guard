@@ -64,28 +64,33 @@ def _is_approver(event: dict) -> bool:
     return "approvers" in [token.strip() for token in tokens]
 
 
-def _try_counter_ok() -> bool:
-    """One DynamoDB counter row caps anonymous runs per UTC day."""
+def _counter_ok(key: str, cap: int) -> bool:
+    """One DynamoDB counter row caps a counter per UTC day."""
     table = common._table
-    day = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
     try:
         response = table.update_item(
-            Key={"approval_id": f"try-counter-{day}"},
+            Key={"approval_id": key},
             UpdateExpression="SET #c = if_not_exists(#c, :zero) + :one",
             ConditionExpression="attribute_not_exists(#c) OR #c < :cap",
             ExpressionAttributeNames={"#c": "count"},
-            ExpressionAttributeValues={
-                ":zero": 0,
-                ":one": 1,
-                ":cap": common.TRY_DAILY_CAP,
-            },
+            ExpressionAttributeValues={":zero": 0, ":one": 1, ":cap": cap},
             ReturnValues="ALL_NEW",
         )
     except ClientError as exc:
         if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
             return False
         raise
-    return int(response["Attributes"]["count"]) <= common.TRY_DAILY_CAP
+    return int(response["Attributes"]["count"]) <= cap
+
+
+def _try_counter_ok(event: dict) -> bool:
+    day = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+    source_ip = (
+        event.get("requestContext", {}).get("http", {}).get("sourceIp", "unknown")
+    )
+    if not _counter_ok(f"try-ip-{source_ip}-{day}", common.TRY_IP_DAILY_CAP):
+        return False
+    return _counter_ok(f"try-counter-{day}", common.TRY_DAILY_CAP)
 
 
 def _invoke_runner(payload: dict, asynchronous: bool) -> dict:
@@ -105,8 +110,14 @@ def handler(event, _context):
     params = event.get("pathParameters") or {}
 
     if route == "POST /try":
-        if not _try_counter_ok():
-            return _response(429, {"error": "daily demo cap reached; try tomorrow"})
+        if not _try_counter_ok(event):
+            return _response(
+                429,
+                {
+                    "error": "daily demo cap reached for this address or overall; "
+                    "the counters reset at 00:00 UTC"
+                },
+            )
         token = common.new_approval_id()
         _invoke_runner(
             {
@@ -120,7 +131,10 @@ def handler(event, _context):
         return _response(202, {"token": token, "status": "STARTING"})
 
     if route == "GET /try/{token}":
-        item = common.get(params.get("token", ""))
+        token = params.get("token", "")
+        if not token:
+            return _response(404, {"error": "unknown token"})
+        item = common.get(token)
         if item is None or item.get("lane") != "try":
             return _response(404, {"error": "unknown token"})
         return _response(200, common.public_view(item))
@@ -144,7 +158,11 @@ def handler(event, _context):
         return _response(202, {"approval_id": token, "status": "STARTING"})
 
     if route == "GET /approvals":
-        rows = common.list_by_status("PENDING", limit=50)
+        rows = [
+            row
+            for row in common.list_by_status("PENDING", limit=50)
+            if row.get("lane", "approval") == "approval"
+        ]
         return _response(200, {"approvals": [common.public_view(row) for row in rows]})
 
     if route == "GET /approvals/{id}":
@@ -159,6 +177,13 @@ def handler(event, _context):
         decision = body.get("decision")
         if decision not in {"approve", "decline"}:
             return _response(400, {"error": "decision must be approve or decline"})
+        item = common.get(approval_id)
+        if item is None:
+            return _response(404, {"error": "unknown approval"})
+        import time as _time
+
+        if int(item.get("expires_ts", 0)) and int(item["expires_ts"]) < int(_time.time()):
+            return _response(409, {"error": "approval has expired"})
         target = "APPROVED" if decision == "approve" else "DECLINED"
         claims = _claims(event)
         moved = common.transition(
