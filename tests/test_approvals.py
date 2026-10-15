@@ -193,6 +193,42 @@ def test_start_card_carries_decider_fields(modules, monkeypatch):
     assert card["expires_at"]
 
 
+def test_resume_repause_card_keeps_decider_fields(modules, monkeypatch):
+    common, _, runner, _ = modules
+    common.create_row("appr-5", "s" * 40, "approval")
+    interrupts = '[{"interruptId": "i1"}]'
+    common.transition("appr-5", "STARTING", "PENDING", interrupts=interrupts, card="{}")
+    common.transition("appr-5", "PENDING", "APPROVED", decided_by="sub-1")
+    monkeypatch.setattr(
+        common,
+        "invoke_agent",
+        lambda session_id, payload: {
+            "status": "interrupt",
+            "interrupts": [{"interruptId": "i2", "reason": "second pause"}],
+            "triage": [
+                {
+                    "tool": "run_tests",
+                    "risk": "destructive_write",
+                    "confidence": 0.24,
+                    "latency_ms": 171.0,
+                    "layer": "decider",
+                    "verdict": "confirm",
+                }
+            ],
+        },
+    )
+    assert runner.resume("appr-5")["status"] == "interrupt-again"
+    import json
+
+    card = json.loads(common.get("appr-5")["card"])
+    assert card["tool"] == "run_tests"
+    assert card["risk"] == "destructive_write"
+    assert card["confidence"] == 0.24
+    assert card["latency_ms"] == 171.0
+    assert card["layer"] == "decider"
+    assert card["expires_at"]
+
+
 def test_empty_try_token_is_404(modules):
     _, api, _, _ = modules
     out = api.handler(_event("GET /try/{token}", {}, None, {"token": ""}), None)
