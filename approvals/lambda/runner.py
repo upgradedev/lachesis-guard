@@ -54,7 +54,13 @@ def start(prompt: str, lane: str, approval_id: str = "") -> dict:
     approval_id = approval_id or common.new_approval_id()
     session_id = common.new_session_id()
     common.create_row(approval_id, session_id, lane)
-    result = common.invoke_agent(session_id, {"prompt": prompt, "session_id": session_id})
+    try:
+        result = common.invoke_agent(session_id, {"prompt": prompt, "session_id": session_id})
+    except Exception as exc:
+        common.transition(
+            approval_id, "STARTING", "ERROR", result_text=f"{type(exc).__name__}: {exc}"
+        )
+        return {"status": "error", "approval_id": approval_id}
     if result.get("status") != "interrupt":
         common.transition(
             approval_id, "STARTING", "DONE", result_text=result.get("text", "")
@@ -119,7 +125,7 @@ def resume(approval_id: str) -> dict:
             },
         )
     except Exception as exc:  # never strand a row in RESUMING
-        common.transition(approval_id, "RESUMING", "PENDING")
+        _attempt_failed(row)
         return {"status": "error-resumable", "error": f"{type(exc).__name__}: {exc}"}
     if result.get("status") == "interrupt":
         # The resumed run paused again: fold the new pause into a fresh
@@ -145,8 +151,34 @@ def resume(approval_id: str) -> dict:
     return {"status": final_status, "text": result.get("text", "")}
 
 
+MAX_SWEEP_ATTEMPTS = 3
+
+
+def _attempt_failed(item: dict) -> str:
+    """Count a failed resume attempt; the third failure is terminal."""
+    attempts = int(item.get("sweep_attempts", 0)) + 1
+    if attempts >= MAX_SWEEP_ATTEMPTS:
+        common.transition(
+            item["approval_id"], "RESUMING", "ERROR", sweep_attempts=attempts
+        )
+        return "ERROR"
+    common.transition(
+        item["approval_id"], "RESUMING", "PENDING", sweep_attempts=attempts
+    )
+    return "PENDING"
+
+
 def sweep() -> dict:
     import time
+
+    # Rows whose start invoke failed after create_row sit in STARTING;
+    # anything older than ten minutes there is terminal.
+    closed_starting = 0
+    for item in common.list_by_status("STARTING", limit=50):
+        if int(time.time()) - int(item.get("created_ts", 0)) < 600:
+            continue
+        if common.transition(item["approval_id"], "STARTING", "ERROR") is not None:
+            closed_starting += 1
 
     # A resume whose Lambda died mid-invoke leaves RESUMING behind; after
     # twenty minutes it goes back to PENDING so a person can decide again.
@@ -180,10 +212,10 @@ def sweep() -> dict:
                 },
             )
         except Exception:  # retry on the next sweep, never crash it
-            common.transition(item["approval_id"], "RESUMING", "PENDING")
+            _attempt_failed(item)
             continue
         common.transition(item["approval_id"], "RESUMING", "EXPIRED")
-    return {"expired": len(expired), "rescued": rescued}
+    return {"expired": len(expired), "rescued": rescued, "closed_starting": closed_starting}
 
 
 def handler(event, _context):

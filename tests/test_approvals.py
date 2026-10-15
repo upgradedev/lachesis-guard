@@ -193,9 +193,79 @@ def test_start_card_carries_decider_fields(modules, monkeypatch):
     assert card["expires_at"]
 
 
+def test_empty_try_token_is_404(modules):
+    _, api, _, _ = modules
+    out = api.handler(_event("GET /try/{token}", {}, None, {"token": ""}), None)
+    assert out["statusCode"] == 404
+
+
+def test_expired_decision_is_409(modules, monkeypatch):
+    common, api, _, _ = modules
+    common.create_row("appr-old", "s" * 40, "approval")
+    common.transition("appr-old", "STARTING", "PENDING", interrupts="[]", card="{}")
+    common._table.items["appr-old"]["expires_ts"] = 1
+    monkeypatch.setattr(api, "_invoke_runner", lambda payload, asynchronous: {})
+    out = _decide(api, APPROVER, "approve", "appr-old")
+    assert out["statusCode"] == 409
+
+
+def test_approver_queue_hides_try_rows(modules):
+    common, api, _, _ = modules
+    common.create_row("appr-q1", "s" * 40, "approval")
+    common.transition("appr-q1", "STARTING", "PENDING", interrupts="[]", card="{}")
+    common.create_row("appr-q2", "s" * 40, "try")
+    common.transition("appr-q2", "STARTING", "PENDING", interrupts="[]", card="{}")
+    body = api.handler(_event("GET /approvals", APPROVER), None)
+    import json
+
+    ids = [a["approval_id"] for a in json.loads(body["body"])["approvals"]]
+    assert ids == ["appr-q1"]
+
+
+def test_start_failure_lands_in_error(modules, monkeypatch):
+    common, _, runner, _ = modules
+
+    def _boom(session_id, payload):
+        raise RuntimeError("agent down")
+
+    monkeypatch.setattr(common, "invoke_agent", _boom)
+    out = runner.start("prompt", "try", "appr-err")
+    assert out["status"] == "error"
+    assert common.get("appr-err")["status"] == "ERROR"
+
+
+def test_sweeper_closes_stale_starting_and_caps_attempts(modules, monkeypatch):
+    common, _, runner, _ = modules
+    common.create_row("appr-stale", "s" * 40, "try")
+    common._table.items["appr-stale"]["created_ts"] = 1
+    monkeypatch.setattr(common, "invoke_agent", lambda s, p: {"status": "completed", "text": ""})
+    out = runner.sweep()
+    assert out["closed_starting"] == 1
+    assert common.get("appr-stale")["status"] == "ERROR"
+
+    row = {"approval_id": "appr-x", "sweep_attempts": 2}
+    common.create_row("appr-x", "s" * 40, "approval")
+    common.transition("appr-x", "STARTING", "PENDING", interrupts="[]", card="{}")
+    common.transition("appr-x", "PENDING", "APPROVED")
+    common.transition("appr-x", "APPROVED", "RESUMING")
+    assert runner._attempt_failed(row) == "ERROR"
+    assert common.get("appr-x")["status"] == "ERROR"
+
+
 def test_try_counter_cap(modules, monkeypatch):
     common, api, _, _ = modules
     monkeypatch.setattr(common, "TRY_DAILY_CAP", 2)
-    assert api._try_counter_ok() is True
-    assert api._try_counter_ok() is True
-    assert api._try_counter_ok() is False
+    monkeypatch.setattr(common, "TRY_IP_DAILY_CAP", 5)
+    event = {"requestContext": {"http": {"sourceIp": "203.0.113.7"}}}
+    assert api._try_counter_ok(event) is True
+    assert api._try_counter_ok(event) is True
+    assert api._try_counter_ok(event) is False
+
+
+def test_try_per_ip_cap(modules, monkeypatch):
+    common, api, _, _ = modules
+    monkeypatch.setattr(common, "TRY_DAILY_CAP", 100)
+    monkeypatch.setattr(common, "TRY_IP_DAILY_CAP", 1)
+    event = {"requestContext": {"http": {"sourceIp": "203.0.113.9"}}}
+    assert api._try_counter_ok(event) is True
+    assert api._try_counter_ok(event) is False
