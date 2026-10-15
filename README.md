@@ -146,6 +146,16 @@ session keeps the committed state: re-run with `--resume --workdir <dir>`. The a
 the same call, Lachesis returns the cached verdict for that toolUseId, and the agent pauses
 again; approvals are bound to the call id, not to the process.
 
+## Tests and coverage
+
+`pytest` runs the unit suite with coverage over `src/lachesis` only (the
+triage package: handler, policy, questions, client); that is the scope
+of every coverage percentage quoted for this repo. The hosted code
+(`agent/`, `approvals/`), the shipped pattern (`patterns/`) and the CDK
+app (`infra/`) are exercised by their own test files (`tests/test_approvals.py`,
+`tests/test_adapter.py`, `tests/test_patterns_mirror.py`,
+`tests/test_check_templates.py`) but are not counted in that percentage.
+
 ## Licence
 
 MIT. See `LICENSE`. Third-party strings are attributed in `NOTICE`.

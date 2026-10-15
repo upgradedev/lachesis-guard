@@ -123,6 +123,26 @@ def test_pattern_triage_yields_the_loop_while_asking(pattern):
     assert canary[0] - started < 0.45
 
 
+def test_pattern_decider_down_fails_closed_to_confirm(pattern):
+    """Mirror of test_handler.test_decider_down_fails_closed_to_confirm
+    for the shipped pattern copy (F17)."""
+
+    def down(state, questions):
+        raise pattern.DeciderUnavailable("decider unavailable")
+
+    handler = pattern.TriageHandler(ask=down)
+    event = SimpleNamespace(
+        tool_use={"name": "exec", "input": {"command": "ls"}, "toolUseId": "call-1"},
+        agent=SimpleNamespace(messages=[]),
+    )
+    action = triage(handler, event)
+    from strands.interventions import Confirm
+
+    assert isinstance(action, Confirm)
+    assert handler.log[-1]["layer"] == "unavailable"
+    assert handler.log[-1]["verdict"] == "confirm"
+
+
 def test_policy_sets_cover_the_risk_classes(pattern):
     assert set(pattern.RISK_CLASSES) == (
         pattern.CONFIRM_CLASSES | pattern.DENY_CLASSES | {pattern.BENIGN_LABEL}
