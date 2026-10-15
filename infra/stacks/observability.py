@@ -7,11 +7,18 @@
 - Bedrock throttles on the agent's model profile.
 - A small dashboard with the Decider widgets.
 
-AgentCore spans land in CloudWatch through the runtime's own
-observability (Transaction Search is an account switch, owner-gated;
-see STATE.md). The verdict mix comes from the handler's JSON audit
-lines via EMF in the agent image, charted on the same dashboard once
-the first hosted run emits them.
+AgentCore spans: not enabled. Transaction Search is an account-wide
+CloudWatch switch in this region and stays off by decision (F5); the
+agent also ships no ADOT instrumentation, so no span claim is made
+anywhere. The verdict mix comes from the handler's JSON audit lines
+via EMF in the agent image, charted on the same dashboard once the
+first hosted run emits them.
+
+Alarm wiring (F8): SageMaker publishes NoCapacityInvocationFailures
+with the single dimension InferenceComponentName, and ModelLatency
+(in microseconds) with InferenceComponentName alone; both verified
+with list_metrics on 2026-10-15. Every alarm notifies the foundation
+alerts topic.
 """
 
 from __future__ import annotations
@@ -54,18 +61,21 @@ class ObservabilityStack(cdk.Stack):
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
-        dimensions = {
-            "EndpointName": "lachesis-decider",
-            "InferenceComponentName": "lachesis-decider-2b",
-        }
+        # Published dimension sets (list_metrics, 2026-10-15):
+        # NoCapacityInvocationFailures carries InferenceComponentName
+        # only; ModelLatency is published in microseconds and also
+        # carries InferenceComponentName alone. The previous
+        # {EndpointName, InferenceComponentName} pair matched nothing
+        # SageMaker publishes, so these alarms could never fire.
+        component_dims = {"InferenceComponentName": "lachesis-decider-2b"}
         capacity = cloudwatch.Metric(
             namespace="AWS/SageMaker",
             metric_name="NoCapacityInvocationFailures",
-            dimensions_map=dimensions,
+            dimensions_map=component_dims,
             statistic="Sum",
             period=cdk.Duration.minutes(1),
         )
-        cloudwatch.Alarm(
+        capacity_alarm = cloudwatch.Alarm(
             self,
             "DeciderNoCapacity",
             metric=capacity,
@@ -75,23 +85,25 @@ class ObservabilityStack(cdk.Stack):
             alarm_description="Decider inference component reported no-capacity failures",
             treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
         )
+        capacity_alarm.add_alarm_action(cw_actions.SnsAction(foundation.alerts_topic))
         latency = cloudwatch.Metric(
             namespace="AWS/SageMaker",
             metric_name="ModelLatency",
-            dimensions_map=dimensions,
+            dimensions_map=component_dims,
             statistic="p95",
             period=cdk.Duration.minutes(5),
-            unit=cloudwatch.Unit.MILLISECONDS,
+            unit=cloudwatch.Unit.MICROSECONDS,
         )
-        cloudwatch.Alarm(
+        latency_alarm = cloudwatch.Alarm(
             self,
             "DeciderLatencyP95",
             metric=latency,
-            threshold=5000,
+            threshold=5_000_000,
             evaluation_periods=2,
-            alarm_description="Decider ModelLatency p95 above 5 s over two periods",
+            alarm_description="Decider ModelLatency p95 above 5 s (5,000,000 us) over two periods",
             treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
         )
+        latency_alarm.add_alarm_action(cw_actions.SnsAction(foundation.alerts_topic))
         throttles = cloudwatch.Metric(
             namespace="AWS/Bedrock",
             metric_name="InvocationThrottles",
@@ -99,7 +111,7 @@ class ObservabilityStack(cdk.Stack):
             statistic="Sum",
             period=cdk.Duration.minutes(5),
         )
-        cloudwatch.Alarm(
+        throttle_alarm = cloudwatch.Alarm(
             self,
             "BedrockThrottles",
             metric=throttles,
@@ -108,6 +120,15 @@ class ObservabilityStack(cdk.Stack):
             comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
             alarm_description="Bedrock throttles on the agent model profile",
             treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+        throttle_alarm.add_alarm_action(cw_actions.SnsAction(foundation.alerts_topic))
+        # CloudWatch needs publish permission on the alerts topic.
+        foundation.alerts_topic.add_to_resource_policy(
+            iam.PolicyStatement(
+                principals=[iam.ServicePrincipal("cloudwatch.amazonaws.com")],
+                actions=["sns:Publish"],
+                resources=[foundation.alerts_topic.topic_arn],
+            )
         )
 
         # Endpoint instance guard (F4). SageMaker publishes no
@@ -171,7 +192,7 @@ class ObservabilityStack(cdk.Stack):
         dashboard = cloudwatch.Dashboard(self, "LachesisDashboard", dashboard_name="lachesis")
         dashboard.add_widgets(
             cloudwatch.GraphWidget(
-                title="Decider ModelLatency (ms)",
+                title="Decider ModelLatency p95 (microseconds, as published)",
                 left=[latency],
             ),
             cloudwatch.GraphWidget(
