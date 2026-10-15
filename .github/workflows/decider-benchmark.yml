@@ -37,7 +37,7 @@ jobs:
       - name: Install CPU torch, Decider 0.1.0, pytest
         run: |
           pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cpu
-          pip install strands-decider==0.1.0 pytest
+          pip install strands-decider==0.1.0 transformers==5.19.0 pytest
 
       - name: Serve pinned model on CPU
         run: |

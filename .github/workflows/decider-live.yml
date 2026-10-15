@@ -46,7 +46,7 @@ jobs:
         run: |
           set -o pipefail
           pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cpu
-          pip install strands-decider==0.1.0
+          pip install strands-decider==0.1.0 transformers==5.19.0
           pip install -e ".[dev]"
           pip show strands-decider
           pip show strands-agents

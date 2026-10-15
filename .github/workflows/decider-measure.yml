@@ -43,10 +43,13 @@ jobs:
           python-version-file: .python-version
           cache: pip
 
+      # transformers is pinned: 5.20.0 (2026-10-15) imports
+      # torch.distributed.checkpoint.hf_storage, absent from the
+      # pinned torch 2.7.1, and broke every CPU serve in CI.
       - name: Install package, CPU torch, Decider 0.1.0
         run: |
           pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cpu
-          pip install strands-decider==0.1.0
+          pip install strands-decider==0.1.0 transformers==5.19.0
           pip install -e ".[dev]"
 
       - name: Serve pinned model on CPU
