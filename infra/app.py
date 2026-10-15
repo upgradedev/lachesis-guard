@@ -46,9 +46,11 @@ for stack in app.node.find_all():
     if isinstance(stack, cdk.Stack):
         Tags.of(stack).add("app", "lachesis-guard")
 
-# Policy checks run on the synthesized templates in CI
-# (tests/test_iac_templates.py): cdk-nag 3.0.2's AwsSolutionsChecks
-# aspect crashes under the aws-cdk-lib 2.273 jsii runtime
-# (run 38628707230), so the checks are ours and version-proof.
+# Policy checks run on the synthesized templates by
+# infra/check_templates.py: in CI (the iac job in ci.yml), in the iac
+# workflow's synth action, and as a gate step before every deploy in
+# iac.yml. cdk-nag 3.0.2's AwsSolutionsChecks aspect crashes under the
+# aws-cdk-lib 2.273 jsii runtime (run 38628707230), so the checks are
+# ours and version-proof.
 
 app.synth()

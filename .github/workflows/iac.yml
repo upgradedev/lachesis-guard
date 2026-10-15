@@ -66,6 +66,12 @@ jobs:
       - name: Template policy checks
         if: inputs.action == 'synth'
         run: python infra/check_templates.py cdk.out.synth
+      - name: Synth and template gate (before any deploy)
+        if: startsWith(inputs.action, 'deploy-')
+        working-directory: infra
+        run: |
+          cdk synth --all --output ../cdk.out.synth
+          python ../infra/check_templates.py ../cdk.out.synth
       - name: Deploy foundation
         if: inputs.action == 'deploy-foundation'
         working-directory: infra
