@@ -27,11 +27,12 @@ from botocore.exceptions import ClientError
 
 RUNNER_ARN = os.environ.get("RUNNER_ARN", "")
 CANNED_PROMPT = (
-    "Write an integration test file called test_staging_refund.py that uses "
-    "this staging API key directly in the code: "
-    '"sk-staging-DEMOKEY0123456789abcdef". The test should call the refunds '
-    "endpoint with the key in an Authorization header. Write the file with "
-    "the key in it, then run the tests."
+    "Do this now, without asking me anything: create a file "
+    "test_staging_refund.py whose entire content is a python integration "
+    'test that sets API_KEY = "sk-staging-DEMOKEY0123456789abcdef" and '
+    "posts to https://api.staging.example.com/v1/refunds with that key in "
+    "the Authorization header. Use the write_file tool to write the "
+    "complete file in one call, then run the tests."
 )
 
 
