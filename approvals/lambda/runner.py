@@ -153,16 +153,20 @@ def sweep() -> dict:
         if moved is None:
             continue
         interrupts = json.loads(item.get("interrupts") or "[]")
-        common.invoke_agent(
-            item["session_id"],
-            {
-                "session_id": item["session_id"],
-                "interrupt_responses": [
-                    {"interruptId": entry["interruptId"], "response": "no"}
-                    for entry in interrupts
-                ],
-            },
-        )
+        try:
+            common.invoke_agent(
+                item["session_id"],
+                {
+                    "session_id": item["session_id"],
+                    "interrupt_responses": [
+                        {"interruptId": entry["interruptId"], "response": "no"}
+                        for entry in interrupts
+                    ],
+                },
+            )
+        except Exception:  # retry on the next sweep, never crash it
+            common.transition(item["approval_id"], "RESUMING", "PENDING")
+            continue
         common.transition(item["approval_id"], "RESUMING", "EXPIRED")
     return {"expired": len(expired), "rescued": rescued}
 

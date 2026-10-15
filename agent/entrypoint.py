@@ -27,6 +27,7 @@ import json
 import os
 import subprocess
 import sys
+import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -190,6 +191,8 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length) or b"{}")
             self._send(200, handle_invocation(payload))
         except Exception as exc:  # the runtime wants a response, not a dropped connection
+            traceback.print_exc()
+            print(f"invocation failed: {type(exc).__name__}: {exc}", flush=True)
             self._send(500, {"status": "error", "error": f"{type(exc).__name__}: {exc}"})
 
 
