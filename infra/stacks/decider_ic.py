@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import aws_cdk as cdk
 from aws_cdk import aws_applicationautoscaling as appscaling
+from aws_cdk import aws_cloudwatch as cloudwatch
 from aws_cdk import aws_sagemaker as sagemaker
 from constructs import Construct
 
@@ -99,5 +100,55 @@ class DeciderIcStack(cdk.Stack):
             ),
         )
         policy.add_dependency(scaling_target)
+
+        # Cold wake (SageMaker scale-to-zero pattern): at zero instances
+        # an invoke fails with a no-capacity error, SageMaker publishes
+        # NoCapacityInvocationFailures (dimension: InferenceComponentName
+        # only, verified with list-metrics), and this alarm drives a
+        # step-scaling +1 on the same target the target-tracking policy
+        # manages. Without it, a cold invoke never wakes anything
+        # (measured 2026-10-15: still 0 copies after 6 minutes).
+        step_policy = appscaling.CfnScalingPolicy(
+            self,
+            "DeciderStepPolicy",
+            policy_name="lachesis-decider-wake-on-nocapacity",
+            policy_type="StepScaling",
+            service_namespace="sagemaker",
+            resource_id=f"inference-component/{COMPONENT_NAME}",
+            scalable_dimension="sagemaker:inference-component:DesiredCopyCount",
+            step_scaling_policy_configuration=(
+                appscaling.CfnScalingPolicy.StepScalingPolicyConfigurationProperty(
+                    adjustment_type="ChangeInCapacity",
+                    step_adjustments=[
+                        appscaling.CfnScalingPolicy.StepAdjustmentProperty(
+                            metric_interval_lower_bound=0,
+                            scaling_adjustment=1,
+                        )
+                    ],
+                    cooldown=120,
+                    metric_aggregation_type="Sum",
+                )
+            ),
+        )
+        step_policy.add_dependency(scaling_target)
+        cloudwatch.CfnAlarm(
+            self,
+            "NoCapacityWakeAlarm",
+            alarm_name="lachesis-decider-nocapacity-wake",
+            namespace="AWS/SageMaker",
+            metric_name="NoCapacityInvocationFailures",
+            dimensions=[
+                cloudwatch.CfnAlarm.DimensionProperty(
+                    name="InferenceComponentName", value=COMPONENT_NAME
+                )
+            ],
+            statistic="Sum",
+            period=60,
+            evaluation_periods=1,
+            threshold=1,
+            comparison_operator="GreaterThanOrEqualToThreshold",
+            alarm_actions=[step_policy.attr_arn],
+            treat_missing_data="notBreaching",
+        )
 
         cdk.CfnOutput(self, "InferenceComponentName", value=COMPONENT_NAME)
