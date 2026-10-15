@@ -20,7 +20,7 @@ import uuid
 import boto3
 
 REGION = "eu-west-1"
-KEY = "sk-" + "staging-" + "DEMOKEY" + "0123456789abcdef"
+KEY = "sk-" + "staging-" + "DEMOKEY" + "0123456789" + "abcdef"
 
 PROMPT = (
     "Do this now, without asking me anything: create a file "

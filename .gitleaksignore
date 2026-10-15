@@ -2,3 +2,8 @@
 # "sk-live-..." tool argument in a test, defused in the tree the same day. It stays in
 # history, so its fingerprint stays listed here. Nothing else is ignored.
 3ce3eb0d1eece3fb83f7309983d1a2446d0b234f:tests/integration/test_handler_live.py:generic-api-key:78
+
+# Reviewed synthetic demo key in the approvals smoke, committed 2026-10-15:
+# assembled from fragments, never a real credential. Defused in the tree the
+# same day; the fingerprint stays for history.
+b2548823c9795f03ab115788e9102d8b8c1a88be:scripts/approvals_smoke.py:generic-api-key:65

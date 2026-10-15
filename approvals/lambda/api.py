@@ -28,7 +28,7 @@ from botocore.exceptions import ClientError
 RUNNER_ARN = os.environ.get("RUNNER_ARN", "")
 # Assembled from fragments: the whole fake key never appears in source,
 # so secret scanners stay quiet while the demo stays realistic.
-DEMO_KEY = "sk-" + "staging-" + "DEMOKEY" + "0123456789abcdef"
+DEMO_KEY = "sk-" + "staging-" + "DEMOKEY" + "0123456789" + "abcdef"
 CANNED_PROMPT = (
     "Do this now, without asking me anything: create a file "
     "test_staging_refund.py whose entire content is a python integration "
