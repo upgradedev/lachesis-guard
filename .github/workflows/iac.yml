@@ -14,6 +14,7 @@ on:
           - deploy-decider-ic
           - deploy-agent
           - deploy-approvals
+          - deploy-observability
           - destroy
         default: oidc-check
       confirm:
@@ -85,6 +86,10 @@ jobs:
         if: inputs.action == 'deploy-approvals'
         working-directory: infra
         run: cdk deploy LachesisApprovals --require-approval never
+      - name: Deploy observability
+        if: inputs.action == 'deploy-observability'
+        working-directory: infra
+        run: cdk deploy LachesisObservability --require-approval never
       - name: Destroy (allow-listed Lachesis stacks only)
         if: inputs.action == 'destroy' && inputs.confirm == 'DESTROY'
         working-directory: infra
