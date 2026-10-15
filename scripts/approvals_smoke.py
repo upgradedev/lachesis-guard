@@ -62,7 +62,6 @@ def _warm_decider() -> None:
     """Make sure the Decider component has a copy before the flow needs it:
     at zero copies the handler fails closed (by design), which would pause
     the resumed run a second time and stall this smoke."""
-    sm = boto3.client("sagemaker", region_name=REGION)
     rt = boto3.client("sagemaker-runtime", region_name=REGION)
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
     from lachesis.handler import render_state
@@ -102,7 +101,8 @@ def _warm_decider() -> None:
 
 def main() -> int:
     outputs = _outputs("LachesisApprovals")
-    api_url, pool_id, client_id = outputs["ApiUrl"], outputs["UserPoolId"], outputs["UserPoolClientId"]
+    api_url = outputs["ApiUrl"]
+    pool_id, client_id = outputs["UserPoolId"], outputs["UserPoolClientId"]
     print("api:", api_url)
 
     idp = boto3.client("cognito-idp", region_name=REGION)
