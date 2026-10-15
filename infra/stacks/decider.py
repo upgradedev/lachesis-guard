@@ -1,10 +1,17 @@
 """LachesisDecider: Decider 2B on a SageMaker inference component.
 
 BYOC image (foundation ECR repo lachesis-decider) behind one inference
-component on ml.g5.xlarge. Application Auto Scaling moves DesiredCopyCount
-between 0 and 1, so the GPU costs nothing while idle (judging lane (c):
-scale to zero in Gate 1, warm in the Gate 2 week). The container contract
-is decider-image/adapter.py: /ping gates on the real server health,
+component on ml.g5.xlarge. Two independent scaling layers, and only the
+second one was true before 2026-10-15: Application Auto Scaling moves
+the component's DesiredCopyCount between 0 and 1, but the endpoint
+INSTANCE bills around the clock unless the endpoint config's production
+variant carries ManagedInstanceScaling (MinInstanceCount 0), which this
+stack sets through an L1 property override together with the pinned
+InferenceAmiVersion. With no instance there is nothing to bill: $0 idle,
+about $1.57/h while warm (ml.g5.xlarge, eu-west-1). A step-scaling
+policy on NoCapacityInvocationFailures (in LachesisDeciderIc) is what
+wakes an instance for a cold invoke. The container contract is
+decider-image/adapter.py: /ping gates on the real server health,
 /invocations forwards to /v1/systemone, one forward pass at a time (a
 busy pass answers 503 and callers fail closed).
 
@@ -81,8 +88,24 @@ class DeciderStack(cdk.Stack):
                     initial_instance_count=1,
                     instance_type="ml.g5.xlarge",
                 )
+                # ManagedInstanceScaling and InferenceAmiVersion are set
+                # through the overrides below: they are what scale the
+                # endpoint INSTANCE (not just the model copy) to zero.
             ],
             tags=[cdk.CfnTag(key="app", value="lachesis-guard")],
+        )
+
+        endpoint_config.add_property_override(
+            "ProductionVariants.0.ManagedInstanceScaling",
+            {
+                "Status": "ENABLED",
+                "MinInstanceCount": 0,
+                "MaxInstanceCount": 1,
+            },
+        )
+        endpoint_config.add_property_override(
+            "ProductionVariants.0.InferenceAmiVersion",
+            "al2023-ami-sagemaker-inference-gpu-4-1",
         )
 
         endpoint = sagemaker.CfnEndpoint(
@@ -93,13 +116,12 @@ class DeciderStack(cdk.Stack):
             tags=[cdk.CfnTag(key="app", value="lachesis-guard")],
         )
 
-        # The inference component itself is applied by
-        # scripts/apply_decider_ic.py right after this stack deploys:
-        # a fresh endpoint refuses component creation with "not enough
-        # memory available" for its first minutes (proven by hand,
-        # 2026-10-14), and CloudFormation has no retry for that. The
-        # script mirrors this specification and retries until the
-        # endpoint settles; the scaling target and policy live there too.
+        # The inference component lives in LachesisDeciderIc, deployed
+        # after this stack: a fresh endpoint refuses component creation
+        # with "not enough memory available" for its first minutes
+        # (proven by hand, 2026-10-14), and CloudFormation has no retry
+        # for that. scripts/apply_decider_ic.py is the emergency manual
+        # path with the same specification.
         self.inference_component = None
 
         self.endpoint_name = endpoint.attr_endpoint_name
