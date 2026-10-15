@@ -47,6 +47,7 @@ from strands.interventions import (
 
 from lachesis.client import DeciderClient
 from lachesis.policy import (
+    CONFIRM,
     DEFAULT_THRESHOLD,
     DENY,
     GUIDE,
@@ -264,7 +265,20 @@ class LachesisHandler(InterventionHandler):
             )
 
         state = render_state(messages, tool_name, arguments, await self._window_tokens())
-        result = await asyncio.to_thread(self._client.ask, state, lachesis_questions())
+        try:
+            result = await asyncio.to_thread(self._client.ask, state, lachesis_questions())
+        except Exception:
+            # The Decider did not answer (down, cold, capacity): fail
+            # closed. A person decides; the call never runs on a guess.
+            verdict = Verdict(
+                CONFIRM,
+                "the Decider did not answer, so a person decides",
+                "",
+                0.0,
+                False,
+                "unavailable",
+            )
+            return self._act(tool_name, arguments, verdict, "", 0.0, None, call_id, agent)
         risk_answer = result.answers.get("risk_class", {})
         grounded_answer = result.answers.get("grounded", {})
         risk = str(risk_answer.get("choice") or "")

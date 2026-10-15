@@ -752,7 +752,20 @@ class TriageHandler(InterventionHandler):
             )
 
         state = render_state(messages, tool_name, arguments, await self._window_tokens())
-        answers, latency_ms = await asyncio.to_thread(self._ask, state, triage_questions())
+        try:
+            answers, latency_ms = await asyncio.to_thread(self._ask, state, triage_questions())
+        except Exception:
+            # The Decider did not answer (down, cold, capacity): fail
+            # closed. A person decides; the call never runs on a guess.
+            verdict = TriageVerdict(
+                CONFIRM,
+                "the Decider did not answer, so a person decides",
+                "",
+                0.0,
+                False,
+                "unavailable",
+            )
+            return self._act(tool_name, arguments, verdict, "", 0.0, None, call_id, agent)
         risk_answer = answers.get("risk_class", {})
         grounded_answer = answers.get("grounded", {})
         risk = str(risk_answer.get("choice") or "")

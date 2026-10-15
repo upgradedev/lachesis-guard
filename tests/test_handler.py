@@ -50,6 +50,21 @@ class Scripted:
         return self.result
 
 
+class Down:
+    """A Decider client that never answers (server down, GPU cold)."""
+
+    def ask(self, state, questions):
+        raise RuntimeError("decider unavailable")
+
+
+def test_decider_down_fails_closed_to_confirm():
+    handler = LachesisHandler(client=Down())
+    action = triage(handler, event())
+    assert isinstance(action, Confirm)
+    assert handler.log[-1]["layer"] == "unavailable"
+    assert handler.log[-1]["verdict"] == "confirm"
+
+
 def test_name_identifies_the_handler():
     assert LachesisHandler.name == "lachesis-guard"
 
