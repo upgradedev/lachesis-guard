@@ -53,8 +53,12 @@ def _claims(event: dict) -> dict:
 
 
 def _is_approver(event: dict) -> bool:
-    groups = str(_claims(event).get("cognito:groups", ""))
-    return "approvers" in groups.split(",")
+    groups = _claims(event).get("cognito:groups", "")
+    if isinstance(groups, list):
+        return "approvers" in groups
+    # API Gateway stringifies array claims, e.g. "[approvers]".
+    tokens = str(groups).strip("[]").replace('"', "").split(",")
+    return "approvers" in [token.strip() for token in tokens]
 
 
 def _try_counter_ok() -> bool:
