@@ -60,6 +60,10 @@ class AgentStack(cdk.Stack):
             )
         )
 
+        # AgentCore validates the ECR pull when the runtime is created,
+        # so the role's pull policy must exist first.
+        _default_policy = role.node.try_find_child("DefaultPolicy")
+
         runtime = agentcore.CfnRuntime(
             self,
             "LachesisRuntime",
@@ -86,6 +90,9 @@ class AgentStack(cdk.Stack):
             ),
             tags={"app": "lachesis-guard"},
         )
+
+        if _default_policy is not None:
+            runtime.node.add_dependency(_default_policy)
 
         self.runtime = runtime
         self.runtime_id = runtime.attr_agent_runtime_id
