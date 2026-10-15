@@ -231,18 +231,21 @@ class ApprovalsStack(cdk.Stack):
                 authorizer_id=authorizer.attr_authorizer_id if auth_type == "JWT" else None,
             )
             route.node.add_dependency(integration)
-        apigw.CfnStage(
+        stage = apigw.CfnStage(
             self,
             "DefaultStage",
             api_id=api.attr_api_id,
             stage_name="$default",
             auto_deploy=True,
-            route_settings={
-                "POST /try": apigw.CfnStage.RouteSettingsProperty(
-                    throttling_rate_limit=0.2,
-                    throttling_burst_limit=2,
-                )
-            },
+        )
+        # Route throttle for POST /try (F7). Written as a raw override:
+        # CDK's RouteSettingsProperty serializes throttlingBurstLimit
+        # with a lowercase t, which ApiGatewayV2 rejects ("Unrecognized
+        # field", deploy of 2026-10-15); the service wants
+        # ThrottlingBurstLimit / ThrottlingRateLimit verbatim.
+        stage.add_property_override(
+            "RouteSettings",
+            {"POST /try": {"ThrottlingRateLimit": 0.2, "ThrottlingBurstLimit": 2}},
         )
         lambda_.CfnPermission(
             self,
