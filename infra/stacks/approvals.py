@@ -213,6 +213,7 @@ class ApprovalsStack(cdk.Stack):
             ("POST /try", "NONE"),
             ("GET /try/{token}", "NONE"),
         )
+        route_resources = []
         for route_key, auth_type in routes:
             slug = "".join(
                 part.title()
@@ -231,6 +232,7 @@ class ApprovalsStack(cdk.Stack):
                 authorizer_id=authorizer.attr_authorizer_id if auth_type == "JWT" else None,
             )
             route.node.add_dependency(integration)
+            route_resources.append(route)
         stage = apigw.CfnStage(
             self,
             "DefaultStage",
@@ -247,6 +249,11 @@ class ApprovalsStack(cdk.Stack):
             "RouteSettings",
             {"POST /try": {"ThrottlingRateLimit": 0.2, "ThrottlingBurstLimit": 2}},
         )
+        # ApiGateway validates RouteSettings against existing routes at
+        # stage creation ("Unable to find Route by key POST /try", deploy
+        # of 2026-10-15), so the stage waits for every route.
+        for route_resource in route_resources:
+            stage.node.add_dependency(route_resource)
         lambda_.CfnPermission(
             self,
             "ApiInvokePermission",
