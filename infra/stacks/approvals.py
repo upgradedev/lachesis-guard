@@ -66,6 +66,12 @@ class ApprovalsStack(cdk.Stack):
             "ApproversPool",
             self_sign_up_enabled=False,
             sign_in_aliases=cognito.SignInAliases(username=True),
+            # F24: the approver is the only identity that can release a
+            # governed write; optional TOTP can be enrolled at first
+            # sign-in (not required, so enrolment never locks the owner
+            # out before it is set up).
+            mfa=cognito.Mfa.OPTIONAL,
+            mfa_second_factor=cognito.MfaSecondFactor(sms=False, otp=True),
             removal_policy=cdk.RemovalPolicy.DESTROY,
         )
         cognito.CfnUserPoolGroup(
