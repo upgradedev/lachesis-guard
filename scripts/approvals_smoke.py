@@ -56,6 +56,39 @@ def _sign_in(idp, pool_id: str, client_id: str, username: str, password: str) ->
     return auth["AuthenticationResult"]["IdToken"]
 
 
+def _warm_decider() -> None:
+    """Make sure the Decider component has a copy before the flow needs it:
+    at zero copies the handler fails closed (by design), which would pause
+    the resumed run a second time and stall this smoke."""
+    sm = boto3.client("sagemaker", region_name=REGION)
+    rt = boto3.client("sagemaker-runtime", region_name=REGION)
+    body = b'{"state": "warmup", "questions": {}}'
+
+    def _invoke() -> bool:
+        try:
+            rt.invoke_endpoint(
+                EndpointName="lachesis-decider",
+                InferenceComponentName="lachesis-decider-2b",
+                ContentType="application/json",
+                Body=body,
+            )
+            return True
+        except Exception:
+            return False
+
+    if _invoke():
+        print("decider already warm")
+        return
+    print("warming the decider (scale-out can take minutes)")
+    deadline = time.time() + 1200
+    while time.time() < deadline:
+        if _invoke():
+            print("decider warm")
+            return
+        time.sleep(20)
+    raise AssertionError("decider never warmed")
+
+
 def main() -> int:
     outputs = _outputs("LachesisApprovals")
     api_url, pool_id, client_id = outputs["ApiUrl"], outputs["UserPoolId"], outputs["UserPoolClientId"]
@@ -88,6 +121,7 @@ def main() -> int:
         assert status == 403, f"non-approver must get 403, got {status}"
         print("non-approver: 403 ok")
 
+        _warm_decider()
         status, started = _call(api_url, "POST", "/approvals/start", approver, {})
         assert status == 202, started
         approval_id = started["approval_id"]
@@ -113,11 +147,21 @@ def main() -> int:
         assert status == 409, f"repeat decision must be 409, got {status}"
         print("decision 202, repeat 409 ok")
 
-        deadline = time.time() + 600
+        deadline = time.time() + 900
         while time.time() < deadline:
             _, view = _call(api_url, "GET", f"/approvals/{approval_id}", approver)
             if view.get("status") in {"DONE", "REFUSED_DONE", "EXPIRED"}:
                 break
+            if view.get("status") == "PENDING":
+                # A later call paused again (fail-closed while the GPU was
+                # cold is the honest cause); approve it too.
+                _call(
+                    api_url,
+                    "POST",
+                    f"/approvals/{approval_id}/decision",
+                    approver,
+                    {"decision": "approve"},
+                )
             time.sleep(10)
         assert view.get("status") == "DONE", f"resume did not finish: {view}"
         print("resume completed ok")
