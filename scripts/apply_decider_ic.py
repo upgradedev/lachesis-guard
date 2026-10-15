@@ -80,7 +80,6 @@ def ensure_component(sm, session: boto3.Session) -> str:
             VariantName=VARIANT,
             Specification=specification,
             RuntimeConfig={"CopyCount": 1},
-            Tags=[{"Key": "app", "Value": "lachesis-guard"}],
         )
         print(f"attempt {attempt}: created, waiting for InService")
         for _ in range(80):
