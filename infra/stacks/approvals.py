@@ -104,7 +104,7 @@ class ApprovalsStack(cdk.Stack):
         runner.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["bedrock-agentcore:InvokeAgentRuntime"],
-                resources=[agent.runtime_arn],
+                resources=[agent.runtime_arn, f"{agent.runtime_arn}/*"],
             )
         )
         runner.add_to_role_policy(
@@ -132,7 +132,7 @@ class ApprovalsStack(cdk.Stack):
         sweeper.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["bedrock-agentcore:InvokeAgentRuntime"],
-                resources=[agent.runtime_arn],
+                resources=[agent.runtime_arn, f"{agent.runtime_arn}/*"],
             )
         )
         events.Rule(
@@ -157,8 +157,8 @@ class ApprovalsStack(cdk.Stack):
         runner.grant_invoke(api_fn)
         lambda_.CfnEventInvokeConfig(
             self,
-            "ApiInvokeConfig",
-            function_name=api_fn.function_name,
+            "RunnerInvokeConfig",
+            function_name=runner.function_name,
             qualifier="$LATEST",
             maximum_retry_attempts=0,
         )
