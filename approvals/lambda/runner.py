@@ -50,6 +50,36 @@ def _send_card(item: dict) -> None:
     )
 
 
+def _pending_card(result: dict) -> dict:
+    """The approval card for a pause: the interrupt reason plus the
+    pausing triage row's Decider fields (risk, confidence, latency,
+    layer), so the console can show what Decider measured (F2). Used
+    for the first pause and for every re-pause after a resume; the
+    resume path used to rewrite the card with the reason only, which
+    silently dropped the Decider fields (found live, 2026-10-15)."""
+    import datetime
+
+    interrupts = result.get("interrupts", [])
+    triage = result.get("triage", [])
+    pausing = next(
+        (row for row in reversed(triage) if row.get("verdict") in {"confirm", "deny"}),
+        triage[-1] if triage else {},
+    )
+    expires = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
+        seconds=common.TTL_SECONDS
+    )
+    return {
+        "reason": interrupts[0].get("reason", "") if interrupts else "",
+        "tool": pausing.get("tool", ""),
+        "risk": pausing.get("risk", ""),
+        "confidence": pausing.get("confidence"),
+        "latency_ms": pausing.get("latency_ms"),
+        "layer": pausing.get("layer", ""),
+        "created_at": common.now_iso(),
+        "expires_at": expires.isoformat(timespec="seconds"),
+    }
+
+
 def start(prompt: str, lane: str, approval_id: str = "") -> dict:
     approval_id = approval_id or common.new_approval_id()
     session_id = common.new_session_id()
@@ -67,26 +97,7 @@ def start(prompt: str, lane: str, approval_id: str = "") -> dict:
         )
         return {"status": "completed", "approval_id": approval_id}
     interrupts = result.get("interrupts", [])
-    triage = result.get("triage", [])
-    pausing = next(
-        (row for row in reversed(triage) if row.get("verdict") in {"confirm", "deny"}),
-        triage[-1] if triage else {},
-    )
-    import datetime
-
-    expires = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
-        seconds=common.TTL_SECONDS
-    )
-    card = {
-        "reason": interrupts[0].get("reason", "") if interrupts else "",
-        "tool": pausing.get("tool", ""),
-        "risk": pausing.get("risk", ""),
-        "confidence": pausing.get("confidence"),
-        "latency_ms": pausing.get("latency_ms"),
-        "layer": pausing.get("layer", ""),
-        "created_at": common.now_iso(),
-        "expires_at": expires.isoformat(timespec="seconds"),
-    }
+    card = _pending_card(result)
     item = common.transition(
         approval_id,
         "STARTING",
@@ -135,13 +146,7 @@ def resume(approval_id: str) -> dict:
             "RESUMING",
             "PENDING",
             interrupts=json.dumps(result.get("interrupts", [])),
-            card=json.dumps(
-                {
-                    "reason": (result.get("interrupts") or [{}])[0].get("reason", ""),
-                    "created_at": common.now_iso(),
-                    "expires_at": "",
-                }
-            ),
+            card=json.dumps(_pending_card(result)),
         )
         return {"status": "interrupt-again", "approval_id": approval_id}
     final_status = "DONE" if status == "APPROVED" else "REFUSED_DONE"
