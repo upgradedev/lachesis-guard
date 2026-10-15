@@ -21,6 +21,7 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src", "."]
 testpaths = ["tests"]
+# Coverage scope: src/lachesis only (see README, Tests and coverage).
 addopts = "--cov=lachesis --cov-report=term-missing --cov-fail-under=85"
 markers = ["live: needs a live Decider server (skips without one, fails without one under decider-live.yml)"]
 
