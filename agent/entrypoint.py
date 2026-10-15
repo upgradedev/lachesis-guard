@@ -113,7 +113,7 @@ def _build_agent(session_id: str) -> Agent:
     return Agent(
         model=model,
         tools=_make_tools(_workdir(session_id)),
-        intervention_handlers=[handler],
+        interventions=[handler],
         session_manager=session,
         system_prompt=SYSTEM_PROMPT,
     )

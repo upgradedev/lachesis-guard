@@ -83,6 +83,7 @@ class AgentStack(cdk.Stack):
                 "MODEL_ID": MODEL_PROFILE,
                 "DECIDER_ENDPOINT": decider.endpoint_name,
                 "DECIDER_COMPONENT": decider.inference_component_name,
+                "AGENT_CODE_REV": "2",
             },
             lifecycle_configuration=agentcore.CfnRuntime.LifecycleConfigurationProperty(
                 idle_runtime_session_timeout=900,
