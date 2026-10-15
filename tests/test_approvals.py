@@ -203,7 +203,6 @@ def test_expired_decision_is_409(modules, monkeypatch):
     common, api, _, _ = modules
     common.create_row("appr-old", "s" * 40, "approval")
     common.transition("appr-old", "STARTING", "PENDING", interrupts="[]", card="{}")
-    row = common.get("appr-old")
     common._table.items["appr-old"]["expires_ts"] = 1
     monkeypatch.setattr(api, "_invoke_runner", lambda payload, asynchronous: {})
     out = _decide(api, APPROVER, "approve", "appr-old")
