@@ -89,6 +89,6 @@ jobs:
         if: inputs.action == 'destroy' && inputs.confirm == 'DESTROY'
         working-directory: infra
         run: |
-          for stack in LachesisApprovals LachesisAgent LachesisDecider LachesisFoundation; do
+          for stack in LachesisApprovals LachesisAgent LachesisDeciderIc LachesisDecider LachesisObservability LachesisFoundation; do
             cdk destroy "$stack" --force || true
           done
