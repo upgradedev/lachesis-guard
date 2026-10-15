@@ -57,13 +57,13 @@ def main() -> int:
     interrupts = first["interrupts"]
     assert interrupts, "interrupt carried no entries"
 
-    control = boto3.client("bedrock-agentcore-control", region_name=REGION)
+    control = boto3.client("bedrock-agentcore", region_name=REGION)
     try:
         control.stop_runtime_session(
             agentRuntimeArn=args.runtime_arn, runtimeSessionId=session_id
         )
         print("session stopped (microVM gone)")
-    except control.exceptions.ClientError as exc:
+    except Exception as exc:  # stop is best-effort; the resume proves the rest
         print("stop note:", exc.response.get("Error", {}).get("Code"))
 
     second = _invoke(
