@@ -18,7 +18,34 @@ from __future__ import annotations
 
 import aws_cdk as cdk
 from aws_cdk import aws_cloudwatch as cloudwatch
+from aws_cdk import aws_cloudwatch_actions as cw_actions
+from aws_cdk import aws_events as events
+from aws_cdk import aws_events_targets as targets
+from aws_cdk import aws_iam as iam
+from aws_cdk import aws_lambda as lambda_
 from constructs import Construct
+
+_INSTANCE_PROBE = """
+import boto3
+
+sm = boto3.client("sagemaker")
+cw = boto3.client("cloudwatch")
+
+
+def handler(event, context):
+    ep = sm.describe_endpoint(EndpointName="lachesis-decider")
+    count = sum(v.get("CurrentInstanceCount", 0) for v in ep.get("ProductionVariants", []))
+    cw.put_metric_data(
+        Namespace="Lachesis/Decider",
+        MetricData=[{
+            "MetricName": "EndpointInstanceCount",
+            "Dimensions": [{"Name": "EndpointName", "Value": "lachesis-decider"}],
+            "Value": float(count),
+            "Unit": "Count",
+        }],
+    )
+    return {"instance_count": count}
+"""
 
 
 class ObservabilityStack(cdk.Stack):
@@ -82,6 +109,64 @@ class ObservabilityStack(cdk.Stack):
             alarm_description="Bedrock throttles on the agent model profile",
             treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
         )
+
+        # Endpoint instance guard (F4). SageMaker publishes no
+        # instance-count metric (verified with list_metrics on
+        # 2026-10-15: AWS/SageMaker has none), so a small scheduled
+        # probe publishes CurrentInstanceCount as a custom metric and
+        # this alarm notifies the budget topic whenever a GPU instance
+        # is up. It is expected to sit in ALARM while the Decider is
+        # deliberately warm; its job is to make an idle GPU loud, which
+        # is exactly the failure that cost money on 2026-10-15.
+        probe = lambda_.Function(
+            self,
+            "EndpointInstanceProbe",
+            function_name="lachesis-endpoint-instance-probe",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            handler="index.handler",
+            code=lambda_.Code.from_inline(_INSTANCE_PROBE),
+            timeout=cdk.Duration.seconds(60),
+            memory_size=128,
+        )
+        probe.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["sagemaker:DescribeEndpoint"],
+                resources=[
+                    f"arn:aws:sagemaker:eu-west-1:{self.account}:endpoint/lachesis-decider"
+                ],
+            )
+        )
+        probe.add_to_role_policy(
+            iam.PolicyStatement(actions=["cloudwatch:PutMetricData"], resources=["*"])
+        )
+        events.Rule(
+            self,
+            "EndpointInstanceProbeSchedule",
+            schedule=events.Schedule.rate(cdk.Duration.minutes(5)),
+            targets=[targets.LambdaFunction(probe)],
+        )
+        instance_count = cloudwatch.Metric(
+            namespace="Lachesis/Decider",
+            metric_name="EndpointInstanceCount",
+            dimensions_map={"EndpointName": "lachesis-decider"},
+            statistic="Maximum",
+            period=cdk.Duration.minutes(5),
+            unit=cloudwatch.Unit.COUNT,
+        )
+        instance_alarm = cloudwatch.Alarm(
+            self,
+            "EndpointInstanceUp",
+            metric=instance_count,
+            threshold=1,
+            evaluation_periods=1,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            alarm_description=(
+                "A Decider GPU instance is running (lachesis-decider CurrentInstanceCount >= 1). "
+                "Expected while deliberately warm; otherwise scale to zero or delete the endpoint."
+            ),
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+        instance_alarm.add_alarm_action(cw_actions.SnsAction(foundation.alerts_topic))
 
         dashboard = cloudwatch.Dashboard(self, "LachesisDashboard", dashboard_name="lachesis")
         dashboard.add_widgets(

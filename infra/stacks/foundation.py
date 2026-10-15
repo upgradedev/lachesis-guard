@@ -25,7 +25,13 @@ from aws_cdk import (
     aws_s3 as s3,
 )
 from aws_cdk import (
+    aws_iam as iam,
+)
+from aws_cdk import (
     aws_sns as sns,
+)
+from aws_cdk import (
+    aws_sns_subscriptions as subscriptions,
 )
 from constructs import Construct
 
@@ -132,6 +138,24 @@ class FoundationStack(cdk.Stack):
         self.agent_repo.grant_pull_push(self.agent_build)
 
         alerts = sns.Topic(self, "BudgetAlerts", topic_name="lachesis-budget-alerts")
+        self.alerts_topic = alerts
+        # AWS Budgets publishes to the topic; without this policy the
+        # notifications are dropped (F4: the topic had 0 subscribers and
+        # no publish permission, so the guard never fired).
+        alerts.add_to_resource_policy(
+            iam.PolicyStatement(
+                principals=[iam.ServicePrincipal("budgets.amazonaws.com")],
+                actions=["sns:Publish"],
+                resources=[alerts.topic_arn],
+            )
+        )
+        # The owner's address is supplied at deploy time
+        # (cdk deploy -c alert_email=<address>); it is not hard-coded
+        # in the public repo (F18). The owner confirms the subscription
+        # email. No address, no subscription.
+        alert_email = self.node.try_get_context("alert_email")
+        if alert_email:
+            alerts.add_subscription(subscriptions.EmailSubscription(alert_email))
         budgets.CfnBudget(
             self,
             "BuildBudget",
@@ -140,6 +164,11 @@ class FoundationStack(cdk.Stack):
                 budget_type="COST",
                 time_unit="MONTHLY",
                 budget_limit=budgets.CfnBudget.SpendProperty(amount=BUILD_BUDGET_USD, unit="USD"),
+                # Only Lachesis-tagged spend counts. Unfiltered, this
+                # budget tracked the whole account and sat in ALARM from
+                # day one (F4). Tag activation for app=lachesis-guard is
+                # already Active in this account.
+                cost_filters={"TagKeyValue": ["app$lachesis-guard"]},
             ),
             notifications_with_subscribers=[
                 budgets.CfnBudget.NotificationWithSubscribersProperty(
