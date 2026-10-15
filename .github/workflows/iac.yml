@@ -11,6 +11,7 @@ on:
           - synth
           - deploy-foundation
           - deploy-decider
+          - deploy-decider-ic
           - deploy-agent
           - deploy-approvals
           - destroy
@@ -72,11 +73,10 @@ jobs:
         if: inputs.action == 'deploy-decider'
         working-directory: infra
         run: cdk deploy LachesisDecider --require-approval never
-      - name: Apply inference component (retries until the endpoint settles)
-        if: inputs.action == 'deploy-decider'
-        run: |
-          pip install -q boto3
-          python scripts/apply_decider_ic.py
+      - name: Deploy decider inference component
+        if: inputs.action == 'deploy-decider-ic'
+        working-directory: infra
+        run: cdk deploy LachesisDeciderIc --require-approval never
       - name: Deploy agent
         if: inputs.action == 'deploy-agent'
         working-directory: infra

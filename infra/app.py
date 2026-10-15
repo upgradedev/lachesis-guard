@@ -22,6 +22,7 @@ try:
     from stacks.agent import AgentStack
     from stacks.approvals import ApprovalsStack
     from stacks.decider import DeciderStack
+    from stacks.decider_ic import DeciderIcStack
     from stacks.observability import ObservabilityStack
     HAVE_ALL_STACKS = True
 except ImportError:  # stacks land one at a time during the build
@@ -34,6 +35,7 @@ env = cdk.Environment(account=app.node.try_get_context("account"), region="eu-we
 foundation = FoundationStack(app, "LachesisFoundation", env=env)
 if HAVE_ALL_STACKS:
     decider = DeciderStack(app, "LachesisDecider", env=env, foundation=foundation)
+    DeciderIcStack(app, "LachesisDeciderIc", env=env, foundation=foundation)
     agent = AgentStack(app, "LachesisAgent", env=env, foundation=foundation, decider=decider)
     ApprovalsStack(app, "LachesisApprovals", env=env, foundation=foundation, agent=agent)
     ObservabilityStack(
