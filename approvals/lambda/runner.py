@@ -61,10 +61,25 @@ def start(prompt: str, lane: str, approval_id: str = "") -> dict:
         )
         return {"status": "completed", "approval_id": approval_id}
     interrupts = result.get("interrupts", [])
+    triage = result.get("triage", [])
+    pausing = next(
+        (row for row in reversed(triage) if row.get("verdict") in {"confirm", "deny"}),
+        triage[-1] if triage else {},
+    )
+    import datetime
+
+    expires = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
+        seconds=common.TTL_SECONDS
+    )
     card = {
         "reason": interrupts[0].get("reason", "") if interrupts else "",
+        "tool": pausing.get("tool", ""),
+        "risk": pausing.get("risk", ""),
+        "confidence": pausing.get("confidence"),
+        "latency_ms": pausing.get("latency_ms"),
+        "layer": pausing.get("layer", ""),
         "created_at": common.now_iso(),
-        "expires_at": "",
+        "expires_at": expires.isoformat(timespec="seconds"),
     }
     item = common.transition(
         approval_id,

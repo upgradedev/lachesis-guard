@@ -161,6 +161,38 @@ def test_resume_error_returns_row_to_pending(modules, monkeypatch):
     assert common.get("appr-4")["status"] == "PENDING"
 
 
+def test_start_card_carries_decider_fields(modules, monkeypatch):
+    common, _, runner, _ = modules
+    monkeypatch.setattr(
+        common,
+        "invoke_agent",
+        lambda session_id, payload: {
+            "status": "interrupt",
+            "interrupts": [{"interruptId": "i1", "reason": "card text"}],
+            "triage": [
+                {
+                    "tool": "delete_file",
+                    "risk": "destructive_write",
+                    "confidence": 0.31,
+                    "latency_ms": 187.4,
+                    "layer": "decider",
+                    "verdict": "confirm",
+                }
+            ],
+        },
+    )
+    out = runner.start("prompt", "try", "appr-card")
+    assert out["status"] == "interrupt"
+    import json
+
+    card = json.loads(common.get("appr-card")["card"])
+    assert card["risk"] == "destructive_write"
+    assert card["confidence"] == 0.31
+    assert card["latency_ms"] == 187.4
+    assert card["layer"] == "decider"
+    assert card["expires_at"]
+
+
 def test_try_counter_cap(modules, monkeypatch):
     common, api, _, _ = modules
     monkeypatch.setattr(common, "TRY_DAILY_CAP", 2)

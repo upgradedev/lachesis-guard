@@ -87,6 +87,12 @@ def _make_tools(workdir: Path) -> list:
         return f"wrote {path}"
 
     @tool
+    def delete_file(path: str) -> str:
+        """Delete a file inside the workspace."""
+        _confine(workdir, path).unlink(missing_ok=True)
+        return f"deleted {path}"
+
+    @tool
     def run_tests() -> str:
         """Run the workspace's python tests."""
         completed = subprocess.run(
@@ -99,10 +105,10 @@ def _make_tools(workdir: Path) -> list:
         )
         return f"exit {completed.returncode}\n{completed.stdout[-2000:]}{completed.stderr[-500:]}"
 
-    return [read_file, write_file, run_tests]
+    return [read_file, write_file, delete_file, run_tests]
 
 
-def _build_agent(session_id: str) -> Agent:
+def _build_agent(session_id: str) -> tuple[Agent, LachesisHandler]:
     session = S3SessionManager(
         session_id=session_id,
         bucket=SESSIONS_BUCKET,
@@ -111,19 +117,21 @@ def _build_agent(session_id: str) -> Agent:
     )
     handler = LachesisHandler(client=SageMakerDeciderClient())
     model = BedrockModel(model_id=MODEL_ID)
-    return Agent(
+    agent = Agent(
         model=model,
         tools=_make_tools(_workdir(session_id)),
         interventions=[handler],
         session_manager=session,
         system_prompt=SYSTEM_PROMPT,
     )
+    return agent, handler
 
 
-def _result_payload(result: Any, session_id: str) -> dict[str, Any]:
+def _result_payload(result: Any, session_id: str, triage: list) -> dict[str, Any]:
     if getattr(result, "stop_reason", None) == "interrupt":
         return {
             "status": "interrupt",
+            "triage": triage,
             "session_id": session_id,
             "interrupts": [
                 {
@@ -136,6 +144,7 @@ def _result_payload(result: Any, session_id: str) -> dict[str, Any]:
         }
     return {
         "status": "completed",
+        "triage": triage,
         "session_id": session_id,
         "text": str(result),
         "stop_reason": getattr(result, "stop_reason", ""),
@@ -146,7 +155,7 @@ def handle_invocation(payload: dict[str, Any]) -> dict[str, Any]:
     session_id = str(payload.get("session_id") or "")
     if len(session_id) < 33:
         return {"status": "error", "error": "session_id must be at least 33 characters"}
-    agent = _build_agent(session_id)
+    agent, handler = _build_agent(session_id)
     responses = payload.get("interrupt_responses")
     if responses:
         result = agent(
@@ -160,11 +169,11 @@ def handle_invocation(payload: dict[str, Any]) -> dict[str, Any]:
                 for item in responses
             ]
         )
-        return _result_payload(result, session_id)
+        return _result_payload(result, session_id, list(handler.log))
     prompt = str(payload.get("prompt") or "")
     if not prompt:
         return {"status": "error", "error": "prompt or interrupt_responses required"}
-    return _result_payload(agent(prompt), session_id)
+    return _result_payload(agent(prompt), session_id, list(handler.log))
 
 
 class Handler(BaseHTTPRequestHandler):

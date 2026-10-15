@@ -62,15 +62,36 @@ function gauge(confidence) {
   return '<div class="gauge"><div style="width:' + pct + '%"></div></div>';
 }
 
+function layerLabel(layer) {
+  if (layer === "secretscan") return "deterministic secret scan (second layer)";
+  if (layer === "unavailable") return "Decider unavailable (GPU cold): a person decides";
+  if (layer === "decider") return "Strands Decider 2B";
+  return layer || "";
+}
+
 function renderApproval(item) {
   const div = document.createElement("div");
   div.className = "card";
-  const reason = (item.card && item.card.reason) || "";
+  const card = item.card || {};
+  const reason = card.reason || "";
   const match = reason.match(/confidence\s+([0-9.]+)/i);
-  div.innerHTML = "<strong>" + item.approval_id + "</strong> " + gauge(match ? parseFloat(match[1]) : 0) +
+  const confidence = (card.confidence !== null && card.confidence !== undefined)
+    ? card.confidence : (match ? parseFloat(match[1]) : 0);
+  let meta = "";
+  if (card.risk) {
+    meta = "Decider: " + card.risk + " at " + Number(confidence).toFixed(2) +
+      " (threshold 0.70)" +
+      (card.latency_ms ? " · " + Math.round(card.latency_ms) + " ms" : "") +
+      (card.layer ? " · " + layerLabel(card.layer) : "");
+  } else if (card.layer) {
+    meta = layerLabel(card.layer);
+  }
+  div.innerHTML = "<strong>" + item.approval_id + "</strong> " + gauge(confidence) +
+    (meta ? '<div class="muted"></div>' : "") +
     "<pre></pre>" +
     '<button data-act="approve">Approve</button><button class="decline" data-act="decline">Decline</button> ' +
     '<span class="muted"></span>';
+  if (meta) div.querySelectorAll("div.muted")[0].textContent = meta;
   div.querySelector("pre").textContent = reason;
   div.querySelectorAll("button").forEach(btn => btn.addEventListener("click", async () => {
     const out = await api("/approvals/" + item.approval_id + "/decision", {
