@@ -12,8 +12,10 @@ deleted at the end.
 from __future__ import annotations
 
 import json
+import sys
 import time
 import urllib.request
+from pathlib import Path
 
 import boto3
 
@@ -62,7 +64,16 @@ def _warm_decider() -> None:
     the resumed run a second time and stall this smoke."""
     sm = boto3.client("sagemaker", region_name=REGION)
     rt = boto3.client("sagemaker-runtime", region_name=REGION)
-    body = b'{"state": "warmup", "questions": {}}'
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+    from lachesis.handler import render_state
+    from lachesis.questions import lachesis_questions
+
+    state = render_state(
+        [{"role": "user", "content": [{"text": "read the config"}]}],
+        "read_file",
+        {"path": "config.yml"},
+    )
+    body = json.dumps({"state": state, "questions": lachesis_questions()}).encode()
 
     def _invoke() -> bool:
         try:
