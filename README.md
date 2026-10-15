@@ -112,6 +112,35 @@ a README another builder can follow in five minutes.
 
 ## What runs where
 
+Hosted path (the judged demo, all in eu-west-1):
+
+- The agent is a Strands agent on Amazon Bedrock AgentCore Runtime
+  (`lachesis_agent`), with Amazon Bedrock (`eu.anthropic.claude-sonnet-5-5`)
+  as its model. Its image carries the Lachesis handler: before every tool
+  call the handler asks the Decider, and on Confirm the run pauses.
+- Strands Decider 2B (pinned model id above) serves from the SageMaker
+  endpoint `lachesis-decider` as inference component `lachesis-decider-2b`
+  on one ml.g5.xlarge. Both the model copy and the endpoint instance scale
+  to zero when idle (read back on 2026-10-15: CurrentInstanceCount 0), so
+  the GPU bills nothing while idle and about $1.57/h while warm. A cold
+  invoke fails at once with a no-capacity error; it does not wait. The
+  wake is explicit (`scripts/set_decider_warm.py`), and a full cold start
+  is slow: measured on 2026-10-15 at about 30 minutes from the first cold
+  invoke to the first answer (about 6 minutes for the instance, the rest
+  image and model load; see docs/evidence/GPU_2026-10-13.md). Warm at
+  least 35 minutes before anything that must not wait.
+- A person approves from the Lachesis Approvals console at
+  https://d16gysn4emvp5j.cloudfront.net (Cognito sign-in, approvers
+  group). Behind it: an HTTP API, Lambda, DynamoDB and a sweeper. Anyone
+  can run the same canned, Decider-judged demo from the console's /try
+  lane with no account: the agent first proposes deleting
+  `refunds_prod_config.py`, Decider judges that call, and the card shows
+  its risk class, confidence and latency before any decision. The
+  deterministic secret scan remains a second, separately labelled layer.
+- AgentCore spans: not enabled.
+
+Local and box paths:
+
 - The agent is a Strands agent. You run `scripts/demo_agent.py` where you like; its model is
   Amazon Bedrock. Pass a Bedrock model id as `--model` (the recording used
   `eu.anthropic.claude-sonnet-5-5` in eu-west-1).
@@ -126,8 +155,14 @@ a README another builder can follow in five minutes.
   never over the open network.
 - One Decider server answers one queue. The handler asks synchronously, so concurrent agents
   serialize through it; there is no client retry or backoff. Measured on one CPU box, long
-  states stretch a single triage to about 91 s; a GPU server answers in 193 ms steady-state
-  (med 193 ms, p95 236 ms, n=50, docs/evidence/gpu-threshold.md).
+  states stretch a single triage to about 91 s. GPU latency has one source in this repo: the
+  committed rows. On one GPU in a bounded 2026-10-13 run, the Decider-asked cases answered
+  at a median of 193 ms, p95 199 ms (nearest-rank, n=45), rows in
+  `evaluation/gpu_threshold_2026-10-13.jsonl`, notes in
+  [docs/evidence/GPU_2026-10-13.md](docs/evidence/GPU_2026-10-13.md). Hosted on SageMaker
+  (next section), a full probe on 2026-10-15 measured a median of 167 ms, p95 173 ms
+  (nearest-rank, n=45, first call excluded) with verdict parity 50 of 50 against the CPU
+  box rows; rows in `evaluation/sagemaker_2026-10-15.jsonl`.
 - The benchmark comparison is committed under `benchmark/results/`, with the evidence notes
   in `docs/evidence/`; the series table is in
   [`benchmark/README.md`](benchmark/README.md#lachesis-series).
