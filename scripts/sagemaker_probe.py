@@ -13,7 +13,9 @@ never folded into the latency stats.
 
 from __future__ import annotations
 
+import argparse
 import json
+import math
 import statistics
 import sys
 import time
@@ -100,12 +102,34 @@ def main() -> int:
     ]
     latencies = sorted(s.latency_ms for s in scored[1:] if s.layer == "decider")
     median = statistics.median(latencies)
-    p95 = latencies[int(0.95 * len(latencies)) - 1]
+    # Nearest-rank p95: the smallest value at or above the 95th percentile.
+    p95 = latencies[max(0, math.ceil(0.95 * len(latencies)) - 1)]
     print(f"cases: {len(scored)}  decider-asked: {len(latencies)}")
     print(f"verdict parity vs CPU box rows: {len(scored) - len(differ)}/{len(scored)} same"
           f"  differ: {differ}")
     print(f"GPU latency per asked case: median {median:.0f} ms, p95 {p95:.0f} ms "
-          f"(n={len(latencies)}, first call excluded)")
+          f"(nearest-rank, n={len(latencies)}, first call excluded)")
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--out", help="write per-case rows as JSONL to this path")
+    args = parser.parse_args()
+    if args.out:
+        rows = [
+            {
+                "id": s.case_id,
+                "verdict": s.verdict,
+                "risk": s.risk_pred,
+                "confidence": round(s.confidence, 4),
+                "latency_ms": round(s.latency_ms, 1),
+                "layer": s.layer,
+                "cpu_verdict": expected.get(s.case_id),
+            }
+            for s in scored
+        ]
+        Path(args.out).write_text(
+            "\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8"
+        )
+        print(f"rows written: {args.out} ({len(rows)})")
     return 0
 
 
