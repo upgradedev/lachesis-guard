@@ -146,6 +146,21 @@ def test_resume_only_once(modules, monkeypatch):
     assert len(calls) == 1
 
 
+def test_resume_error_returns_row_to_pending(modules, monkeypatch):
+    common, _, runner, _ = modules
+    common.create_row("appr-4", "s" * 40, "approval")
+    interrupts = '[{"interruptId": "i1"}]'
+    common.transition("appr-4", "STARTING", "PENDING", interrupts=interrupts, card="{}")
+    common.transition("appr-4", "PENDING", "APPROVED", decided_by="sub-1")
+
+    def _boom(session_id, payload):
+        raise RuntimeError("runtime 500")
+
+    monkeypatch.setattr(common, "invoke_agent", _boom)
+    assert runner.resume("appr-4")["status"] == "error-resumable"
+    assert common.get("appr-4")["status"] == "PENDING"
+
+
 def test_try_counter_cap(modules, monkeypatch):
     common, api, _, _ = modules
     monkeypatch.setattr(common, "TRY_DAILY_CAP", 2)

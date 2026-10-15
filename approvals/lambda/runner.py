@@ -85,21 +85,27 @@ def resume(approval_id: str) -> dict:
     status = row["status"]
     if status not in {"APPROVED", "DECLINED"}:
         return {"status": "noop", "current": status}
-    moved = common.transition(approval_id, status, "RESUMING")
+    import time as _time
+
+    moved = common.transition(approval_id, status, "RESUMING", resuming_ts=int(_time.time()))
     if moved is None:
         return {"status": "noop", "current": "moved-by-another"}
     answer = "y" if status == "APPROVED" else "no"
     interrupts = json.loads(row.get("interrupts") or "[]")
-    result = common.invoke_agent(
-        row["session_id"],
-        {
-            "session_id": row["session_id"],
-            "interrupt_responses": [
-                {"interruptId": item["interruptId"], "response": answer}
-                for item in interrupts
-            ],
-        },
-    )
+    try:
+        result = common.invoke_agent(
+            row["session_id"],
+            {
+                "session_id": row["session_id"],
+                "interrupt_responses": [
+                    {"interruptId": item["interruptId"], "response": answer}
+                    for item in interrupts
+                ],
+            },
+        )
+    except Exception as exc:  # never strand a row in RESUMING
+        common.transition(approval_id, "RESUMING", "PENDING")
+        return {"status": "error-resumable", "error": f"{type(exc).__name__}: {exc}"}
     if result.get("status") == "interrupt":
         # The resumed run paused again: fold the new pause into a fresh
         # pending state on the same approval id.
@@ -127,6 +133,16 @@ def resume(approval_id: str) -> dict:
 def sweep() -> dict:
     import time
 
+    # A resume whose Lambda died mid-invoke leaves RESUMING behind; after
+    # twenty minutes it goes back to PENDING so a person can decide again.
+    rescued = 0
+    for item in common.list_by_status("RESUMING", limit=50):
+        if int(time.time()) - int(item.get("resuming_ts", 0)) < 1200:
+            continue
+        moved = common.transition(item["approval_id"], "RESUMING", "PENDING")
+        if moved is not None:
+            rescued += 1
+
     expired = [
         item
         for item in common.list_by_status("PENDING", limit=100)
@@ -148,7 +164,7 @@ def sweep() -> dict:
             },
         )
         common.transition(item["approval_id"], "RESUMING", "EXPIRED")
-    return {"expired": len(expired)}
+    return {"expired": len(expired), "rescued": rescued}
 
 
 def handler(event, _context):
