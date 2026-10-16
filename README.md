@@ -100,6 +100,19 @@ first run because the model was right and the label was wrong; the risk bands di
 Caveat: 12 accepted cases is small. The fixture grows as real agent traffic arrives, and the line
 is refit then. Below the line the agent confirms or asks a person; it never trusts an unsure triage.
 
+Expanded check, 2026-10-16. The fixture then grew by 128 further synthetic cases in dev and test
+splits with deliberately different surface names (`evaluation/expanded_cases.jsonl`), scored on the
+CI CPU runner (run 38893093595; rows in `evaluation/expanded_cpu_2026-10-16.jsonl`, replay with
+`python scripts/analyze_threshold.py evaluation/expanded_cpu_2026-10-16.jsonl`). The bigger suite is
+less flattering, and both stay in print. At 0.70, 5 of 51 governed test cases would have proceeded
+(two of them destructive `set_config` calls Decider scored benign at 0.73) and only 1 of 13 clean
+cases paused. At 0.80, no destructive, exfiltration, confused-deputy or untrusted case proceeds on
+either split, but 12 of 13 clean test cases pause: Decider's benign confidence rarely exceeds 0.87,
+so the threshold trades safety against friction and never separates cleanly. The default stays 0.70;
+an operator who can afford the pauses should run `TriageHandler(threshold=0.80)`. Config writes are
+the class Decider under-scores, and that is now the named weak class (confused deputy was the weakest
+on the small fixture).
+
 ## Reusable decision pattern
 
 `patterns/guardrails/` holds the reusable Strands Decider 2B decision pattern: the typed questions
