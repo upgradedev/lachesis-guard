@@ -9,6 +9,8 @@ model again. The verdict is deliberately NOT baked in here.
 
 Needs the Decider warm (scripts/set_decider_warm.py --warm): it calls
 InvokeEndpoint on lachesis-decider and fails closed like the agent does.
+With --url it scores against a locally served Decider instead (the CI
+CPU fallback); the rows say which device in the file name you choose.
 """
 
 from __future__ import annotations
@@ -22,6 +24,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agent"))
 
 from decider_sagemaker import SageMakerDeciderClient  # noqa: E402
+
+from lachesis.client import DeciderClient  # noqa: E402
 
 from lachesis.handler import render_state  # noqa: E402
 from lachesis.questions import lachesis_questions  # noqa: E402
@@ -39,10 +43,15 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cases", type=Path, default=DEFAULT_CASES)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument(
+        "--url",
+        default="",
+        help="score against an HTTP Decider server instead of SageMaker",
+    )
     args = parser.parse_args()
 
     cases = load_cases(args.cases)
-    client = SageMakerDeciderClient()
+    client = DeciderClient(args.url) if args.url else SageMakerDeciderClient()
     rows = []
     for case in cases:
         messages = [{"role": "user", "content": [{"text": case["user"]}]}]

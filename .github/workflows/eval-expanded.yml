@@ -1,0 +1,49 @@
+name: eval-expanded
+
+# Scores evaluation/expanded_cases.jsonl on the CPU runner and uploads
+# the raw rows as an artifact; a human commits them. This is the
+# fallback when SageMaker GPU capacity stalls: same cases, same raw
+# answers, slower device, and the rows are named for the CPU run so the
+# two never mix.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      MODEL: StrandsAgents/strands-decider-2B-qwen3.5-v1-2610
+      PORT: "8099"
+      STRANDS_DECIDER_URL: http://127.0.0.1:8099
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: ".python-version"
+          cache: pip
+      - name: Install package, CPU torch, Decider 0.1.0
+        run: |
+          pip install -e ".[dev]"
+          pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cpu
+          pip install strands-decider==0.1.0 transformers==5.19.0
+      - name: Serve the pinned model on CPU
+        run: |
+          strands-decider serve "$MODEL" --device cpu --port "$PORT" > server.log 2>&1 &
+          for i in $(seq 1 90); do
+            curl -sf "http://127.0.0.1:$PORT/health" && break || sleep 10
+          done
+          curl -sf "http://127.0.0.1:$PORT/health"
+      - name: Score the expanded cases
+        run: |
+          python scripts/eval_expanded.py --url "http://127.0.0.1:$PORT" \
+            --out evaluation/expanded_cpu_2026-10-16.jsonl
+          python scripts/analyze_threshold.py evaluation/expanded_cpu_2026-10-16.jsonl
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: expanded-eval
+          path: |
+            evaluation/expanded_cpu_2026-10-16.jsonl
+            server.log
