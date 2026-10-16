@@ -26,7 +26,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agent"))
 from decider_sagemaker import SageMakerDeciderClient  # noqa: E402
 
 from lachesis.client import DeciderClient  # noqa: E402
-
 from lachesis.handler import render_state  # noqa: E402
 from lachesis.questions import lachesis_questions  # noqa: E402
 
