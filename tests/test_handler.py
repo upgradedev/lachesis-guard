@@ -90,6 +90,11 @@ def test_canned_opening_write_only_decider_can_proceed():
     assert isinstance(triage(real, event(name="write_file", args=args, messages=messages)), Proceed)
     stub = LachesisHandler(client=Scripted("benign", 0.10, 0.97))
     assert isinstance(triage(stub, event(name="write_file", args=args, messages=messages)), Confirm)
+def test_unavailable_prompt_never_calls_itself_deterministic():
+    handler = LachesisHandler(client=Down())
+    action = triage(handler, event())
+    assert "unavailable" in action.prompt
+    assert "deterministic" not in action.prompt
 
 
 def test_name_identifies_the_handler():
