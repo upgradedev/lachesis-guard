@@ -8,7 +8,7 @@ Lachesis scores every tool call for risk before it runs, so the agent pauses for
 
 - **The decision:** before every tool call of a Strands agent on Amazon Bedrock, Strands Decider 2B answers two typed questions (risk class, grounding); a deterministic Python table maps the answers to Proceed, Guide, Confirm (pause for a person) or Deny.
 - **The reusable pattern:** [patterns/guardrails](patterns/guardrails/README.md), one file to copy, five minutes to wire into your own agent.
-- **Measured (committed rows, commands beside them):** hosted Decider median 167 ms, p95 173 ms (n=45, verdict parity 50 of 50 against the CPU box); the LLM-judge path at the same seam answers in 1.1 s median; cost per 1,000 governed calls about $0.70 against $4.43, both ESTIMATE.
+- **Measured (committed rows, commands beside them):** hosted Decider on the current ml.g4dn.xlarge endpoint median 718 ms, p95 722 ms (n=45, verdict parity 50 of 50 against the CPU box); the LLM-judge path at the same seam answers in 1.1 s median; cost per 1,000 governed calls about $0.70 against $4.43, both ESTIMATE.
 - **Honest cost:** at the 0.70 threshold, 5 of 8 clean calls in our calibration still paused for a person. The threshold section below shows the full table; nothing here is hand-picked.
 - **Hosted demo:** AgentCore Runtime plus a SageMaker Decider endpoint that scales to zero, with an approvals console (below). The demo video is linked from the Builder Center article.
 
@@ -185,9 +185,13 @@ Local and box paths:
   at a median of 193 ms, p95 199 ms (nearest-rank, n=45), rows in
   `evaluation/gpu_threshold_2026-10-13.jsonl`, notes in
   [docs/evidence/GPU_2026-10-13.md](docs/evidence/GPU_2026-10-13.md). Hosted on SageMaker
-  (next section), a full probe on 2026-10-15 measured a median of 167 ms, p95 173 ms
+  (next section), the endpoint now runs ml.g4dn.xlarge: the ml.g5.xlarge capacity pool
+  stalled repeatedly in eu-west-1 on 2026-10-16, so the endpoint was recreated on the
+  other pool. A full probe on 2026-10-16 measured a median of 718 ms, p95 722 ms
   (nearest-rank, n=45, first call excluded) with verdict parity 50 of 50 against the CPU
-  box rows; rows in `evaluation/sagemaker_2026-10-15.jsonl`.
+  box rows; rows in `evaluation/sagemaker_g4dn_2026-10-16.jsonl`. The earlier
+  ml.g5.xlarge probe (2026-10-15, median 167 ms, p95 173 ms, same parity) stays in
+  `evaluation/sagemaker_2026-10-15.jsonl`, labelled by device; the two are not mixed.
 - The benchmark comparison is committed under `benchmark/results/`, with the evidence notes
   in `docs/evidence/`; the series table is in
   [`benchmark/README.md`](benchmark/README.md#lachesis-series).
