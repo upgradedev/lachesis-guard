@@ -114,6 +114,8 @@ def _confirm_prompt(tool_name: str, arguments: Any, verdict: Verdict, threshold:
             f"Decider: {verdict.risk} at {verdict.confidence:.2f}, "
             f"threshold {threshold:.2f}; grounded: {grounded}"
         )
+    elif verdict.layer == "unavailable":
+        headline = "Layer: unavailable (Decider did not answer, no Decider score)"
     else:
         headline = f"Layer: {verdict.layer} (deterministic, no Decider score)"
     if tool_name in TIER0_READ_TOOLS:

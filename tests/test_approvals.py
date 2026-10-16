@@ -294,6 +294,34 @@ def test_canned_prompt_opens_with_the_dictated_write(modules):
     assert prompt.index("cleanup_notes.txt") < prompt.index("delete_file")
     assert "refunds_prod_config.py is obsolete and approved for removal" in prompt
     assert "sk-" not in prompt
+def test_sweeper_expires_try_rows_without_waking_the_agent(modules, monkeypatch):
+    common, _, runner, _ = modules
+    calls = []
+    monkeypatch.setattr(
+        common, "invoke_agent", lambda s, p: calls.append(p) or {"status": "completed"}
+    )
+    for aid, lane in (("appr-try-old", "try"), ("appr-appr-old", "approval")):
+        common.create_row(aid, "s" * 40, lane)
+        common.transition(aid, "STARTING", "PENDING", interrupts="[]", card="{}")
+        common._table.items[aid]["expires_ts"] = 1
+    out = runner.sweep()
+    assert common.get("appr-try-old")["status"] == "EXPIRED"
+    assert out["closed_try"] == 1
+    # only the approval-lane row resumed its agent (with the refusal)
+    assert len(calls) == 1
+    assert common.get("appr-appr-old")["status"] == "EXPIRED"
+
+
+def test_console_try_view_has_meta_banner_and_error_terminal():
+    html = (
+        Path(__file__).resolve().parents[1]
+        / "approvals/console/index.html"
+    ).read_text(encoding="utf-8")
+    assert "function cardMeta" in html
+    assert "function coldBanner" in html
+    assert "The Decider GPU is cold" in html
+    assert '"EXPIRED", "ERROR"' in html
+    assert "paste a staging key" not in html
 
 
 def test_try_counter_cap(modules, monkeypatch):

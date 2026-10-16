@@ -16,6 +16,7 @@
   .muted { color: #8b94a3; }
   .gauge { height: 8px; background: #2a3242; border-radius: 4px; margin: 0.4rem 0; }
   .gauge > div { height: 8px; background: #e0a458; border-radius: 4px; }
+  .banner { border: 1px solid #e0a458; border-radius: 8px; padding: 0.6rem 0.8rem; margin: 0.6rem 0; }
 </style>
 </head>
 <body>
@@ -32,9 +33,10 @@
 
 <section class="card">
   <h2>Try the demo (no account)</h2>
-  <p class="muted">Starts the canned run: the agent tries to paste a staging key into a test file and Lachesis pauses it for a person. On this public lane nobody is emailed; the pause shows here.</p>
+  <p class="muted">Starts the canned run: the agent first writes a cleanup note it was given word for word, then proposes deleting a file, and Lachesis pauses that call for a person. On this public lane nobody is emailed; the pause shows here.</p>
   <button id="try">Start the demo run</button>
   <div id="try-state" class="muted"></div>
+  <div id="try-meta"></div>
   <pre id="try-result"></pre>
 </section>
 
@@ -69,23 +71,36 @@ function layerLabel(layer) {
   return layer || "";
 }
 
+function cardMeta(card) {
+  const reason = (card && card.reason) || "";
+  const match = reason.match(/confidence\s+([0-9.]+)/i);
+  const confidence = (card && card.confidence !== null && card.confidence !== undefined)
+    ? card.confidence : (match ? parseFloat(match[1]) : 0);
+  let meta = "";
+  if (card && card.risk) {
+    meta = "Decider: " + card.risk + " at " + Number(confidence).toFixed(2) +
+      " (threshold 0.70)" +
+      (card.latency_ms ? " \u00b7 " + Math.round(card.latency_ms) + " ms" : "") +
+      (card.layer ? " \u00b7 " + layerLabel(card.layer) : "");
+  } else if (card && card.layer) {
+    meta = layerLabel(card.layer);
+  }
+  return { meta, confidence };
+}
+
+function coldBanner(card) {
+  if (!card || card.layer !== "unavailable") return "";
+  return '<div class="banner">The Decider GPU is cold: it scales to zero when idle. ' +
+    "This pause is the fail-closed path, so a person decides and there is no Decider score. " +
+    "Nothing is broken; a warm Decider scores the call instead.</div>";
+}
+
+
 function renderApproval(item) {
   const div = document.createElement("div");
   div.className = "card";
   const card = item.card || {};
-  const reason = card.reason || "";
-  const match = reason.match(/confidence\s+([0-9.]+)/i);
-  const confidence = (card.confidence !== null && card.confidence !== undefined)
-    ? card.confidence : (match ? parseFloat(match[1]) : 0);
-  let meta = "";
-  if (card.risk) {
-    meta = "Decider: " + card.risk + " at " + Number(confidence).toFixed(2) +
-      " (threshold 0.70)" +
-      (card.latency_ms ? " · " + Math.round(card.latency_ms) + " ms" : "") +
-      (card.layer ? " · " + layerLabel(card.layer) : "");
-  } else if (card.layer) {
-    meta = layerLabel(card.layer);
-  }
+  const { meta, confidence } = cardMeta(card);
   div.innerHTML = "<strong>" + item.approval_id + "</strong> " + gauge(confidence) +
     (meta ? '<div class="muted"></div>' : "") +
     "<pre></pre>" +
@@ -159,11 +174,16 @@ document.getElementById("try").addEventListener("click", async () => {
     if (poll.status !== 200) continue;
     state.textContent = "Status: " + poll.body.status;
     if (poll.body.status === "PENDING") {
-      result.textContent = (poll.body.card && poll.body.card.reason) || "The agent is paused for a person.";
+      const card = poll.body.card || {};
+      const view = cardMeta(card);
+      document.getElementById("try-meta").innerHTML =
+        coldBanner(card) + gauge(view.confidence) +
+        (view.meta ? '<div class="muted">' + view.meta + "</div>" : "");
+      result.textContent = card.reason || "The agent is paused for a person.";
       state.textContent = "Status: PENDING. In the hosted run an approver decides in this console; on the public lane the pause simply waits and then expires refused.";
       return;
     }
-    if (["DONE", "REFUSED_DONE", "EXPIRED"].includes(poll.body.status)) {
+    if (["DONE", "REFUSED_DONE", "EXPIRED", "ERROR"].includes(poll.body.status)) {
       result.textContent = poll.body.result_text || poll.body.status;
       return;
     }

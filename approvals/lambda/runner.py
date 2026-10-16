@@ -200,7 +200,17 @@ def sweep() -> dict:
         for item in common.list_by_status("PENDING", limit=100)
         if int(item.get("expires_ts", 0)) < int(time.time())
     ]
+    closed_try = 0
     for item in expired:
+        if item.get("lane") == "try":
+            # A public /try pause that nobody decided simply ends. It
+            # must not resume the agent: resuming re-invokes the runtime
+            # and wakes the Decider GPU a second time for a run nobody
+            # is watching (measured 2026-10-15: expiries at 21:54 and
+            # 22:09 UTC each re-woke it).
+            if common.transition(item["approval_id"], "PENDING", "EXPIRED") is not None:
+                closed_try += 1
+            continue
         moved = common.transition(item["approval_id"], "PENDING", "RESUMING")
         if moved is None:
             continue
@@ -220,7 +230,12 @@ def sweep() -> dict:
             _attempt_failed(item)
             continue
         common.transition(item["approval_id"], "RESUMING", "EXPIRED")
-    return {"expired": len(expired), "rescued": rescued, "closed_starting": closed_starting}
+    return {
+        "expired": len(expired),
+        "rescued": rescued,
+        "closed_starting": closed_starting,
+        "closed_try": closed_try,
+    }
 
 
 def handler(event, _context):
