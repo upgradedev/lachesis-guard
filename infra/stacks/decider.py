@@ -1,14 +1,22 @@
 """LachesisDecider: Decider 2B on a SageMaker inference component.
 
 BYOC image (foundation ECR repo lachesis-decider) behind one inference
-component on ml.g5.xlarge. Two independent scaling layers, and only the
+component on ml.g4dn.xlarge. The instance type changed on 2026-10-16:
+ml.g5.xlarge capacity in eu-west-1 stalled for hours (two failed
+endpoint creations on 10-15, then a whole day with DesiredInstanceCount
+1 and no provisioning), while the T4 pool provisions; the container is
+the same cu118 image the old SageMaker AMI driver requires. Decider
+answers are device-independent in every parity check so far, and the
+hosted latency was re-measured on the new type the same day. Two
+independent scaling layers, and only the
 second one was true before 2026-10-15: Application Auto Scaling moves
 the component's DesiredCopyCount between 0 and 1, but the endpoint
 INSTANCE bills around the clock unless the endpoint config's production
 variant carries ManagedInstanceScaling (MinInstanceCount 0), which this
 stack sets through an L1 property override together with the pinned
 InferenceAmiVersion. With no instance there is nothing to bill: $0 idle,
-about $1.57/h while warm (ml.g5.xlarge, eu-west-1). A step-scaling
+about $0.82/h while warm (ml.g4dn.xlarge hosting, eu-west-1, Price List
+API 2026-10-16). A step-scaling
 policy on NoCapacityInvocationFailures (in LachesisDeciderIc) is what
 wakes an instance for a cold invoke. The container contract is
 decider-image/adapter.py: /ping gates on the real server health,
@@ -86,7 +94,7 @@ class DeciderStack(cdk.Stack):
                 sagemaker.CfnEndpointConfig.ProductionVariantProperty(
                     variant_name="AllTraffic",
                     initial_instance_count=1,
-                    instance_type="ml.g5.xlarge",
+                    instance_type="ml.g4dn.xlarge",
                 )
                 # ManagedInstanceScaling and InferenceAmiVersion are set
                 # through the overrides below: they are what scale the
