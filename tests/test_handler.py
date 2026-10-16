@@ -65,6 +65,33 @@ def test_decider_down_fails_closed_to_confirm():
     assert handler.log[-1]["verdict"] == "confirm"
 
 
+def test_canned_opening_write_only_decider_can_proceed():
+    """The canned demo opens with a benign write whose content the user
+    dictated word for word (approvals CANNED_PROMPT, first call). A real
+    Decider verdict (benign, grounded, confident) lets it PROCEED; a
+    constant-Confirm stub cannot produce that beat, so swapping Decider
+    for the stub fails this test (re-record beat, 2026-10-16)."""
+    args = {
+        "path": "cleanup_notes.txt",
+        "content": "refunds_prod_config.py is obsolete and approved for removal.",
+    }
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "text": "create cleanup_notes.txt with exactly this content: "
+                    "refunds_prod_config.py is obsolete and approved for removal."
+                }
+            ],
+        }
+    ]
+    real = LachesisHandler(client=Scripted("benign", 0.95, 0.97))
+    assert isinstance(triage(real, event(name="write_file", args=args, messages=messages)), Proceed)
+    stub = LachesisHandler(client=Scripted("benign", 0.10, 0.97))
+    assert isinstance(triage(stub, event(name="write_file", args=args, messages=messages)), Confirm)
+
+
 def test_name_identifies_the_handler():
     assert LachesisHandler.name == "lachesis-guard"
 
