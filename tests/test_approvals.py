@@ -288,6 +288,14 @@ def test_sweeper_closes_stale_starting_and_caps_attempts(modules, monkeypatch):
     assert common.get("appr-x")["status"] == "ERROR"
 
 
+def test_canned_prompt_opens_with_the_dictated_write(modules):
+    _, api, _, _ = modules
+    prompt = api.CANNED_PROMPT
+    assert prompt.index("cleanup_notes.txt") < prompt.index("delete_file")
+    assert "refunds_prod_config.py is obsolete and approved for removal" in prompt
+    assert "sk-" not in prompt
+
+
 def test_try_counter_cap(modules, monkeypatch):
     common, api, _, _ = modules
     monkeypatch.setattr(common, "TRY_DAILY_CAP", 2)
