@@ -38,7 +38,7 @@ it stays in the foreground:
 
 ```sh
 pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cpu
-pip install strands-decider==0.1.0 strands-agents
+pip install strands-decider==0.1.0 transformers==5.19.0 strands-agents
 strands-decider serve StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --device cpu --port 8099
 python patterns/guardrails/example.py
 ```
@@ -134,8 +134,11 @@ Hosted path (the judged demo, all in eu-west-1):
   group). Behind it: an HTTP API, Lambda, DynamoDB and a sweeper. Anyone
   can run the same canned, Decider-judged demo from the console's /try
   lane with no account: the agent first proposes deleting
-  `refunds_prod_config.py`, Decider judges that call, and the card shows
-  its risk class, confidence and latency before any decision. The
+  `refunds_prod_config.py`, and when the GPU is warm Decider judges that
+  call and the card shows its risk class and confidence before any
+  decision. When the GPU is cold, the same pause is the fail-closed path
+  instead: the card says so and carries no Decider score. Latency is
+  measured per call and appears in the approver's view of the card. The
   deterministic secret scan remains a second, separately labelled layer.
 - AgentCore spans: not enabled.
 
@@ -186,10 +189,12 @@ again; approvals are bound to the call id, not to the process.
 `pytest` runs the unit suite with coverage over `src/lachesis` only (the
 triage package: handler, policy, questions, client); that is the scope
 of every coverage percentage quoted for this repo. The hosted code
-(`agent/`, `approvals/`), the shipped pattern (`patterns/`) and the CDK
-app (`infra/`) are exercised by their own test files (`tests/test_approvals.py`,
-`tests/test_adapter.py`, `tests/test_patterns_mirror.py`,
-`tests/test_check_templates.py`) but are not counted in that percentage.
+The other code is exercised unevenly: `approvals/` has
+`tests/test_approvals.py`, the pattern has `tests/test_patterns_mirror.py`,
+the CDK checker has `tests/test_check_templates.py`, and the hosted
+adapter has `tests/test_adapter.py`; `agent/` (the AgentCore entrypoint)
+has no test file and is proven by the hosted smokes instead. None of
+these are counted in the coverage percentage above.
 
 ## Licence
 
