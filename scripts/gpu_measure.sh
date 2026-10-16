@@ -18,8 +18,8 @@ echo "=== gpu-measure start $(date -u +%FT%TZ) on $(hostname) ==="
 nvidia-smi || true
 
 python3 -m pip --version
-python3 -m pip install --break-system-packages "strands-decider==0.1.0" "strands-agents" || \
-  python3 -m pip install "strands-decider==0.1.0" "strands-agents"
+python3 -m pip install --break-system-packages "strands-decider==0.1.0" "transformers==5.19.0" "strands-agents" || \
+  python3 -m pip install "strands-decider==0.1.0" "transformers==5.19.0" "strands-agents"
 
 python3 - <<'PY'
 import torch

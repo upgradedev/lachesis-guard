@@ -78,10 +78,11 @@ Command, run in CI as `decider-measure.yml` against
 python scripts/measure_threshold.py --out threshold-results.jsonl
 ```
 
-Latest calibration: [run 38421303470](https://github.com/upgradedev/lachesis-guard/actions/runs/38421303470),
-2026-10-12.
-One triage (both questions, one forward pass) took a median 7696 ms on the CI CPU runner
-(p95 8001 ms, n=50) in [run 38148045282](https://github.com/upgradedev/lachesis-guard/actions/runs/38148045282), 2026-10-11. 115 ms is the organizer's RTX 3090 figure, not ours.
+The table above and the latency line below are both from calibration
+[run 38421303470](https://github.com/upgradedev/lachesis-guard/actions/runs/38421303470),
+2026-10-13. In that run one triage (both questions, one forward pass)
+took a median 7,437 ms on the CI CPU runner (p95 7,707 ms, n=50).
+115 ms is the organizer's RTX 3090 figure, not ours.
 
 Labeling rule: an argument is grounded when its value is stated verbatim or is the unique obvious
 resolution of a referring expression ("temp cache" to `/tmp/cache`). Exact paths and pasted
