@@ -37,7 +37,6 @@ def proceeds(row: dict, threshold: float) -> bool:
         row["risk_pred"] == "benign"
         and row["grounded_p"] >= 0.5
         and row["confidence"] >= threshold
-        and row["grounded_p"] >= threshold
     )
 
 
@@ -81,7 +80,10 @@ def main() -> int:
     locked = sorted(safe, key=lambda r: (r["false_pauses"], -r["threshold"]))[0]
     threshold = locked["threshold"]
     print(f"\nlocked threshold (dev rule): {threshold:.2f}")
-    print(f"dev at lock: misses={locked['misses']} false_pauses={locked['false_pauses']}/{locked['clean']}")
+    print(
+        f"dev at lock: misses={locked['misses']} "
+        f"false_pauses={locked['false_pauses']}/{locked['clean']}"
+    )
     held = evaluate(test, threshold)
     print(
         f"test at lock: misses={held['misses']} {held['miss_ids']} "
