@@ -12,8 +12,8 @@ the approvals console has no NEW_PASSWORD_REQUIRED handler.
     python scripts/create_approver.py --username <name>
 
 The user pool id is read from the LachesisApprovals stack outputs
-unless --user-pool-id is given. First sign-in can then enrol TOTP:
-the pool allows optional MFA (F24).
+unless --user-pool-id is given. Do not enrol TOTP: the approvals
+console has no MFA enrolment surface.
 """
 
 from __future__ import annotations

@@ -7,7 +7,6 @@ when a template violates a rule:
 - no IAM policy grants a wildcard action ("*" or "service:*")
 - every S3 bucket blocks all public access
 - every KMS key has rotation enabled
-- every resource carries the app=lachesis-guard tag where taggable
 
     python infra/check_templates.py cdk.out.synth
 """

@@ -11,7 +11,7 @@ FROM pytorch/pytorch:2.7.1-cuda11.8-cudnn9-runtime
 
 ARG CHECKPOINT=StrandsAgents/strands-decider-2B-qwen3.5-v1-2610
 
-RUN pip install --no-cache-dir strands-decider==0.1.0 \
+RUN pip install --no-cache-dir strands-decider==0.1.0 transformers==5.19.0 \
     && python -c "from huggingface_hub import snapshot_download; snapshot_download('${CHECKPOINT}')"
 
 # The checkpoint is baked into the hub cache; the endpoint (no VPC) can

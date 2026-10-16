@@ -1,8 +1,10 @@
 # Running the agent on AWS
 
-The hackathon asks for a working agent on AWS. This page says where each
-part of the demo runs, and proves it with a run that happened entirely on
-one EC2 box.
+The hackathon asks for a working agent on AWS. The judged deployment is
+the hosted stack (README, "What runs where": AgentCore Runtime plus a
+SageMaker Decider endpoint). This page documents the earlier all-on-one-
+EC2-box run, which is how the filmed demo was produced and remains the
+simplest way to reproduce it locally on AWS.
 
 ## Where each part runs
 

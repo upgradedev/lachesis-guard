@@ -47,6 +47,26 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
+  pins:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: transformers stays pinned next to every strands-decider install
+        run: |
+          set -euo pipefail
+          # transformers 5.20.0 (2026-10-15) breaks CPU serves against
+          # the pinned torch 2.7.1; every install line that names
+          # strands-decider must pin transformers==5.19.0 with it.
+          bad=$(grep -rn "strands-decider" --include="*.yml" --include="*.md" --include="*.sh" --include="Dockerfile" .github README.md patterns scripts decider-image agent 2>/dev/null | grep -v "transformers==5.19.0" | grep -v "strands-decider==" | grep "pip install" || true)
+          bad2=$(grep -rn "pip install" --include="*.yml" --include="*.md" --include="*.sh" --include="Dockerfile" .github README.md patterns scripts decider-image agent 2>/dev/null | grep "strands-decider" | grep -v "transformers==5.19.0" || true)
+          if [ -n "$bad2" ]; then echo "unpinned transformers next to:"; echo "$bad2"; exit 1; fi
+          echo "all strands-decider installs pin transformers==5.19.0"
+      - name: The judged console answers 200
+        run: |
+          code=$(curl -s -o /dev/null -w "%{http_code}" https://d16gysn4emvp5j.cloudfront.net)
+          echo "console HTTP $code"
+          test "$code" = "200"
+
   iac:
     runs-on: ubuntu-latest
     needs: secrets
