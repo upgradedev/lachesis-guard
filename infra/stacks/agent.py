@@ -18,6 +18,13 @@ from constructs import Construct
 
 MODEL_PROFILE = "eu.anthropic.claude-sonnet-5-5"
 
+# The runtime runs an immutable image: digest, never :latest (a mutable
+# tag let v2 be set out of band on 2026-10-15). AGENT_CODE_REV names
+# the main commit the image was built from; the freeze process updates
+# both together and records them in STATE.md.
+AGENT_IMAGE_DIGEST = "sha256:b66feb7198f88c0eefc878d4538a9b2f03b44873dc3078538101f799ae61f11a"
+AGENT_CODE_REV = "c16b2ee"
+
 
 class AgentStack(cdk.Stack):
     def __init__(
@@ -70,7 +77,7 @@ class AgentStack(cdk.Stack):
             agent_runtime_name="lachesis_agent",
             agent_runtime_artifact=agentcore.CfnRuntime.AgentRuntimeArtifactProperty(
                 container_configuration=agentcore.CfnRuntime.ContainerConfigurationProperty(
-                    container_uri=foundation.agent_repo.repository_uri_for_tag("latest"),
+                    container_uri=foundation.agent_repo.repository_uri_for_digest(AGENT_IMAGE_DIGEST),
                 ),
             ),
             network_configuration=agentcore.CfnRuntime.NetworkConfigurationProperty(
@@ -83,7 +90,7 @@ class AgentStack(cdk.Stack):
                 "MODEL_ID": MODEL_PROFILE,
                 "DECIDER_ENDPOINT": decider.endpoint_name,
                 "DECIDER_COMPONENT": decider.inference_component_name,
-                "AGENT_CODE_REV": "4",
+                "AGENT_CODE_REV": AGENT_CODE_REV,
             },
             lifecycle_configuration=agentcore.CfnRuntime.LifecycleConfigurationProperty(
                 idle_runtime_session_timeout=900,
