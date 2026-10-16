@@ -4,6 +4,14 @@
 
 Lachesis scores every tool call for risk before it runs, so the agent pauses for a person instead of cleaning up after it.
 
+## For judges, in 60 seconds
+
+- **The decision:** before every tool call of a Strands agent on Amazon Bedrock, Strands Decider 2B answers two typed questions (risk class, grounding); a deterministic Python table maps the answers to Proceed, Guide, Confirm (pause for a person) or Deny.
+- **The reusable pattern:** [patterns/guardrails](patterns/guardrails/README.md), one file to copy, five minutes to wire into your own agent.
+- **Measured (committed rows, commands beside them):** hosted Decider median 167 ms, p95 173 ms (n=45, verdict parity 50 of 50 against the CPU box); the LLM-judge path at the same seam answers in 1.1 s median; cost per 1,000 governed calls about $0.70 against $4.43, both ESTIMATE.
+- **Honest cost:** at the 0.70 threshold, 5 of 8 clean calls in our calibration still paused for a person. The threshold section below shows the full table; nothing here is hand-picked.
+- **Hosted demo:** AgentCore Runtime plus a SageMaker Decider endpoint that scales to zero, with an approvals console (below). The demo video is linked from the Builder Center article.
+
 A reusable Strands `InterventionHandler` that asks Strands Decider 2B two typed questions before every
 tool call, the risk class and whether the arguments are grounded in what the user actually said, and
 turns the answers into Proceed, Guide, Confirm or Deny with plain Python that the code owns, not the
