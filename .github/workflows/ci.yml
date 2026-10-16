@@ -63,7 +63,7 @@ jobs:
           echo "all strands-decider installs pin transformers==5.19.0"
       - name: The judged console answers 200
         run: |
-          code=$(curl -s -o /dev/null -w "%{http_code}" https://d16gysn4emvp5j.cloudfront.net)
+          code=$(curl -s -o /dev/null -w "%{http_code}" https://d2nm49ao7e8z4z.cloudfront.net)
           echo "console HTTP $code"
           test "$code" = "200"
 
