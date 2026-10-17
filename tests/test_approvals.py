@@ -171,13 +171,22 @@ def test_start_card_carries_decider_fields(modules, monkeypatch):
             "interrupts": [{"interruptId": "i1", "reason": "card text"}],
             "triage": [
                 {
+                    "tool": "write_file",
+                    "risk": "benign",
+                    "confidence": 0.76,
+                    "grounded": True,
+                    "latency_ms": 712.0,
+                    "layer": "decider",
+                    "verdict": "proceed",
+                },
+                {
                     "tool": "delete_file",
                     "risk": "destructive_write",
                     "confidence": 0.31,
                     "latency_ms": 187.4,
                     "layer": "decider",
                     "verdict": "confirm",
-                }
+                },
             ],
         },
     )
@@ -190,6 +199,9 @@ def test_start_card_carries_decider_fields(modules, monkeypatch):
     assert card["confidence"] == 0.31
     assert card["latency_ms"] == 187.4
     assert card["layer"] == "decider"
+    assert len(card["prior_steps"]) == 1
+    assert card["prior_steps"][0]["tool"] == "write_file"
+    assert card["prior_steps"][0]["verdict"] == "proceed"
     assert card["expires_at"]
 
 
@@ -294,6 +306,8 @@ def test_canned_prompt_opens_with_the_dictated_write(modules):
     assert prompt.index("cleanup_notes.txt") < prompt.index("delete_file")
     assert "refunds_prod_config.py is obsolete and approved for removal" in prompt
     assert "sk-" not in prompt
+
+
 def test_sweeper_expires_try_rows_without_waking_the_agent(modules, monkeypatch):
     common, _, runner, _ = modules
     calls = []
@@ -310,6 +324,35 @@ def test_sweeper_expires_try_rows_without_waking_the_agent(modules, monkeypatch)
     # only the approval-lane row resumed its agent (with the refusal)
     assert len(calls) == 1
     assert common.get("appr-appr-old")["status"] == "EXPIRED"
+    assert common.get("appr-appr-old").get("resuming_ts") is not None
+
+
+def test_send_card_escapes_html_and_skips_when_unset(modules, monkeypatch):
+    _, _, runner, _ = modules
+    sent = []
+
+    class FakeSes:
+        def send_email(self, **kwargs):
+            sent.append(kwargs)
+
+    monkeypatch.setattr(runner.boto3, "client", lambda service, **kw: FakeSes())
+    item = {
+        "approval_id": "appr-<script>",
+        "card": json.dumps({"reason": "bad <b>tag</b>", "expires_at": "2026-10-17T00:00:00Z"}),
+    }
+    monkeypatch.setattr(runner, "SES_FROM", "")
+    monkeypatch.setattr(runner, "SES_TO", "")
+    runner._send_card(item)
+    assert sent == []
+
+    monkeypatch.setattr(runner, "SES_FROM", "from@example.com")
+    monkeypatch.setattr(runner, "SES_TO", "to@example.com")
+    runner._send_card(item)
+    assert len(sent) == 1
+    html_body = sent[0]["Message"]["Body"]["Html"]["Data"]
+    assert "<b>tag</b>" not in html_body
+    assert "&lt;b&gt;tag&lt;/b&gt;" in html_body
+    assert "&lt;script&gt;" in html_body
 
 
 def test_console_try_view_has_meta_banner_and_error_terminal():
@@ -318,7 +361,10 @@ def test_console_try_view_has_meta_banner_and_error_terminal():
         / "approvals/console/index.html"
     ).read_text(encoding="utf-8")
     assert "function cardMeta" in html
+    assert "const { meta, confidence, reason } = cardMeta(card);" in html
+    assert "function priorStepsText" in html
     assert "function coldBanner" in html
+    assert "NEW_PASSWORD_REQUIRED" in html
     assert "The Decider GPU is cold" in html
     assert '"EXPIRED", "ERROR"' in html
     assert "paste a staging key" not in html

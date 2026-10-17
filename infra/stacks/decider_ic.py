@@ -12,7 +12,7 @@ stacks stay decoupled.
 
 Specification, proven InService by hand before it was written here:
 2 CPU cores, 1 accelerator, 2048-6144 MB (the scheduler's allocatable
-envelope on ml.g5.xlarge is far below the raw instance size).
+envelope on ml.g4dn.xlarge / ml.g5.xlarge is far below the raw instance size).
 """
 
 from __future__ import annotations

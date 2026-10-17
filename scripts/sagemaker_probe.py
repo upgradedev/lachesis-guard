@@ -79,6 +79,10 @@ def score(client: SageMakerDeciderClient, case: dict) -> ScoredCase:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--out", help="write per-case rows as JSONL to this path")
+    args = parser.parse_args()
+
     cases = load_cases(REPO_ROOT / "evaluation" / "threshold_cases.jsonl")
     expected = cpu_verdicts()
     client = SageMakerDeciderClient()
@@ -110,9 +114,6 @@ def main() -> int:
     print(f"GPU latency per asked case: median {median:.0f} ms, p95 {p95:.0f} ms "
           f"(nearest-rank, n={len(latencies)}, first call excluded)")
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--out", help="write per-case rows as JSONL to this path")
-    args = parser.parse_args()
     if args.out:
         rows = [
             {

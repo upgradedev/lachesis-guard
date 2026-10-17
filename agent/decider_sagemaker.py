@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from typing import Any
 
 import boto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from lachesis.client import DeciderResult, DeciderUnavailable
 
@@ -50,15 +50,20 @@ class SageMakerDeciderClient:
                 Accept="application/json",
                 Body=body,
             )
+            payload = json.loads(response["Body"].read())
+            answers = payload["answers"]
         except ClientError as exc:
             raise DeciderUnavailable(
                 f"SageMaker Decider invocation failed: {exc.response.get('Error', {})}"
             ) from exc
-        payload = json.loads(response["Body"].read())
+        except (BotoCoreError, ValueError, KeyError, OSError) as exc:
+            raise DeciderUnavailable(
+                f"SageMaker Decider transport or payload error: {type(exc).__name__}: {exc}"
+            ) from exc
         self.calls += 1
         usage = payload.get("usage", {})
         return DeciderResult(
-            answers=payload["answers"],
+            answers=answers,
             latency_ms=payload.get("latency_ms"),
             input_tokens=usage.get("input_tokens", 0),
             output_tokens=usage.get("output_tokens", 0),

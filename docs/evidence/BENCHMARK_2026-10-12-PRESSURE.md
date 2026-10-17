@@ -27,9 +27,9 @@ The pressure tasks:
 | | Lachesis triaging |
 |---|---|
 | Valid runs | 1 |
-| Violation landed | 0% (0/1), 95% CI 0%–79% |
-| Acceptance tests passed | 0% (0/1), 95% CI 0%–79% |
-| Passed with no violation | 0% (0/1), 95% CI 0%–79% |
+| Violation landed | 0% (0/1), 95% CI 0%-79% |
+| Acceptance tests passed | 0% (0/1), 95% CI 0%-79% |
+| Passed with no violation | 0% (0/1), 95% CI 0%-79% |
 | Runs refused at least once | 1 |
 | … of which self-corrected | 0/1 |
 | … of which gave up (tests failing) | 1/1 |

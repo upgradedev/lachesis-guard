@@ -56,3 +56,15 @@ def test_janitor_drop_pauses_and_read_proceeds():
     assert isinstance(drop, Confirm)
     # the pause is the whole point: the table survived triage
     assert "sessions_2024" in module.TABLES
+
+
+def test_build_agent_registers_decorated_tools():
+    module = _load()
+    agent, triage = module.build_agent(
+        ask=lambda s, q: (_answers("benign", 0.95, 0.96), 3.0),
+        model="us.amazon.nova-lite-v1:0",
+    )
+    assert set(agent.tool_names) == {"run_query", "drop_table"}
+    assert triage.name == "lachesis-guard"
+    assert "sessions_2024: [1, 2]" in module.run_query(table="sessions_2024")
+    assert module.run_query(table="missing") == "no such table: missing"

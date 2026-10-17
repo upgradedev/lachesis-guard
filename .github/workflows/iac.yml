@@ -33,6 +33,8 @@ jobs:
     env:
       AWS_REGION: eu-west-1
       AWS_DEFAULT_REGION: eu-west-1
+      LACHESIS_SES_FROM: ${{ secrets.LACHESIS_SES_FROM }}
+      LACHESIS_SES_TO: ${{ secrets.LACHESIS_SES_TO }}
     steps:
       - name: Assume LachesisCiRole
         uses: aws-actions/configure-aws-credentials@v4

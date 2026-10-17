@@ -3,7 +3,7 @@
 # hosted agent runs the same handler code the tests pin.
 FROM python:3.12-slim
 
-RUN pip install --no-cache-dir "strands-agents==1.61.1" boto3
+RUN pip install --no-cache-dir "strands-agents==1.61.1" boto3 "pytest==8.3.4"
 
 COPY src/lachesis /opt/app/lachesis
 COPY agent/entrypoint.py agent/decider_sagemaker.py /opt/app/

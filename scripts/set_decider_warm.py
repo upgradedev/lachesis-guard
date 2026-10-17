@@ -111,7 +111,14 @@ def warm(sm, aas, *, deadline=DEADLINE_SECONDS, stall_after=STALL_AFTER_SECONDS,
                 InferenceComponentName=COMPONENT, DesiredRuntimeConfig={"CopyCount": 1}
             )
         sleep(poll)
-    raise SystemExit(f"decider did not warm in {deadline} seconds")
+    aas.register_scalable_target(
+        ServiceNamespace="sagemaker",
+        ResourceId=RESOURCE_ID,
+        ScalableDimension=DIMENSION,
+        MinCapacity=0,
+        MaxCapacity=1,
+    )
+    raise SystemExit(f"decider did not warm in {deadline} seconds (MinCapacity reset to 0)")
 
 
 def main() -> int:

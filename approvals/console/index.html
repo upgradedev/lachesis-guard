@@ -27,13 +27,16 @@
   <h2>Approver sign-in</h2>
   <label>Username <input id="username" autocomplete="username"></label>
   <label>Password <input id="password" type="password" autocomplete="current-password"></label>
+  <div id="new-password-wrap" hidden>
+    <label>New password (required on first sign-in) <input id="new-password" type="password" autocomplete="new-password"></label>
+  </div>
   <button id="signin">Sign in</button>
   <span id="login-state" class="muted"></span>
 </section>
 
 <section class="card">
   <h2>Try the demo (no account)</h2>
-  <p class="muted">Starts the canned run: the agent first writes a cleanup note it was given word for word, then proposes deleting a file, and Lachesis pauses that call for a person. On this public lane nobody is emailed; the pause shows here.</p>
+  <p class="muted">Starts the canned run: the agent writes a cleanup note, proposes deleting <code>refunds_prod_config.py</code>, and runs <code>pytest</code> while Lachesis scores every tool call with Strands Decider 2B and pauses any call that is destructive or below the 0.70 confidence gate. On this public lane nobody is emailed; the pause and Decider score show here.</p>
   <button id="try">Start the demo run</button>
   <div id="try-state" class="muted"></div>
   <div id="try-meta"></div>
@@ -51,6 +54,7 @@
 <script>
 const cfg = window.LACHESIS_CONFIG;
 let idToken = null;
+let pendingChallengeSession = null;
 
 async function api(path, options = {}) {
   const headers = { "content-type": "application/json" };
@@ -85,7 +89,21 @@ function cardMeta(card) {
   } else if (card && card.layer) {
     meta = layerLabel(card.layer);
   }
-  return { meta, confidence };
+  return { meta, confidence, reason };
+}
+
+function priorStepsText(card) {
+  const steps = (card && Array.isArray(card.prior_steps)) ? card.prior_steps : [];
+  if (!steps.length) return "";
+  const parts = steps.map(s => {
+    if (s.layer === "decider" && s.confidence !== null && s.confidence !== undefined) {
+      return (s.tool || "tool") + " (PROCEED \u00b7 Decider " + (s.risk || "benign") +
+        " at " + Number(s.confidence).toFixed(2) +
+        (s.latency_ms ? " \u00b7 " + Math.round(s.latency_ms) + " ms" : "") + ")";
+    }
+    return (s.tool || "tool") + " (PROCEED \u00b7 " + (s.layer || "tier0") + ")";
+  });
+  return "Earlier calls in this run: " + parts.join(", ");
 }
 
 function coldBanner(card) {
@@ -100,13 +118,16 @@ function renderApproval(item) {
   const div = document.createElement("div");
   div.className = "card";
   const card = item.card || {};
-  const { meta, confidence } = cardMeta(card);
-  div.innerHTML = "<strong>" + item.approval_id + "</strong> " + gauge(confidence) +
-    (meta ? '<div class="muted"></div>' : "") +
+  const { meta, confidence, reason } = cardMeta(card);
+  const prior = priorStepsText(card);
+  div.innerHTML = "<strong>" + item.approval_id + "</strong> " + coldBanner(card) + gauge(confidence) +
+    (prior ? '<div class="muted prior-line"></div>' : "") +
+    (meta ? '<div class="muted meta-line"></div>' : "") +
     "<pre></pre>" +
     '<button data-act="approve">Approve</button><button class="decline" data-act="decline">Decline</button> ' +
     '<span class="muted"></span>';
-  if (meta) div.querySelectorAll("div.muted")[0].textContent = meta;
+  if (prior) div.querySelector("div.prior-line").textContent = prior;
+  if (meta) div.querySelector("div.meta-line").textContent = meta;
   div.querySelector("pre").textContent = reason;
   div.querySelectorAll("button").forEach(btn => btn.addEventListener("click", async () => {
     const out = await api("/approvals/" + item.approval_id + "/decision", {
@@ -129,22 +150,51 @@ async function loadPending() {
 
 document.getElementById("signin").addEventListener("click", async () => {
   const state = document.getElementById("login-state");
+  const username = document.getElementById("username").value;
+  const password = document.getElementById("password").value;
+  const newPassword = document.getElementById("new-password").value;
   state.textContent = "Signing in...";
-  const res = await fetch("https://cognito-idp." + cfg.region + ".amazonaws.com/", {
-    method: "POST",
-    headers: { "content-type": "application/x-amz-json-1.1", "x-amz-target": "AWSCognitoIdentityProviderService.InitiateAuth" },
-    body: JSON.stringify({
-      AuthFlow: "USER_PASSWORD_AUTH",
-      ClientId: cfg.clientId,
-      AuthParameters: {
-        USERNAME: document.getElementById("username").value,
-        PASSWORD: document.getElementById("password").value
-      }
-    })
-  });
+  const cognitoUrl = "https://cognito-idp." + cfg.region + ".amazonaws.com/";
+  let res;
+  if (pendingChallengeSession && newPassword) {
+    res = await fetch(cognitoUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-amz-json-1.1",
+        "x-amz-target": "AWSCognitoIdentityProviderService.RespondToAuthChallenge"
+      },
+      body: JSON.stringify({
+        ChallengeName: "NEW_PASSWORD_REQUIRED",
+        ClientId: cfg.clientId,
+        Session: pendingChallengeSession,
+        ChallengeResponses: { USERNAME: username, NEW_PASSWORD: newPassword }
+      })
+    });
+  } else {
+    res = await fetch(cognitoUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-amz-json-1.1",
+        "x-amz-target": "AWSCognitoIdentityProviderService.InitiateAuth"
+      },
+      body: JSON.stringify({
+        AuthFlow: "USER_PASSWORD_AUTH",
+        ClientId: cfg.clientId,
+        AuthParameters: { USERNAME: username, PASSWORD: password }
+      })
+    });
+  }
   const body = await res.json();
+  if (body.ChallengeName === "NEW_PASSWORD_REQUIRED") {
+    pendingChallengeSession = body.Session;
+    document.getElementById("new-password-wrap").hidden = false;
+    state.textContent = "First sign-in: enter a new password above and click Sign in again.";
+    return;
+  }
   if (body.AuthenticationResult && body.AuthenticationResult.IdToken) {
     idToken = body.AuthenticationResult.IdToken;
+    pendingChallengeSession = null;
+    document.getElementById("new-password-wrap").hidden = true;
     state.textContent = "Signed in.";
     document.getElementById("pending-wrap").hidden = false;
     loadPending();
@@ -176,9 +226,13 @@ document.getElementById("try").addEventListener("click", async () => {
     if (poll.body.status === "PENDING") {
       const card = poll.body.card || {};
       const view = cardMeta(card);
-      document.getElementById("try-meta").innerHTML =
-        coldBanner(card) + gauge(view.confidence) +
-        (view.meta ? '<div class="muted">' + view.meta + "</div>" : "");
+      const prior = priorStepsText(card);
+      const tryMeta = document.getElementById("try-meta");
+      tryMeta.innerHTML = coldBanner(card) + gauge(view.confidence) +
+        (prior ? '<div class="muted prior-line"></div>' : "") +
+        (view.meta ? '<div class="muted meta-line"></div>' : "");
+      if (prior) tryMeta.querySelector("div.prior-line").textContent = prior;
+      if (view.meta) tryMeta.querySelector("div.meta-line").textContent = view.meta;
       result.textContent = card.reason || "The agent is paused for a person.";
       state.textContent = "Status: PENDING. In the hosted run an approver decides in this console; on the public lane the pause simply waits and then expires refused.";
       return;

@@ -47,8 +47,9 @@ WORK_ROOT = Path(os.environ.get("WORK_ROOT", "/tmp/lachesis-work"))
 
 SYSTEM_PROMPT = (
     "You are a coding agent working in a small scratch workspace. Use the "
-    "tools to do exactly what the user asks. When you need a value the user "
-    "did not give you, ask instead of inventing it."
+    "tools to do exactly what the user asks. Call at most one tool per turn "
+    "and wait for its result before calling the next tool. When you need a "
+    "value the user did not give you, ask instead of inventing it."
 )
 
 
@@ -56,6 +57,20 @@ def _workdir(session_id: str) -> Path:
     digest = hashlib.sha256(session_id.encode()).hexdigest()[:16]
     path = WORK_ROOT / digest
     path.mkdir(parents=True, exist_ok=True)
+    marker = path / ".seeded"
+    if not marker.exists():
+        (path / "refunds_prod_config.py").write_text(
+            '"""Legacy refunds configuration scheduled for removal."""\n'
+            "LEGACY_REFUND_CAP = 500\n",
+            encoding="utf-8",
+        )
+        (path / "test_workspace.py").write_text(
+            "from pathlib import Path\n\n\n"
+            "def test_legacy_config_removed():\n"
+            '    assert not Path("refunds_prod_config.py").exists()\n',
+            encoding="utf-8",
+        )
+        marker.write_text("1\n", encoding="utf-8")
     return path
 
 
