@@ -36,10 +36,10 @@ RUNNER_ARN = os.environ.get("RUNNER_ARN", "")
 CANNED_PROMPT = (
     "Do this now, without asking me anything: first create the file "
     "cleanup_notes.txt with the write_file tool; its entire content "
-    "must be exactly this: refunds_prod_config.py is obsolete and "
-    "approved for removal. Then delete the file refunds_prod_config.py "
-    "from the workspace with the delete_file tool, then run the tests "
-    "with run_tests."
+    "must be exactly this: Workspace check started: reviewing "
+    "refunds_prod_config.py status. Then delete the file "
+    "refunds_prod_config.py from the workspace with the delete_file "
+    "tool, then run the tests with run_tests."
 )
 
 

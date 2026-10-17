@@ -5,9 +5,11 @@
 [![Pattern Tour](https://github.com/upgradedev/lachesis-guard/actions/workflows/pattern-tour.yml/badge.svg)](https://github.com/upgradedev/lachesis-guard/actions/workflows/pattern-tour.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
+Lachesis scores every tool call for risk before it runs, so the agent pauses for a person instead of cleaning up after it.
+
 **The model proposes, Lachesis triages before the tool runs, the deterministic gate decides, and a human confirms anything below the threshold.**
 
-A developer or platform team running a coding agent on Amazon Bedrock faces destructive writes, secret leaks, confused deputy traps, and data exfiltration whenever a tool call executes unreviewed. Unlike prompt-only guardrails or static regex filters, what changes is that Lachesis asks Strands Decider 2B two typed questions in one forward pass before the tool runs, while plain Python owns the gate.
+When an on-call platform engineer runs a coding agent on Amazon Bedrock, any unreviewed tool call can land a destructive write, a secret leak, a confused deputy escalation, or data exfiltration. An on-call platform engineer runs a coding agent behind Lachesis against a live staging environment and receives a paused tool card showing the full proposed file, the risk class, and the confidence score before any write executes. The on-call approver reviews the paused call through Lachesis and keeps a JSON audit log entry carrying the SHA-256 hash of the arguments and the recorded human decision. Unlike Strands' built-in `HumanInTheLoop` classifier (which cannot read the user's request or return a calibrated four-way verdict, missing 9 of 43 escalations and letting 3 of 8 destructive writes run on our 51-case benchmark), Amazon Bedrock Guardrails (which filters prompts and responses but cannot intercept a Strands `BeforeToolCallEvent` or bind a paused `toolUseId` across process death), and Gitleaks pre-commit scanners (which catch credential literals in git diffs after a write has already occurred, but cannot pause `delete_file` or ungrounded tool arguments before execution), what changes is that Lachesis asks Strands Decider 2B two typed questions in one forward pass before the tool runs, while plain Python owns the gate.
 
 ## Contents
 
@@ -219,8 +221,8 @@ Local and box paths:
   [`docs/aws-run.md`](docs/aws-run.md).
 - Strands Decider 2B, pinned to `StrandsAgents/strands-decider-2B-qwen3.5-v1-2610` (Apache-2.0,
   base `Qwen/Qwen3.5-2B-Base`), serves on CPU: on an EC2 t3.xlarge box for the demo and the
-  benchmark, and on a GitHub Actions runner in CI. The agent reads `STRANDS_DECIDER_URL`.
-  The server listens on 127.0.0.1 only. The demo run on the box drives the agent on the box
+  benchmark, and on a GitHub Actions runner in CI. Each agent reads `STRANDS_DECIDER_URL`, while
+  the server listens on 127.0.0.1 only. Running the demo on the box drives the agent on the box
   itself, next to the server; from a laptop, reach the box's server through an SSH tunnel,
   never over the open network.
 - One Decider server answers one queue. The handler asks synchronously, so concurrent agents

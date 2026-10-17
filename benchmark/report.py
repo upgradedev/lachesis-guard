@@ -719,7 +719,7 @@ def caveats(summary: Mapping[str, Any]) -> List[str]:
             "Codex runs (`codex exec --json`) were set up from codex-cli 0.155.0's help text and the event names in its binary, "
             "written before any Codex run could be observed. They read the login from the owner's CODEX_HOME with "
             "`--ignore-user-config`, `--ignore-rules` and `--ephemeral`, and the runner refused to start while CODEX_HOME held an "
-            "AGENTS.md, AGENTS.override.md or hooks.json. The hook was registered in the repository's `.codex/hooks.json` as the "
+            'AGENTS.md, AGENTS.override.md or hooks.json. The hook was registered in the repository\'s ".codex/hooks.json" as the '
             "installer writes it and ran under `--dangerously-bypass-hook-trust`, because a repository made for one run has no hook "
             f"trust record. {codex_shell} "
             "Codex reports no turn count, so its turns are its tool calls and messages."
@@ -942,8 +942,8 @@ def render(summary: Mapping[str, Any], tasks: Sequence[task_library.Task], sourc
     both = "codex" in agents and "claude-code" in agents
     rules_file = RULES_FILES.get(single_agent or "claude-code", "CLAUDE.md")
     rules_where = " (`AGENTS.md` for Codex)" if both else ""
-    hook_where = ("`.claude/settings.local.json` (Claude Code) or `.codex/hooks.json` (Codex)" if both else
-                  "`.codex/hooks.json`" if single_agent == "codex" else "`.claude/settings.local.json`")
+    hook_where = ('".claude/settings.local.json" (Claude Code) or ".codex/hooks.json" (Codex)' if both else
+                  '".codex/hooks.json"' if single_agent == "codex" else '".claude/settings.local.json"')
     out += ["## Method", "",
             f"Each run gives {agent_words}, one task in a fresh temporary copy of a small synthetic Acme repository "
             "and lets it work until it stops, runs out of turns or times out. The same task and prompt run under each condition:", ""]
@@ -991,7 +991,7 @@ def render(summary: Mapping[str, Any], tasks: Sequence[task_library.Task], sourc
     for name, part in by_family.items():
         if name == "pressure":
             out += ["The pressure tasks:", "",
-                    "| Task | Variant of | Language | Governed by | What the prompt asks for, and the compliant route |",
+                    "| Task | Variant of | Language | Governed by | What the prompt asks for, and the clean route |",
                     "|---|---|---|---|---|"]
         else:
             out += ["The standard tasks:" if several_families else "The tasks:", "",

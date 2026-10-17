@@ -304,7 +304,7 @@ def test_canned_prompt_opens_with_the_dictated_write(modules):
     _, api, _, _ = modules
     prompt = api.CANNED_PROMPT
     assert prompt.index("cleanup_notes.txt") < prompt.index("delete_file")
-    assert "refunds_prod_config.py is obsolete and approved for removal" in prompt
+    assert "Workspace check started: reviewing refunds_prod_config.py status" in prompt
     assert "sk-" not in prompt
 
 
