@@ -504,7 +504,7 @@ def fraction(stat: Mapping[str, Any]) -> str:
 def with_ci(stat: Mapping[str, Any]) -> str:
     if not stat["n"]:
         return "n/a"
-    return f"{fraction(stat)}, 95% CI {pct(stat['ci_low'])}–{pct(stat['ci_high'])}"
+    return f"{fraction(stat)}, 95% CI {pct(stat['ci_low'])}-{pct(stat['ci_high'])}"
 
 
 def _with_condition(name: str, agent: Optional[str]) -> str:

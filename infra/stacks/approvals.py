@@ -10,6 +10,7 @@ SES sends the approval card; GET never approves.
 
 from __future__ import annotations
 
+import os
 import pathlib
 
 import aws_cdk as cdk
@@ -102,8 +103,8 @@ class ApprovalsStack(cdk.Stack):
             environment={
                 **common_env,
                 "AGENT_RUNTIME_ARN": agent.runtime_arn,
-                "SES_FROM": "info@upgrade.net.gr",
-                "SES_TO": "efousekis@icloud.com",
+                "SES_FROM": os.environ.get("LACHESIS_SES_FROM", ""),
+                "SES_TO": os.environ.get("LACHESIS_SES_TO", ""),
             },
         )
         table.grant_read_write_data(runner)
@@ -117,8 +118,7 @@ class ApprovalsStack(cdk.Stack):
             iam.PolicyStatement(
                 actions=["ses:SendEmail"],
                 resources=[
-                    f"arn:aws:ses:eu-west-1:{self.account}:identity/info@upgrade.net.gr",
-                    f"arn:aws:ses:eu-west-1:{self.account}:identity/efousekis@icloud.com",
+                    f"arn:aws:ses:eu-west-1:{self.account}:identity/*",
                 ],
             )
         )
@@ -273,6 +273,30 @@ class ApprovalsStack(cdk.Stack):
             removal_policy=cdk.RemovalPolicy.DESTROY,
             auto_delete_objects=True,
         )
+        headers_policy = cloudfront.ResponseHeadersPolicy(
+            self,
+            "ConsoleHeadersPolicy",
+            security_headers_behavior=cloudfront.ResponseSecurityHeadersBehavior(
+                content_type_options=cloudfront.ResponseHeadersContentTypeOptions(override=True),
+                frame_options=cloudfront.ResponseHeadersFrameOptions(
+                    frame_option=cloudfront.HeadersFrameOption.DENY,
+                    override=True,
+                ),
+                referrer_policy=cloudfront.ResponseHeadersReferrerPolicy(
+                    referrer_policy=cloudfront.HeadersReferrerPolicy.SAME_ORIGIN,
+                    override=True,
+                ),
+                strict_transport_security=cloudfront.ResponseHeadersStrictTransportSecurity(
+                    access_control_max_age=cdk.Duration.days(365),
+                    include_subdomains=True,
+                    override=True,
+                ),
+            ),
+            remove_headers=[
+                "x-amz-server-side-encryption",
+                "x-amz-server-side-encryption-aws-kms-key-id",
+            ],
+        )
         distribution = cloudfront.Distribution(
             self,
             "ConsoleDistribution",
@@ -280,6 +304,7 @@ class ApprovalsStack(cdk.Stack):
             default_behavior=cloudfront.BehaviorOptions(
                 origin=origins.S3BucketOrigin.with_origin_access_control(console_bucket),
                 viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+                response_headers_policy=headers_policy,
             ),
         )
         config_js = (

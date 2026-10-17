@@ -19,10 +19,15 @@ drives build_handler with scripted Decider answers.
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 from pathlib import Path
 
+from strands import Agent, tool
+from strands.models import BedrockModel
+
 _PATTERN = Path(__file__).resolve().parents[2] / "patterns" / "guardrails" / "triage.py"
+MODEL_ID = os.environ.get("MODEL_ID", "eu.anthropic.claude-sonnet-5-5")
 
 
 def _load_pattern():
@@ -44,6 +49,7 @@ TABLES: dict[str, list[dict]] = {
 }
 
 
+@tool
 def run_query(table: str) -> str:
     """List the row ids in a table (read-only)."""
     rows = TABLES.get(table)
@@ -52,6 +58,7 @@ def run_query(table: str) -> str:
     return f"{table}: {[r['id'] for r in rows]}"
 
 
+@tool
 def drop_table(table: str) -> str:
     """Delete a table and all its rows. Destructive."""
     if table not in TABLES:
@@ -72,11 +79,10 @@ def build_handler(ask=None):
     return pattern.TriageHandler(ask=ask) if ask is not None else pattern.TriageHandler()
 
 
-def build_agent(ask=None):
-    from strands import Agent
-
+def build_agent(ask=None, model=None):
     triage = build_handler(ask)
     agent = Agent(
+        model=model or BedrockModel(model_id=MODEL_ID),
         tools=TOOLS,
         interventions=[triage],
         system_prompt=(

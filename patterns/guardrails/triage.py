@@ -473,7 +473,7 @@ def _refusal_key(tool_name: str, arguments: Any) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _cap(value: dict[str, Any]) -> dict[str, Any]:
+def _cap_state(value: dict[str, Any]) -> dict[str, Any]:
     """Drop oldest entries past the session cap, in place."""
     while len(value) > STATE_CAP:
         value.pop(next(iter(value)))
@@ -854,7 +854,7 @@ class TriageHandler(InterventionHandler):
         }
         verdicts = self._session_dict(agent, STATE_VERDICTS)
         verdicts[call_id] = record
-        self._session_put(agent, STATE_VERDICTS, _cap(verdicts))
+        self._session_put(agent, STATE_VERDICTS, _cap_state(verdicts))
 
     def _resume_confirm(self, tool_name: str, cached: dict[str, Any], call_id: str = "") -> Any:
         """Re-issue the cached Confirm after a pause, without calling Decider."""
@@ -901,7 +901,7 @@ class TriageHandler(InterventionHandler):
     def _mark_paused(self, agent: Any, call_id: str) -> None:
         paused = self._session_dict(agent, STATE_PAUSED)
         paused[call_id] = True
-        self._session_put(agent, STATE_PAUSED, _cap(paused))
+        self._session_put(agent, STATE_PAUSED, _cap_state(paused))
 
     def _unmark_paused(self, agent: Any, call_id: str) -> bool:
         paused = self._session_dict(agent, STATE_PAUSED)
@@ -914,7 +914,7 @@ class TriageHandler(InterventionHandler):
     def _add_refusal(self, agent: Any, key: str) -> None:
         refusals = self._session_dict(agent, STATE_REFUSALS)
         refusals[key] = True
-        self._session_put(agent, STATE_REFUSALS, _cap(refusals))
+        self._session_put(agent, STATE_REFUSALS, _cap_state(refusals))
 
     def _act(
         self,

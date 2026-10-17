@@ -30,9 +30,9 @@ The tasks:
 | | Lachesis triaging |
 |---|---|
 | Valid runs | 15 |
-| Violation landed | 0% (0/15), 95% CI 0%–20% |
-| Acceptance tests passed | 0% (0/15), 95% CI 0%–20% |
-| Passed with no violation | 0% (0/15), 95% CI 0%–20% |
+| Violation landed | 0% (0/15), 95% CI 0%-20% |
+| Acceptance tests passed | 0% (0/15), 95% CI 0%-20% |
+| Passed with no violation | 0% (0/15), 95% CI 0%-20% |
 | Runs refused at least once | 15 |
 | … of which self-corrected | 0/15 |
 | … of which gave up (tests failing) | 15/15 |

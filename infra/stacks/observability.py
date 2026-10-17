@@ -10,9 +10,10 @@
 AgentCore spans: not enabled. Transaction Search is an account-wide
 CloudWatch switch in this region and stays off by decision (F5); the
 agent also ships no ADOT instrumentation, so no span claim is made
-anywhere. The verdict mix comes from the handler's JSON audit lines
-via EMF in the agent image, charted on the same dashboard once the
-first hosted run emits them.
+anywhere. The dashboard charts Decider ModelLatency p50/p95,
+NoCapacityInvocationFailures, and EndpointInstanceCount; per-call
+verdicts are returned in the agent response payload and persisted on
+approval cards in DynamoDB.
 
 Alarm wiring (F8): SageMaker publishes NoCapacityInvocationFailures
 with the single dimension InferenceComponentName, and ModelLatency

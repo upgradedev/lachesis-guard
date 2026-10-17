@@ -18,26 +18,33 @@ EXPIRED, so a forgotten pause ends refused, never open.
 
 from __future__ import annotations
 
+import html
 import json
 import os
 
 import boto3
 import common
 
-SES_FROM = os.environ.get("SES_FROM", "info@upgrade.net.gr")
-SES_TO = os.environ.get("SES_TO", "efousekis@icloud.com")
+SES_FROM = os.environ.get("SES_FROM", "")
+SES_TO = os.environ.get("SES_TO", "")
 CONSOLE_URL = os.environ.get("CONSOLE_URL", "")
 
 
 def _send_card(item: dict) -> None:
+    if not SES_FROM or not SES_TO:
+        return
     card = json.loads(item.get("card") or "{}")
-    reason = card.get("reason", "")
-    html = (
+    reason = str(card.get("reason", ""))
+    safe_reason = html.escape(reason)
+    safe_id = html.escape(str(item.get("approval_id", "")))
+    safe_expires = html.escape(str(card.get("expires_at", "")))
+    safe_url = html.escape(CONSOLE_URL, quote=True)
+    body_html = (
         "<h2>Lachesis needs a person</h2>"
-        f"<p>{reason}</p>"
-        f"<p>Approval <code>{item['approval_id']}</code> expires at "
-        f"{card.get('expires_at', '')} UTC.</p>"
-        f'<p><a href="{CONSOLE_URL}">Open the Lachesis Approvals console</a> '
+        f"<p>{safe_reason}</p>"
+        f"<p>Approval <code>{safe_id}</code> expires at "
+        f"{safe_expires} UTC.</p>"
+        f'<p><a href="{safe_url}">Open the Lachesis Approvals console</a> '
         "to approve or decline. Opening this mail decides nothing.</p>"
     )
     boto3.client("ses", region_name=common.REGION).send_email(
@@ -45,7 +52,7 @@ def _send_card(item: dict) -> None:
         Destination={"ToAddresses": [SES_TO]},
         Message={
             "Subject": {"Data": "Lachesis: a tool call is paused for you"},
-            "Body": {"Html": {"Data": html}, "Text": {"Data": reason}},
+            "Body": {"Html": {"Data": body_html}, "Text": {"Data": reason}},
         },
     )
 
@@ -53,10 +60,11 @@ def _send_card(item: dict) -> None:
 def _pending_card(result: dict) -> dict:
     """The approval card for a pause: the interrupt reason plus the
     pausing triage row's Decider fields (risk, confidence, latency,
-    layer), so the console can show what Decider measured (F2). Used
-    for the first pause and for every re-pause after a resume; the
-    resume path used to rewrite the card with the reason only, which
-    silently dropped the Decider fields (found live, 2026-10-15)."""
+    layer) and any prior proceed steps in the same turn, so the console
+    can show what Decider measured (F2). Used for the first pause and
+    for every re-pause after a resume; the resume path used to rewrite
+    the card with the reason only, which silently dropped the Decider
+    fields (found live, 2026-10-15)."""
     import datetime
 
     interrupts = result.get("interrupts", [])
@@ -65,6 +73,19 @@ def _pending_card(result: dict) -> dict:
         (row for row in reversed(triage) if row.get("verdict") in {"confirm", "deny"}),
         triage[-1] if triage else {},
     )
+    prior_steps = [
+        {
+            "tool": row.get("tool", ""),
+            "verdict": row.get("verdict", ""),
+            "risk": row.get("risk", ""),
+            "confidence": row.get("confidence"),
+            "grounded": row.get("grounded"),
+            "latency_ms": row.get("latency_ms"),
+            "layer": row.get("layer", ""),
+        }
+        for row in triage
+        if row is not pausing and row.get("verdict") == "proceed"
+    ]
     expires = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
         seconds=common.TTL_SECONDS
     )
@@ -75,6 +96,7 @@ def _pending_card(result: dict) -> dict:
         "confidence": pausing.get("confidence"),
         "latency_ms": pausing.get("latency_ms"),
         "layer": pausing.get("layer", ""),
+        "prior_steps": prior_steps,
         "created_at": common.now_iso(),
         "expires_at": expires.isoformat(timespec="seconds"),
     }
@@ -211,7 +233,9 @@ def sweep() -> dict:
             if common.transition(item["approval_id"], "PENDING", "EXPIRED") is not None:
                 closed_try += 1
             continue
-        moved = common.transition(item["approval_id"], "PENDING", "RESUMING")
+        moved = common.transition(
+            item["approval_id"], "PENDING", "RESUMING", resuming_ts=int(time.time())
+        )
         if moved is None:
             continue
         interrupts = json.loads(item.get("interrupts") or "[]")

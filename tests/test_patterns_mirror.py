@@ -344,3 +344,13 @@ def test_render_matches_on_every_shape(pattern, messages, tool, args, max_tokens
     assert pattern.render_state(messages, tool, args, max_tokens) == (
         lachesis.handler.render_state(messages, tool, args, max_tokens)
     )
+
+
+def test_cap_state_and_text_cap_do_not_shadow(pattern):
+    big_dict_p = {f"k{i}": i for i in range(600)}
+    big_dict_h = {f"k{i}": i for i in range(600)}
+    assert len(pattern._cap_state(big_dict_p)) == pattern.STATE_CAP == 512
+    assert len(lachesis.handler._cap_state(big_dict_h)) == lachesis.handler.STATE_CAP == 512
+    assert list(big_dict_p.keys())[0] == "k88"
+    long_text = "x" * 2500
+    assert pattern._cap(long_text).endswith("[500 more characters]")
