@@ -68,3 +68,9 @@ def test_build_agent_registers_decorated_tools():
     assert triage.name == "lachesis-guard"
     assert "sessions_2024: [1, 2]" in module.run_query(table="sessions_2024")
     assert module.run_query(table="missing") == "no such table: missing"
+
+
+def test_main_exits_cleanly_when_server_unreachable(monkeypatch):
+    module = _load()
+    monkeypatch.setenv("STRANDS_DECIDER_URL", "http://127.0.0.1:1")
+    assert module.main() == 1

@@ -3,12 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
 <title>Lachesis Approvals</title>
 <style>
   body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 44rem; padding: 0 1rem; background: #0b0e14; color: #e6e6e6; }
   h1 { font-size: 1.4rem; }
   .card { border: 1px solid #2a3242; border-radius: 8px; padding: 1rem; margin: 1rem 0; background: #121722; }
   button { background: #2f6fed; color: white; border: 0; border-radius: 6px; padding: 0.5rem 1rem; cursor: pointer; margin-right: 0.5rem; }
+  button:disabled { opacity: 0.55; cursor: not-allowed; }
   button.decline { background: #8a3033; }
   button.secondary { background: #2a3242; }
   input { display: block; margin: 0.4rem 0 0.8rem; padding: 0.5rem; width: 100%; box-sizing: border-box; }
@@ -17,6 +19,7 @@
   .gauge { height: 8px; background: #2a3242; border-radius: 4px; margin: 0.4rem 0; }
   .gauge > div { height: 8px; background: #e0a458; border-radius: 4px; }
   .banner { border: 1px solid #e0a458; border-radius: 8px; padding: 0.6rem 0.8rem; margin: 0.6rem 0; }
+  .try-actions { margin: 0.6rem 0; }
 </style>
 </head>
 <body>
@@ -31,12 +34,13 @@
     <label>New password (required on first sign-in) <input id="new-password" type="password" autocomplete="new-password"></label>
   </div>
   <button id="signin">Sign in</button>
+  <button id="signout" class="secondary" hidden>Sign out</button>
   <span id="login-state" class="muted"></span>
 </section>
 
 <section class="card">
   <h2>Try the demo (no account)</h2>
-  <p class="muted">Starts the canned run: the agent writes a cleanup note, proposes deleting <code>refunds_prod_config.py</code>, and runs <code>pytest</code> while Lachesis scores every tool call with Strands Decider 2B and pauses any call that is destructive or below the 0.70 confidence gate. On this public lane nobody is emailed; the pause and Decider score show here.</p>
+  <p class="muted">Runs the three-beat scenario in an isolated workspace: (1) the agent writes <code>cleanup_notes.txt</code>, which Strands Decider 2B scores as grounded and benign so it proceeds; (2) the agent proposes deleting <code>refunds_prod_config.py</code>, which Lachesis pauses below the 0.70 gate; (3) you can approve or decline the paused call right here to watch the agent resume and run <code>pytest</code> (or refuse). On this public lane nobody is emailed.</p>
   <button id="try">Start the demo run</button>
   <div id="try-state" class="muted"></div>
   <div id="try-meta"></div>
@@ -47,13 +51,15 @@
   <h2>Paused calls waiting for you</h2>
   <button id="refresh" class="secondary">Refresh</button>
   <button id="start" class="secondary">Start a demo run (approver lane)</button>
+  <span id="approver-state" class="muted"></span>
   <div id="pending"></div>
+  <pre id="approver-result" hidden></pre>
 </section>
 
 <script src="config.js"></script>
 <script>
 const cfg = window.LACHESIS_CONFIG;
-let idToken = null;
+let idToken = sessionStorage.getItem("lachesis_id_token") || null;
 let pendingChallengeSession = null;
 
 async function api(path, options = {}) {
@@ -113,6 +119,27 @@ function coldBanner(card) {
     "Nothing is broken; a warm Decider scores the call instead.</div>";
 }
 
+async function pollApproverOutcome(approvalId, statusSpan) {
+  const outBox = document.getElementById("approver-result");
+  for (let i = 0; i < 40; i++) {
+    await new Promise(r => setTimeout(r, 3000));
+    const poll = await api("/approvals/" + approvalId);
+    if (poll.status !== 200) continue;
+    if (poll.body.status === "PENDING") {
+      await loadPending();
+      return;
+    }
+    if (["DONE", "REFUSED_DONE", "EXPIRED", "ERROR"].includes(poll.body.status)) {
+      outBox.hidden = false;
+      outBox.textContent = "Run " + approvalId + " (" + poll.body.status + "):\n" +
+        (poll.body.result_text || poll.body.status);
+      await loadPending();
+      return;
+    }
+    if (statusSpan) statusSpan.textContent = "Agent status: " + poll.body.status + " ...";
+  }
+  await loadPending();
+}
 
 function renderApproval(item) {
   const div = document.createElement("div");
@@ -129,12 +156,21 @@ function renderApproval(item) {
   if (prior) div.querySelector("div.prior-line").textContent = prior;
   if (meta) div.querySelector("div.meta-line").textContent = meta;
   div.querySelector("pre").textContent = reason;
-  div.querySelectorAll("button").forEach(btn => btn.addEventListener("click", async () => {
+  const buttons = div.querySelectorAll("button");
+  const statusSpan = div.querySelector("span.muted");
+  buttons.forEach(btn => btn.addEventListener("click", async () => {
+    buttons.forEach(b => { b.disabled = true; });
+    statusSpan.textContent = "Recording decision...";
     const out = await api("/approvals/" + item.approval_id + "/decision", {
       method: "POST", body: JSON.stringify({ decision: btn.dataset.act })
     });
-    div.querySelector("span.muted").textContent = out.status === 202 ? "Recorded. The agent is resuming." : "Refused: " + (out.body.error || out.status);
-    if (out.status === 202) setTimeout(loadPending, 1500);
+    if (out.status === 202) {
+      statusSpan.textContent = "Recorded. The agent is resuming...";
+      await pollApproverOutcome(item.approval_id, statusSpan);
+    } else {
+      statusSpan.textContent = "Refused: " + (out.body.error || out.status);
+      buttons.forEach(b => { b.disabled = false; });
+    }
   }));
   return div;
 }
@@ -143,48 +179,65 @@ async function loadPending() {
   const out = await api("/approvals");
   const wrap = document.getElementById("pending");
   wrap.textContent = "";
-  if (out.status !== 200) { wrap.textContent = "Sign in as an approver to see paused calls."; return; }
+  if (out.status !== 200) {
+    if (out.status === 401 || out.status === 403) {
+      idToken = null;
+      sessionStorage.removeItem("lachesis_id_token");
+      document.getElementById("signout").hidden = true;
+    }
+    wrap.textContent = "Sign in as an approver to see paused calls.";
+    return;
+  }
   if (!out.body.approvals.length) wrap.textContent = "Nothing is paused right now.";
   out.body.approvals.forEach(item => wrap.appendChild(renderApproval(item)));
 }
 
 document.getElementById("signin").addEventListener("click", async () => {
   const state = document.getElementById("login-state");
-  const username = document.getElementById("username").value;
+  const username = document.getElementById("username").value.trim();
   const password = document.getElementById("password").value;
   const newPassword = document.getElementById("new-password").value;
+  if (!username || !password) {
+    state.textContent = "Enter both username and password.";
+    return;
+  }
   state.textContent = "Signing in...";
   const cognitoUrl = "https://cognito-idp." + cfg.region + ".amazonaws.com/";
   let res;
-  if (pendingChallengeSession && newPassword) {
-    res = await fetch(cognitoUrl, {
-      method: "POST",
-      headers: {
-        "content-type": "application/x-amz-json-1.1",
-        "x-amz-target": "AWSCognitoIdentityProviderService.RespondToAuthChallenge"
-      },
-      body: JSON.stringify({
-        ChallengeName: "NEW_PASSWORD_REQUIRED",
-        ClientId: cfg.clientId,
-        Session: pendingChallengeSession,
-        ChallengeResponses: { USERNAME: username, NEW_PASSWORD: newPassword }
-      })
-    });
-  } else {
-    res = await fetch(cognitoUrl, {
-      method: "POST",
-      headers: {
-        "content-type": "application/x-amz-json-1.1",
-        "x-amz-target": "AWSCognitoIdentityProviderService.InitiateAuth"
-      },
-      body: JSON.stringify({
-        AuthFlow: "USER_PASSWORD_AUTH",
-        ClientId: cfg.clientId,
-        AuthParameters: { USERNAME: username, PASSWORD: password }
-      })
-    });
+  try {
+    if (pendingChallengeSession && newPassword) {
+      res = await fetch(cognitoUrl, {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-amz-json-1.1",
+          "x-amz-target": "AWSCognitoIdentityProviderService.RespondToAuthChallenge"
+        },
+        body: JSON.stringify({
+          ChallengeName: "NEW_PASSWORD_REQUIRED",
+          ClientId: cfg.clientId,
+          Session: pendingChallengeSession,
+          ChallengeResponses: { USERNAME: username, NEW_PASSWORD: newPassword }
+        })
+      });
+    } else {
+      res = await fetch(cognitoUrl, {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-amz-json-1.1",
+          "x-amz-target": "AWSCognitoIdentityProviderService.InitiateAuth"
+        },
+        body: JSON.stringify({
+          AuthFlow: "USER_PASSWORD_AUTH",
+          ClientId: cfg.clientId,
+          AuthParameters: { USERNAME: username, PASSWORD: password }
+        })
+      });
+    }
+  } catch (err) {
+    state.textContent = "Network error during sign-in.";
+    return;
   }
-  const body = await res.json();
+  const body = await res.json().catch(() => ({}));
   if (body.ChallengeName === "NEW_PASSWORD_REQUIRED") {
     pendingChallengeSession = body.Session;
     document.getElementById("new-password-wrap").hidden = false;
@@ -193,31 +246,85 @@ document.getElementById("signin").addEventListener("click", async () => {
   }
   if (body.AuthenticationResult && body.AuthenticationResult.IdToken) {
     idToken = body.AuthenticationResult.IdToken;
+    sessionStorage.setItem("lachesis_id_token", idToken);
     pendingChallengeSession = null;
     document.getElementById("new-password-wrap").hidden = true;
+    document.getElementById("signout").hidden = false;
     state.textContent = "Signed in.";
     document.getElementById("pending-wrap").hidden = false;
     loadPending();
   } else {
+    if (pendingChallengeSession && body.__type !== "InvalidPasswordException") {
+      pendingChallengeSession = null;
+      document.getElementById("new-password-wrap").hidden = true;
+    }
     state.textContent = "Sign-in failed: " + (body.message || res.status);
   }
 });
 
-document.getElementById("refresh").addEventListener("click", loadPending);
-document.getElementById("start").addEventListener("click", async () => {
-  await api("/approvals/start", { method: "POST", body: "{}" });
-  setTimeout(loadPending, 2000);
+document.getElementById("signout").addEventListener("click", () => {
+  idToken = null;
+  pendingChallengeSession = null;
+  sessionStorage.removeItem("lachesis_id_token");
+  document.getElementById("signout").hidden = true;
+  document.getElementById("pending-wrap").hidden = true;
+  document.getElementById("login-state").textContent = "Signed out.";
 });
 
-document.getElementById("try").addEventListener("click", async () => {
+["username", "password", "new-password"].forEach(id => {
+  document.getElementById(id).addEventListener("keydown", e => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      document.getElementById("signin").click();
+    }
+  });
+});
+
+if (idToken) {
+  document.getElementById("signout").hidden = false;
+  document.getElementById("pending-wrap").hidden = false;
+  loadPending();
+}
+
+document.getElementById("refresh").addEventListener("click", loadPending);
+document.getElementById("start").addEventListener("click", async () => {
+  const startBtn = document.getElementById("start");
+  const approverState = document.getElementById("approver-state");
+  startBtn.disabled = true;
+  approverState.textContent = "Starting approver demo run...";
+  const out = await api("/approvals/start", { method: "POST", body: "{}" });
+  if (out.status !== 202) {
+    approverState.textContent = "Refused: " + (out.body.error || out.status);
+    startBtn.disabled = false;
+    return;
+  }
+  const approvalId = out.body.approval_id;
+  approverState.textContent = "Running " + approvalId + " ...";
+  for (let i = 0; i < 40; i++) {
+    await new Promise(r => setTimeout(r, 3000));
+    const poll = await api("/approvals/" + approvalId);
+    if (poll.status !== 200) continue;
+    approverState.textContent = "Run " + approvalId + ": " + poll.body.status;
+    if (poll.body.status === "PENDING") {
+      await loadPending();
+      startBtn.disabled = false;
+      return;
+    }
+    if (["DONE", "REFUSED_DONE", "EXPIRED", "ERROR"].includes(poll.body.status)) {
+      await loadPending();
+      startBtn.disabled = false;
+      return;
+    }
+  }
+  await loadPending();
+  startBtn.disabled = false;
+});
+
+async function pollTryRun(token) {
+  const tryBtn = document.getElementById("try");
   const state = document.getElementById("try-state");
   const result = document.getElementById("try-result");
-  state.textContent = "Starting...";
-  result.textContent = "";
-  const out = await api("/try", { method: "POST", body: "{}" });
-  if (out.status !== 202) { state.textContent = "Refused: " + (out.body.error || out.status); return; }
-  const token = out.body.token;
-  state.textContent = "Running with token " + token + " ...";
+  const tryMeta = document.getElementById("try-meta");
   for (let i = 0; i < 90; i++) {
     await new Promise(r => setTimeout(r, 4000));
     const poll = await api("/try/" + token);
@@ -227,22 +334,71 @@ document.getElementById("try").addEventListener("click", async () => {
       const card = poll.body.card || {};
       const view = cardMeta(card);
       const prior = priorStepsText(card);
-      const tryMeta = document.getElementById("try-meta");
+      const canDecide = card.layer !== "unavailable";
       tryMeta.innerHTML = coldBanner(card) + gauge(view.confidence) +
         (prior ? '<div class="muted prior-line"></div>' : "") +
-        (view.meta ? '<div class="muted meta-line"></div>' : "");
+        (view.meta ? '<div class="muted meta-line"></div>' : "") +
+        (canDecide ? '<div class="try-actions"><button data-act="approve">Approve</button><button class="decline" data-act="decline">Decline</button> <span class="muted try-act-state"></span></div>' : "");
       if (prior) tryMeta.querySelector("div.prior-line").textContent = prior;
       if (view.meta) tryMeta.querySelector("div.meta-line").textContent = view.meta;
       result.textContent = card.reason || "The agent is paused for a person.";
-      state.textContent = "Status: PENDING. In the hosted run an approver decides in this console; on the public lane the pause simply waits and then expires refused.";
+      if (canDecide) {
+        state.textContent = "Status: PENDING. Approve or decline below to resume this demo run, or leave it to expire refused.";
+        const actBtns = tryMeta.querySelectorAll("button[data-act]");
+        const actState = tryMeta.querySelector("span.try-act-state");
+        actBtns.forEach(btn => btn.addEventListener("click", async () => {
+          actBtns.forEach(b => { b.disabled = true; });
+          tryBtn.disabled = true;
+          actState.textContent = "Recording decision...";
+          const dec = await api("/try/" + token + "/decision", {
+            method: "POST", body: JSON.stringify({ decision: btn.dataset.act })
+          });
+          if (dec.status === 202) {
+            actState.textContent = "Recorded (" + btn.dataset.act + "). Resuming agent...";
+            state.textContent = "Status: RESUMING ...";
+            await pollTryRun(token);
+          } else {
+            actState.textContent = "Refused: " + (dec.body.error || dec.status);
+            actBtns.forEach(b => { b.disabled = false; });
+            tryBtn.disabled = false;
+          }
+        }));
+      } else {
+        state.textContent = "Status: PENDING. In the hosted run an approver decides in this console; on the public lane the pause simply waits and then expires refused.";
+      }
+      tryBtn.disabled = false;
       return;
     }
     if (["DONE", "REFUSED_DONE", "EXPIRED", "ERROR"].includes(poll.body.status)) {
+      const actions = tryMeta.querySelector("div.try-actions");
+      if (actions) actions.remove();
       result.textContent = poll.body.result_text || poll.body.status;
+      tryBtn.disabled = false;
       return;
     }
   }
   state.textContent = "Still running; poll again later with the token above.";
+  tryBtn.disabled = false;
+}
+
+document.getElementById("try").addEventListener("click", async () => {
+  const tryBtn = document.getElementById("try");
+  const state = document.getElementById("try-state");
+  const result = document.getElementById("try-result");
+  const tryMeta = document.getElementById("try-meta");
+  tryBtn.disabled = true;
+  state.textContent = "Starting...";
+  tryMeta.innerHTML = "";
+  result.textContent = "";
+  const out = await api("/try", { method: "POST", body: "{}" });
+  if (out.status !== 202) {
+    state.textContent = "Refused: " + (out.body.error || out.status);
+    tryBtn.disabled = false;
+    return;
+  }
+  const token = out.body.token;
+  state.textContent = "Running with token " + token + " ...";
+  await pollTryRun(token);
 });
 </script>
 </body>

@@ -146,7 +146,9 @@ def main() -> int:
                 break
             time.sleep(10)
         assert view.get("status") == "PENDING", f"never paused: {view}"
-        print("paused (PENDING) ok")
+        card = view.get("card") or {}
+        assert card.get("layer") in {"decider", "secretscan"}, f"unexpected pause layer: {card}"
+        print("paused (PENDING) ok:", card.get("tool"), card.get("layer"), card.get("confidence"))
 
         status, _ = _call(
             api_url, "POST", f"/approvals/{approval_id}/decision", approver, {"decision": "approve"}

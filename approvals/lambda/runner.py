@@ -162,14 +162,22 @@ def resume(approval_id: str) -> dict:
         return {"status": "error-resumable", "error": f"{type(exc).__name__}: {exc}"}
     if result.get("status") == "interrupt":
         # The resumed run paused again: fold the new pause into a fresh
-        # pending state on the same approval id.
-        common.transition(
+        # pending state on the same approval id, with a renewed expiry
+        # window and clean decision fields.
+        now = int(_time.time())
+        updated = common.transition(
             approval_id,
             "RESUMING",
             "PENDING",
             interrupts=json.dumps(result.get("interrupts", [])),
             card=json.dumps(_pending_card(result)),
+            expires_ts=now + common.TTL_SECONDS,
+            ttl=now + common.TTL_SECONDS + 86400,
+            decided_by="",
+            decided_by_name="",
         )
+        if row.get("lane", "approval") == "approval" and updated is not None:
+            _send_card(updated)
         return {"status": "interrupt-again", "approval_id": approval_id}
     final_status = "DONE" if status == "APPROVED" else "REFUSED_DONE"
     common.transition(

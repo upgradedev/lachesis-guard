@@ -277,6 +277,13 @@ def main() -> int:
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
 
+    if args.resume and args.workdir is None:
+        print("--resume needs the --workdir of the paused run")
+        return 1
+    if args.resume and not sessions_dir(args.workdir).exists():
+        print(f"no saved session for {args.workdir}")
+        return 1
+
     try:
         health = DeciderClient().health()
     except DeciderUnavailable as exc:
@@ -288,9 +295,6 @@ def main() -> int:
     print(f"decider: {health.get('checkpoint')} on {health.get('device')}")
 
     prompt, acceptance, repo_src = load_task(args.task, args.key)
-    if args.resume and args.workdir is None:
-        print("--resume needs the --workdir of the paused run")
-        return 1
     workdir = args.workdir or Path(tempfile.mkdtemp(prefix="lachesis-demo-"))
     if args.resume:
         print(f"resuming in {workdir}")
