@@ -22,8 +22,8 @@ MODEL_PROFILE = "eu.anthropic.claude-sonnet-5-5"
 # tag let v2 be set out of band on 2026-10-15). AGENT_CODE_REV names
 # the main commit the image was built from; the freeze process updates
 # both together and records them in STATE.md.
-AGENT_IMAGE_DIGEST = "sha256:b63c12d807ccc1e9823ecc8a38b058f7d59d524e9020a6836d746f8973301a38"
-AGENT_CODE_REV = "46ed860"
+AGENT_IMAGE_DIGEST = "sha256:b0312b44b52c34748faf8cfdd5284c5f22a657f4cae4bf14785a96caae3cb1d4"
+AGENT_CODE_REV = "a3f2eb7"
 
 
 class AgentStack(cdk.Stack):
