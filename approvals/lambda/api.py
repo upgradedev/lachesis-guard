@@ -110,6 +110,17 @@ def _invoke_runner(payload: dict, asynchronous: bool) -> dict:
     return json.loads(response["Payload"].read() or b"{}")
 
 
+def _parse_body(event: dict) -> dict | None:
+    raw = event.get("body")
+    if raw is None or raw == "":
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 def handler(event, _context):
     route = event.get("routeKey", "")
     params = event.get("pathParameters") or {}
@@ -144,13 +155,54 @@ def handler(event, _context):
             return _response(404, {"error": "unknown token"})
         return _response(200, common.public_view(item))
 
+    if route == "POST /try/{token}/decision":
+        token = params.get("token", "")
+        if not token:
+            return _response(404, {"error": "unknown token"})
+        body = _parse_body(event)
+        if body is None:
+            return _response(400, {"error": "request body must be a JSON object"})
+        decision = body.get("decision")
+        if decision not in {"approve", "decline"}:
+            return _response(400, {"error": "decision must be approve or decline"})
+        item = common.get(token)
+        if item is None or item.get("lane") != "try":
+            return _response(404, {"error": "unknown token"})
+        import time as _time
+
+        if int(item.get("expires_ts", 0)) and int(item["expires_ts"]) < int(_time.time()):
+            return _response(409, {"error": "approval has expired"})
+        card = json.loads(item.get("card") or "{}")
+        if card.get("layer") == "unavailable":
+            return _response(
+                409,
+                {
+                    "error": "Decider GPU is cold (scale-to-zero); "
+                    "a fail-closed pause on the public lane cannot be resumed"
+                },
+            )
+        target = "APPROVED" if decision == "approve" else "DECLINED"
+        moved = common.transition(
+            token,
+            "PENDING",
+            target,
+            decided_by="try-token",
+            decided_by_name="try-visitor",
+        )
+        if moved is None:
+            return _response(409, {"error": "approval is no longer pending"})
+        _invoke_runner({"action": "resume", "approval_id": token}, asynchronous=True)
+        return _response(202, {"token": token, "status": target})
+
     # Everything below needs an approver.
     if not _is_approver(event):
         return _response(403, {"error": "approvers group membership required"})
 
     if route == "POST /approvals/start":
+        body = _parse_body(event)
+        if body is None:
+            return _response(400, {"error": "request body must be a JSON object"})
         token = common.new_approval_id()
-        body = json.loads(event.get("body") or "{}")
         _invoke_runner(
             {
                 "action": "start",
@@ -172,18 +224,20 @@ def handler(event, _context):
 
     if route == "GET /approvals/{id}":
         item = common.get(params.get("id", ""))
-        if item is None:
+        if item is None or item.get("lane", "approval") != "approval":
             return _response(404, {"error": "unknown approval"})
         return _response(200, common.public_view(item))
 
     if route == "POST /approvals/{id}/decision":
         approval_id = params.get("id", "")
-        body = json.loads(event.get("body") or "{}")
+        body = _parse_body(event)
+        if body is None:
+            return _response(400, {"error": "request body must be a JSON object"})
         decision = body.get("decision")
         if decision not in {"approve", "decline"}:
             return _response(400, {"error": "decision must be approve or decline"})
         item = common.get(approval_id)
-        if item is None:
+        if item is None or item.get("lane", "approval") != "approval":
             return _response(404, {"error": "unknown approval"})
         import time as _time
 

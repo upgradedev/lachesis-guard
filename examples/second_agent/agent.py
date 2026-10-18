@@ -100,9 +100,21 @@ PROMPT = (
 )
 
 
+def responder(interrupt) -> str:
+    reason = getattr(interrupt, "reason", None) or getattr(interrupt, "name", "confirm")
+    print(f"\n[human] the agent paused: {reason}")
+    return input("[human] approve this tool call? (y/n): ").strip()
+
+
 def main() -> int:
+    try:
+        health = pattern.check_server()
+    except pattern.DeciderUnavailable as exc:
+        print(exc)
+        return 1
+    print(f"triage server: {health.get('checkpoint')} on {health.get('device')}\n")
     agent, triage = build_agent()
-    print(pattern.run_with_human(agent, PROMPT, input))
+    print(pattern.run_with_human(agent, PROMPT, responder))
     for row in triage.log:
         print(row)
     return 0

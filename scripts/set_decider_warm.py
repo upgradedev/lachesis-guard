@@ -74,6 +74,11 @@ def warm(sm, aas, *, deadline=DEADLINE_SECONDS, stall_after=STALL_AFTER_SECONDS,
     )
     started = now()
     print(f"{_stamp(started)} warm requested (MinCapacity 1)", flush=True)
+    _, desired0, current0 = _counts(sm)
+    if desired0 == 0 and current0 == 0:
+        sm.update_inference_component_runtime_config(
+            InferenceComponentName=COMPONENT, DesiredRuntimeConfig={"CopyCount": 1}
+        )
     instance_up_at: float | None = None
     reset_at: float | None = None
     while now() - started < deadline:

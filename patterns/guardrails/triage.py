@@ -108,32 +108,38 @@ def _explain(url: str, exc: BaseException) -> DeciderUnavailable:
     return DeciderUnavailable(f"Decider server at {url} answered nonsense ({exc})")
 
 
+def _default_url() -> str:
+    return os.environ.get("STRANDS_DECIDER_URL", SERVER_URL).rstrip("/")
+
+
 def ask_decider(
-    state: str, questions: Mapping[str, Mapping[str, Any]], url: str = SERVER_URL
+    state: str, questions: Mapping[str, Mapping[str, Any]], url: str | None = None
 ) -> tuple[dict[str, Any], float | None]:
     """One round trip: the answers under the question keys, plus latency_ms."""
+    target = (url or _default_url()).rstrip("/")
     body = json.dumps({"state": state, "questions": dict(questions)}).encode()
     request = urllib.request.Request(
-        f"{url}/v1/systemone", data=body, headers={"content-type": "application/json"}
+        f"{target}/v1/systemone", data=body, headers={"content-type": "application/json"}
     )
     try:
         with urllib.request.urlopen(request, timeout=120) as response:
             payload = json.loads(response.read())
     except (urllib.error.URLError, OSError, ValueError) as exc:
-        raise _explain(url, exc) from exc
+        raise _explain(target, exc) from exc
     try:
         return payload["answers"], payload.get("latency_ms")
     except (KeyError, AttributeError, TypeError) as exc:
-        raise _explain(url, exc) from exc
+        raise _explain(target, exc) from exc
 
 
-def check_server(url: str = SERVER_URL) -> dict[str, Any]:
+def check_server(url: str | None = None) -> dict[str, Any]:
     """The loaded checkpoint, window and device. Raises if nothing is serving."""
+    target = (url or _default_url()).rstrip("/")
     try:
-        with urllib.request.urlopen(f"{url}/health", timeout=10) as response:
+        with urllib.request.urlopen(f"{target}/health", timeout=10) as response:
             return json.loads(response.read())
     except (urllib.error.URLError, OSError, ValueError) as exc:
-        raise _explain(url, exc) from exc
+        raise _explain(target, exc) from exc
 
 
 # ---------------------------------------------------------------- the questions

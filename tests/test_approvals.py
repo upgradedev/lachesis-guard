@@ -208,9 +208,12 @@ def test_start_card_carries_decider_fields(modules, monkeypatch):
 def test_resume_repause_card_keeps_decider_fields(modules, monkeypatch):
     common, _, runner, _ = modules
     common.create_row("appr-5", "s" * 40, "approval")
+    common._table.items["appr-5"]["expires_ts"] = 100
     interrupts = '[{"interruptId": "i1"}]'
     common.transition("appr-5", "STARTING", "PENDING", interrupts=interrupts, card="{}")
-    common.transition("appr-5", "PENDING", "APPROVED", decided_by="sub-1")
+    common.transition(
+        "appr-5", "PENDING", "APPROVED", decided_by="sub-1", decided_by_name="owner"
+    )
     monkeypatch.setattr(
         common,
         "invoke_agent",
@@ -232,13 +235,17 @@ def test_resume_repause_card_keeps_decider_fields(modules, monkeypatch):
     assert runner.resume("appr-5")["status"] == "interrupt-again"
     import json
 
-    card = json.loads(common.get("appr-5")["card"])
+    row = common.get("appr-5")
+    card = json.loads(row["card"])
     assert card["tool"] == "run_tests"
     assert card["risk"] == "destructive_write"
     assert card["confidence"] == 0.24
     assert card["latency_ms"] == 171.0
     assert card["layer"] == "decider"
     assert card["expires_at"]
+    assert int(row["expires_ts"]) > 100
+    assert row["decided_by"] == ""
+    assert row["decided_by_name"] == ""
 
 
 def test_empty_try_token_is_404(modules):
@@ -367,6 +374,8 @@ def test_console_try_view_has_meta_banner_and_error_terminal():
     assert "NEW_PASSWORD_REQUIRED" in html
     assert "The Decider GPU is cold" in html
     assert '"EXPIRED", "ERROR"' in html
+    assert '"/try/" + token + "/decision"' in html
+    assert '<link rel="icon" href="data:,">' in html
     assert "paste a staging key" not in html
 
 
@@ -387,3 +396,93 @@ def test_try_per_ip_cap(modules, monkeypatch):
     event = {"requestContext": {"http": {"sourceIp": "203.0.113.9"}}}
     assert api._try_counter_ok(event) is True
     assert api._try_counter_ok(event) is False
+
+
+def test_malformed_json_body_returns_400(modules):
+    _, api, _, _ = modules
+    for route, params in (
+        ("POST /approvals/start", {}),
+        ("POST /approvals/{id}/decision", {"id": "appr-1"}),
+        ("POST /try/{token}/decision", {"token": "appr-1"}),
+    ):
+        for bad_body in ("{not-json", "[]", '"string"', "123"):
+            ev = {
+                "routeKey": route,
+                "pathParameters": params,
+                "body": bad_body,
+                "requestContext": {"authorizer": {"jwt": {"claims": APPROVER}}},
+            }
+            assert api.handler(ev, None)["statusCode"] == 400
+
+
+def test_try_decision_and_cross_lane_isolation(modules, monkeypatch):
+    common, api, _, _ = modules
+    invoked = []
+    monkeypatch.setattr(
+        api, "_invoke_runner", lambda payload, asynchronous: invoked.append(payload)
+    )
+
+    common.create_row("appr-try-warm", "s" * 40, "try")
+    common.transition(
+        "appr-try-warm",
+        "STARTING",
+        "PENDING",
+        interrupts='[{"interruptId": "i1"}]',
+        card=json.dumps({"layer": "decider", "risk": "destructive_write", "confidence": 0.31}),
+    )
+    # Approver endpoints must not leak or mutate /try rows
+    get_ev = _event("GET /approvals/{id}", APPROVER, None, {"id": "appr-try-warm"})
+    assert api.handler(get_ev, None)["statusCode"] == 404
+    assert _decide(api, APPROVER, "approve", "appr-try-warm")["statusCode"] == 404
+
+    # Public /try/{token}/decision works once on a warm /try row and 409s on repeat
+    res1 = api.handler(
+        _event(
+            "POST /try/{token}/decision",
+            {},
+            {"decision": "approve"},
+            {"token": "appr-try-warm"},
+        ),
+        None,
+    )
+    assert res1["statusCode"] == 202
+    assert len(invoked) == 1
+    res2 = api.handler(
+        _event(
+            "POST /try/{token}/decision",
+            {},
+            {"decision": "decline"},
+            {"token": "appr-try-warm"},
+        ),
+        None,
+    )
+    assert res2["statusCode"] == 409
+
+    # Cold GPU (layer == unavailable) on /try cannot be resumed publicly
+    common.create_row("appr-try-cold", "s" * 40, "try")
+    common.transition(
+        "appr-try-cold",
+        "STARTING",
+        "PENDING",
+        interrupts='[{"interruptId": "i1"}]',
+        card=json.dumps({"layer": "unavailable", "confidence": 0.0}),
+    )
+    cold_res = api.handler(
+        _event(
+            "POST /try/{token}/decision",
+            {},
+            {"decision": "approve"},
+            {"token": "appr-try-cold"},
+        ),
+        None,
+    )
+    assert cold_res["statusCode"] == 409
+
+    # /try/{token}/decision cannot touch an approval-lane row
+    common.create_row("appr-real", "s" * 40, "approval")
+    common.transition("appr-real", "STARTING", "PENDING", interrupts="[]", card="{}")
+    cross = api.handler(
+        _event("POST /try/{token}/decision", {}, {"decision": "approve"}, {"token": "appr-real"}),
+        None,
+    )
+    assert cross["statusCode"] == 404

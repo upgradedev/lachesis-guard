@@ -212,6 +212,7 @@ class ApprovalsStack(cdk.Stack):
             ("POST /approvals/start", "JWT"),
             ("POST /try", "NONE"),
             ("GET /try/{token}", "NONE"),
+            ("POST /try/{token}/decision", "NONE"),
         )
         route_resources = []
         for route_key, auth_type in routes:
