@@ -34,8 +34,10 @@ from typing import Any
 
 sys.path.insert(0, "/opt/app")
 
+from botocore.config import Config  # noqa: E402
 from decider_sagemaker import SageMakerDeciderClient  # noqa: E402
 from strands import Agent, tool  # noqa: E402
+from strands.hooks import BeforeModelCallEvent  # noqa: E402
 from strands.models import BedrockModel  # noqa: E402
 from strands.session import S3SessionManager  # noqa: E402
 
@@ -44,6 +46,8 @@ from lachesis.handler import LachesisHandler  # noqa: E402
 MODEL_ID = os.environ.get("MODEL_ID", "eu.anthropic.claude-sonnet-5-5")
 SESSIONS_BUCKET = os.environ.get("SESSIONS_BUCKET", "")
 WORK_ROOT = Path(os.environ.get("WORK_ROOT", "/tmp/lachesis-work"))
+MAX_TURNS = 20
+MAX_RESPONSE_TOKENS = 4096
 
 SYSTEM_PROMPT = (
     "You are a coding agent working in a small scratch workspace. Use the "
@@ -51,6 +55,22 @@ SYSTEM_PROMPT = (
     "and wait for its result before calling the next tool. When you need a "
     "value the user did not give you, ask instead of inventing it."
 )
+
+
+class TurnBudget:
+    """Caps model turns per invocation so a runaway loop cannot bill unboundedly."""
+
+    def __init__(self, max_turns: int = MAX_TURNS) -> None:
+        self.max_turns = max_turns
+        self.turns = 0
+
+    def register_hooks(self, registry: Any, **kwargs: Any) -> None:
+        registry.add_callback(BeforeModelCallEvent, self._count)
+
+    def _count(self, event: Any) -> None:
+        self.turns += 1
+        if self.turns > self.max_turns:
+            raise RuntimeError(f"hosted budget: more than {self.max_turns} model turns")
 
 
 def _workdir(session_id: str) -> Path:
@@ -72,6 +92,24 @@ def _workdir(session_id: str) -> Path:
         )
         marker.write_text("1\n", encoding="utf-8")
     return path
+
+
+def _snapshot(workdir: Path) -> dict[str, str]:
+    """SHA-256 content hash of every user file in the workspace."""
+    hashes: dict[str, str] = {}
+    for path in sorted(workdir.rglob("*")):
+        if path.is_file() and path.name != ".seeded":
+            rel = str(path.relative_to(workdir)).replace("\\", "/")
+            hashes[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return hashes
+
+
+def _changed_since(workdir: Path, baseline: dict[str, str]) -> list[str]:
+    """Workspace files created, modified, or deleted since baseline."""
+    now = _snapshot(workdir)
+    changed = [name for name, digest in now.items() if baseline.get(name) != digest]
+    changed += [name for name in baseline if name not in now]
+    return sorted(changed)
 
 
 def _confine(workdir: Path, path: str) -> Path:
@@ -131,22 +169,31 @@ def _build_agent(session_id: str) -> tuple[Agent, LachesisHandler]:
         region_name=os.environ.get("AWS_REGION", "eu-west-1"),
     )
     handler = LachesisHandler(client=SageMakerDeciderClient())
-    model = BedrockModel(model_id=MODEL_ID)
+    model = BedrockModel(
+        model_id=MODEL_ID,
+        boto_client_config=Config(retries={"max_attempts": 3, "mode": "standard"}),
+        max_tokens=MAX_RESPONSE_TOKENS,
+    )
     agent = Agent(
         model=model,
         tools=_make_tools(_workdir(session_id)),
         interventions=[handler],
         session_manager=session,
         system_prompt=SYSTEM_PROMPT,
+        hooks=[TurnBudget()],
     )
     return agent, handler
 
 
-def _result_payload(result: Any, session_id: str, triage: list) -> dict[str, Any]:
+def _result_payload(
+    result: Any, session_id: str, triage: list, changed_files: list[str] | None = None
+) -> dict[str, Any]:
+    changed = list(changed_files or [])
     if getattr(result, "stop_reason", None) == "interrupt":
         return {
             "status": "interrupt",
             "triage": triage,
+            "changed_files": changed,
             "session_id": session_id,
             "interrupts": [
                 {
@@ -160,6 +207,7 @@ def _result_payload(result: Any, session_id: str, triage: list) -> dict[str, Any
     return {
         "status": "completed",
         "triage": triage,
+        "changed_files": changed,
         "session_id": session_id,
         "text": str(result),
         "stop_reason": getattr(result, "stop_reason", ""),
@@ -170,6 +218,8 @@ def handle_invocation(payload: dict[str, Any]) -> dict[str, Any]:
     session_id = str(payload.get("session_id") or "")
     if len(session_id) < 33:
         return {"status": "error", "error": "session_id must be at least 33 characters"}
+    workdir = _workdir(session_id)
+    baseline = _snapshot(workdir)
     agent, handler = _build_agent(session_id)
     responses = payload.get("interrupt_responses")
     if responses:
@@ -184,11 +234,16 @@ def handle_invocation(payload: dict[str, Any]) -> dict[str, Any]:
                 for item in responses
             ]
         )
-        return _result_payload(result, session_id, list(handler.log))
+        return _result_payload(
+            result, session_id, list(handler.log), _changed_since(workdir, baseline)
+        )
     prompt = str(payload.get("prompt") or "")
     if not prompt:
         return {"status": "error", "error": "prompt or interrupt_responses required"}
-    return _result_payload(agent(prompt), session_id, list(handler.log))
+    result = agent(prompt)
+    return _result_payload(
+        result, session_id, list(handler.log), _changed_since(workdir, baseline)
+    )
 
 
 class Handler(BaseHTTPRequestHandler):

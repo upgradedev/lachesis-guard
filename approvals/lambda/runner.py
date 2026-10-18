@@ -97,6 +97,7 @@ def _pending_card(result: dict) -> dict:
         "latency_ms": pausing.get("latency_ms"),
         "layer": pausing.get("layer", ""),
         "prior_steps": prior_steps,
+        "changed_files": list(result.get("changed_files") or []),
         "created_at": common.now_iso(),
         "expires_at": expires.isoformat(timespec="seconds"),
     }

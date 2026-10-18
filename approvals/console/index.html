@@ -100,7 +100,7 @@ function cardMeta(card) {
 
 function priorStepsText(card) {
   const steps = (card && Array.isArray(card.prior_steps)) ? card.prior_steps : [];
-  if (!steps.length) return "";
+  const diff = (card && Array.isArray(card.changed_files)) ? card.changed_files : [];
   const parts = steps.map(s => {
     if (s.layer === "decider" && s.confidence !== null && s.confidence !== undefined) {
       return (s.tool || "tool") + " (PROCEED \u00b7 Decider " + (s.risk || "benign") +
@@ -109,7 +109,11 @@ function priorStepsText(card) {
     }
     return (s.tool || "tool") + " (PROCEED \u00b7 " + (s.layer || "tier0") + ")";
   });
-  return "Earlier calls in this run: " + parts.join(", ");
+  let line = parts.length ? "Earlier calls in this run: " + parts.join(", ") : "";
+  if (diff.length) {
+    line += (line ? " \u00b7 " : "") + "Workspace diff: " + diff.join(", ");
+  }
+  return line;
 }
 
 function coldBanner(card) {
