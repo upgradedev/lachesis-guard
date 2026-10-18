@@ -188,6 +188,7 @@ def test_start_card_carries_decider_fields(modules, monkeypatch):
                     "verdict": "confirm",
                 },
             ],
+            "changed_files": ["cleanup_notes.txt"],
         },
     )
     out = runner.start("prompt", "try", "appr-card")
@@ -202,6 +203,7 @@ def test_start_card_carries_decider_fields(modules, monkeypatch):
     assert len(card["prior_steps"]) == 1
     assert card["prior_steps"][0]["tool"] == "write_file"
     assert card["prior_steps"][0]["verdict"] == "proceed"
+    assert card["changed_files"] == ["cleanup_notes.txt"]
     assert card["expires_at"]
 
 
@@ -486,3 +488,26 @@ def test_try_decision_and_cross_lane_isolation(modules, monkeypatch):
         None,
     )
     assert cross["statusCode"] == 404
+
+
+def test_agent_entrypoint_turn_budget_and_workspace_diff(tmp_path, monkeypatch):
+    agent_dir = Path(__file__).resolve().parents[1] / "agent"
+    sys.path.insert(0, str(agent_dir))
+    spec = importlib.util.spec_from_file_location("agent_entry", agent_dir / "entrypoint.py")
+    entry = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(entry)
+    monkeypatch.setattr(entry, "WORK_ROOT", tmp_path)
+
+    workdir = entry._workdir("s" * 40)
+    baseline = entry._snapshot(workdir)
+    assert sorted(baseline) == ["refunds_prod_config.py", "test_workspace.py"]
+    assert entry._changed_since(workdir, baseline) == []
+
+    (workdir / "cleanup_notes.txt").write_text("note\n", encoding="utf-8")
+    assert entry._changed_since(workdir, baseline) == ["cleanup_notes.txt"]
+
+    budget = entry.TurnBudget(max_turns=2)
+    budget._count(None)
+    budget._count(None)
+    with pytest.raises(RuntimeError, match="hosted budget: more than 2 model turns"):
+        budget._count(None)
