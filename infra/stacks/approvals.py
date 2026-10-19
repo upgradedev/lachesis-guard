@@ -5,7 +5,9 @@ sweeper) + DynamoDB + the console on S3/CloudFront. The runner is the
 only principal that invokes the agent runtime; the API records a
 decision with a conditional write (409 on a repeat) and async-invokes
 the runner with retries disabled, so a duplicate event resumes once.
-SES sends the approval card; GET never approves.
+Paused calls appear in the console queue for the approver; an SES card is
+optional and is sent only when the runner's SES addresses are set (the
+hosted demo leaves them unset). GET never approves.
 """
 
 from __future__ import annotations

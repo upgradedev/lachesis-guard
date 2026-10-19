@@ -4,9 +4,11 @@ Two actions:
 
 - ``start``: invoke the agent with a prompt. If the agent completes,
   the final text is returned. If Lachesis pauses it (interrupt), a
-  PENDING approval row is written and, for the approval lane, an SES
-  card is sent to the approver. The card links to the console; GET
-  never approves.
+  PENDING approval row is written and the paused call appears in the
+  Approvals console queue, where the approver sees and decides it. An
+  SES card is optional and is sent only when LACHESIS_SES_FROM and
+  LACHESIS_SES_TO are set; the hosted demo leaves them unset. GET never
+  approves.
 - ``resume``: move an APPROVED/DECLINED row to RESUMING (conditional:
   a duplicate resume event finds nothing to move and stops), resume
   the agent session with the human's answer, and store the outcome.
