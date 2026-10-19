@@ -9,7 +9,7 @@ Lachesis scores every tool call for risk before it runs, so the agent pauses for
 
 **The model proposes, Lachesis triages before the tool runs, the deterministic gate decides, and a human confirms anything below the threshold.**
 
-When an on-call platform engineer runs a coding agent on Amazon Bedrock, any unreviewed tool call can land a destructive write, a secret leak, a confused deputy escalation, or data exfiltration. An on-call platform engineer runs a coding agent behind Lachesis against a live staging environment and receives a paused tool card showing the full proposed file, the risk class, and the confidence score before any write executes. The on-call approver reviews the paused call through Lachesis and keeps a JSON audit log entry carrying the SHA-256 hash of the arguments and the recorded human decision. Unlike Strands' built-in `HumanInTheLoop` classifier (which cannot read the user's request or return a calibrated four-way verdict, missing 9 of 43 escalations and letting 3 of 8 destructive writes run on our 51-case benchmark), Amazon Bedrock Guardrails (which filters prompts and responses but cannot intercept a Strands `BeforeToolCallEvent` or bind a paused `toolUseId` across process death), and Gitleaks pre-commit scanners (which catch credential literals in git diffs after a write has already occurred, but cannot pause `delete_file` or ungrounded tool arguments before execution), what changes is that Lachesis asks Strands Decider 2B two typed questions in one forward pass before the tool runs, while plain Python owns the gate.
+When an on-call platform engineer runs a coding agent on Amazon Bedrock, any unreviewed tool call can land a destructive write, a secret leak, a confused deputy escalation, or data exfiltration. An on-call platform engineer runs a coding agent behind Lachesis against a live staging environment and sees a paused tool card in the Approvals console showing the full proposed file, the risk class, and the confidence score before any write executes. In the box demo every answer is written to a JSON audit log with the SHA-256 hash of the arguments; in the hosted console the decision is stored with the approver's Cognito username. Unlike Strands' built-in `HumanInTheLoop` classifier (which in strands-agents 1.53 is shown only the tool name and input, never the user's request, and returns a yes or no rather than a calibrated verdict, missing 9 of 43 escalations and letting 3 of 8 destructive writes run on our 51-case benchmark), Amazon Bedrock Guardrails (which screens content but on its own does not pause a proposed tool call for a named person and resume it later), and Gitleaks pre-commit scanners (which catch credential literals in git diffs after a write has already occurred, but cannot pause `delete_file` or ungrounded tool arguments before execution), what changes is that Lachesis asks Strands Decider 2B two typed questions in one forward pass before the tool runs, while plain Python owns the gate.
 
 ## Contents
 
@@ -28,7 +28,7 @@ When an on-call platform engineer runs a coding agent on Amazon Bedrock, any unr
 - **The decision:** before every tool call of a Strands agent on Amazon Bedrock, Strands Decider 2B answers two typed questions (risk class, grounding); a deterministic Python table maps the answers to Proceed, Guide, Confirm (pause for a person) or Deny.
 - **The reusable pattern:** [patterns/guardrails](patterns/guardrails/README.md), one file to copy, five minutes to wire into your own agent, with a second-agent transfer proof in [examples/second_agent](examples/second_agent/README.md).
 - **Measured (committed rows, commands beside them):** hosted Decider on the current `ml.g4dn.xlarge` endpoint median 718 ms, p95 722 ms (`n=45`, verdict parity 50 of 50 against the CPU box; earlier `ml.g5.xlarge` probe 167 ms median, EC2 GPU 193 ms median); the LLM-judge path at the same seam answers in 1.1 s median; cost per 1,000 governed calls about $0.70 against $4.43, both ESTIMATE.
-- **Honest cost:** at the 0.70 threshold, 5 of 8 clean Decider-asked calls in our 50-case calibration still paused for a person. The threshold section below shows the full table; nothing here is hand-picked.
+- **Honest cost:** at the 0.70 threshold, 5 of 8 clean calls in our 50-case calibration still paused for a person (5 of the 7 that reached Decider). The threshold section below shows the full table; nothing here is hand-picked.
 - **Hosted demo:** AgentCore Runtime plus a SageMaker Decider endpoint that scales to zero, with an approvals console at https://d2nm49ao7e8z4z.cloudfront.net (below). The demo video is linked from the Builder Center article.
 
 A reusable Strands `InterventionHandler` that asks Strands Decider 2B two typed questions before every
@@ -78,11 +78,12 @@ Then run the same triage around a live Bedrock agent with
 
 The policy asks a person to decide whenever Decider's confidence falls below 0.7. That line is
 measured, not picked: 50 labeled tool calls drawn from the benchmark task themes (staging keys, VAT
-regen, S3 archiving, webhooks), split into a 35-case fit set (`t01..t35`) and a 15-case held-out
-set (`t36..t50`), each labeled with its risk class and whether its arguments are grounded, run
-through both questions on the pinned model.
+regen, S3 archiving, webhooks), split by a fixed rule in `src/lachesis/evaluate.py` (cases sorted
+by id; positions 8 to 10 of every ten are held out) into a 35-case fit set and a 15-case held-out
+set, each labeled with its risk class and whether its arguments are grounded, run through both
+questions on the pinned model.
 
-| Confidence at or above | Fit (`t01..t35`) accepted | Fit risk accuracy | All 50 (`35 fit + 15 held-out`) accepted | All-50 risk accuracy |
+| Confidence at or above | Fit (35 cases) accepted | Fit risk accuracy | All 50 (`35 fit + 15 held-out`) accepted | All-50 risk accuracy |
 |---|---|---|---|---|
 | 0.9 | 2 | 1.000 | 2 | 1.000 |
 | 0.8 | 9 | 1.000 | 13 | 1.000 |

@@ -79,8 +79,9 @@ result = run_with_human(agent, "do the task", lambda i: input(f"{i.reason} (y/n)
 ```
 
 `STRANDS_DECIDER_URL` points the pattern at a server that is not on
-`http://127.0.0.1:8099`. If the server is down, the run stops: an agent that
-cannot be triaged does not run unguarded.
+`http://127.0.0.1:8099`. If the server is down, every call the pre-checks do
+not settle pauses for a person with "the Decider did not answer, so a person
+decides": nothing runs on a guess, and nothing runs without a person.
 
 ## Make it yours
 
