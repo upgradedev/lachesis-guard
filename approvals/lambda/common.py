@@ -53,6 +53,34 @@ def new_session_id() -> str:
     return "lachesis-" + secrets.token_urlsafe(24)  # 41 chars, >= 33
 
 
+def counter_ok(key: str, cap: int) -> bool:
+    """One DynamoDB counter row caps a counter per UTC day."""
+    try:
+        response = _table.update_item(
+            Key={"approval_id": key},
+            UpdateExpression="SET #c = if_not_exists(#c, :zero) + :one",
+            ConditionExpression="attribute_not_exists(#c) OR #c < :cap",
+            ExpressionAttributeNames={"#c": "count"},
+            ExpressionAttributeValues={":zero": 0, ":one": 1, ":cap": cap},
+            ReturnValues="ALL_NEW",
+        )
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            return False
+        raise
+    return int(response["Attributes"]["count"]) <= cap
+
+
+def daily_caps_ok(event: dict, prefix: str) -> bool:
+    """The public lanes' caps: TRY_IP_DAILY_CAP per address and TRY_DAILY_CAP
+    overall, per UTC day, each lane (prefix "try", "wake") on its own rows."""
+    day = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+    source_ip = event.get("requestContext", {}).get("http", {}).get("sourceIp", "unknown")
+    if not counter_ok(f"{prefix}-ip-{source_ip}-{day}", TRY_IP_DAILY_CAP):
+        return False
+    return counter_ok(f"{prefix}-counter-{day}", TRY_DAILY_CAP)
+
+
 def put_pending(approval_id: str, session_id: str, interrupts: list, lane: str) -> dict:
     created = time.time()
     card = {

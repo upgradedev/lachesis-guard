@@ -103,13 +103,19 @@
         <p class="lead">One request to a Strands agent on AgentCore, in an isolated workspace. Each tool call is scored before it runs.</p>
       </div>
       <div class="page-cta">
-        <button id="try-start" class="btn btn--primary btn--lg" type="button">Start the demo run</button>
+        <button id="try-start" class="btn btn--primary btn--lg" type="button">Run it live</button>
         <span class="muted small">No account. Up to 5 runs per address per day.</span>
       </div>
     </div>
+    <p id="gpu-state" class="status" aria-live="polite"></p>
+    <div id="wake" class="alert alert--info" role="status" hidden>
+      <p id="wake-copy"></p>
+      <p class="muted" data-elapsed></p>
+      <button id="wake-stop" class="btn btn--ghost" type="button">Stop waiting</button>
+    </div>
     <p id="try-msg" role="alert" class="err" hidden></p>
     <div id="try-intro">
-      <p class="note"><span class="note-i" aria-hidden="true">i</span>The Decider GPU scales to zero. If it is asleep, the call still pauses, but with no score, and you cannot decide it here.</p>
+      <p class="note"><span class="note-i" aria-hidden="true">i</span>The Decider GPU scales to zero when idle. If it is asleep, Run it live asks it to wake and starts the run by itself once it is awake, so the run is scored. Nothing is started on a sleeping GPU from this button.</p>
       <ol class="plan">
         <li><span class="flow-n">1</span><code>write_file</code><b>cleanup_notes.txt</b><span>Decider scores it; if benign and grounded, it runs.</span></li>
         <li><span class="flow-n">2</span><code>delete_file</code><b>refunds_prod_config.py</b><span>It pauses: a destructive write always waits for a person, and so does any call Decider scores under 0.70.</span></li>

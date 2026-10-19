@@ -8,6 +8,8 @@ Routes (HTTP API, see infra/stacks/approvals.py):
 - POST /try                  no auth: starts the canned demo run, returns
                              the unguessable approval id as its token
 - GET  /try/{token}          no auth: that run's public view only
+- GET  /status, POST /wake   the Decider GPU's state and an explicit wake,
+                             served by gpu.py (its own Lambda and role)
 
 Authorization is checked here from the JWT claims the HTTP API's JWT
 authorizer already validated: membership in the `approvers` group.
@@ -17,13 +19,11 @@ username; an email never enters the record (the token carries none).
 
 from __future__ import annotations
 
-import datetime
 import json
 import os
 
 import boto3
 import common
-from botocore.exceptions import ClientError
 
 RUNNER_ARN = os.environ.get("RUNNER_ARN", "")
 # The governed calls must be ones Decider has to judge (F2): no
@@ -69,33 +69,8 @@ def _is_approver(event: dict) -> bool:
     return "approvers" in [token.strip() for token in tokens]
 
 
-def _counter_ok(key: str, cap: int) -> bool:
-    """One DynamoDB counter row caps a counter per UTC day."""
-    table = common._table
-    try:
-        response = table.update_item(
-            Key={"approval_id": key},
-            UpdateExpression="SET #c = if_not_exists(#c, :zero) + :one",
-            ConditionExpression="attribute_not_exists(#c) OR #c < :cap",
-            ExpressionAttributeNames={"#c": "count"},
-            ExpressionAttributeValues={":zero": 0, ":one": 1, ":cap": cap},
-            ReturnValues="ALL_NEW",
-        )
-    except ClientError as exc:
-        if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
-            return False
-        raise
-    return int(response["Attributes"]["count"]) <= cap
-
-
 def _try_counter_ok(event: dict) -> bool:
-    day = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
-    source_ip = (
-        event.get("requestContext", {}).get("http", {}).get("sourceIp", "unknown")
-    )
-    if not _counter_ok(f"try-ip-{source_ip}-{day}", common.TRY_IP_DAILY_CAP):
-        return False
-    return _counter_ok(f"try-counter-{day}", common.TRY_DAILY_CAP)
+    return common.daily_caps_ok(event, "try")
 
 
 def _invoke_runner(payload: dict, asynchronous: bool) -> dict:

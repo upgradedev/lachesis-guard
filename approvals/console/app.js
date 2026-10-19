@@ -3,6 +3,10 @@
 // through textContent (h() below); nothing from the API is parsed as HTML.
 const cfg = window.LACHESIS_CONFIG || {};
 const VIDEO_URL = ""; // set once the public YouTube upload exists; links stay hidden until then
+const WAKE_MINUTES = null; // the median wake from zero measured in the 10-20 rehearsal; null until measured
+const WAKE_LIMIT_MS = 45 * 60000; // scripts/set_decider_warm.py waits the same 45 minutes
+const GPU = { asleep: ["The Decider GPU is asleep", "stopped"], waking: ["The Decider GPU is waking", "progress"],
+  awake: ["The Decider GPU is awake: a run started now is scored", "success"] };
 const CONFIRM_CLASSES = ["destructive_write", "confused_deputy", "untrusted_to_action"];
 const TERMINAL = ["DONE", "REFUSED_DONE", "EXPIRED", "ERROR"];
 const STATUS = {
@@ -107,6 +111,7 @@ function tickClocks() {
     if (card) card.querySelectorAll(".actionbar .btn").forEach(b => { b.disabled = true; });
   });
   document.querySelectorAll("[data-since]").forEach(el => { el.textContent = mmss(Math.max(0, (Date.now() - Number(el.dataset.since)) / 1000)) + " ago"; });
+  document.querySelectorAll("[data-elapsed]").forEach(el => { if (el.dataset.elapsed) el.textContent = "Waiting " + mmss((Date.now() - Number(el.dataset.elapsed)) / 1000); });
 }
 setInterval(tickClocks, 1000);
 
@@ -167,8 +172,8 @@ function copyBtn(text) {
     onclick: async () => { try { await navigator.clipboard.writeText(text); b.textContent = "Copied"; } catch (e) { b.textContent = "Copy failed"; } } });
   return b;
 }
-function statusLine(el, st) {
-  const [label, kind] = STATUS[st] || [st || "Unknown", "info"];
+function statusLine(el, st, table = STATUS) {
+  const [label, kind] = table[st] || [st || "Unknown", "info"];
   el.className = "status status--" + kind; el.textContent = "";
   el.append(h("span", { class: "ico", "aria-hidden": "true", text: ICON[kind] }), label);
 }
@@ -331,8 +336,9 @@ function renderTry(v, ctl) {
 function viewTry(token) {
   const run = $("#run"), msg = $("#try-msg");
   msg.hidden = true; $("#try-start").disabled = false;
-  $("#try-intro").hidden = !!token; $("#try-start").textContent = token ? "Start another run" : "Start the demo run";
-  if (!token) { run.hidden = true; return; }
+  $("#try-intro").hidden = !!token; $("#try-start").textContent = token ? "Run it live again" : "Run it live";
+  $("#wake").hidden = true; $("#gpu-state").textContent = "";
+  if (!token) { run.hidden = true; const g = gen; gpuState().then(st => { if (g === gen) showGpu(st); }); return; }
   run.hidden = false; $("#run-ref").textContent = token; $("#steps").textContent = ""; $("#run-status").textContent = "";
   $("[data-copy]").onclick = async e => { try { await navigator.clipboard.writeText(location.href); e.target.textContent = "Copied"; } catch (err) { e.target.textContent = "Copy failed"; } };
   const g = gen;
@@ -342,12 +348,58 @@ function viewTry(token) {
     msg.hidden = false; msg.textContent = "No demo run matches this link. Runs are removed about a day after they end.";
   });
 }
-$("#try-start").addEventListener("click", async () => {
-  const btn = $("#try-start"), msg = $("#try-msg");
-  btn.disabled = true; msg.hidden = true;
+// ---- PHASE 2b: run it live. POST /try only once GET /status reads awake ----
+async function gpuState() { const out = await api("/status"); return out.status === 200 ? out.body.state : null; }
+function showGpu(st) {
+  if (st) { statusLine($("#gpu-state"), st, GPU); return; }
+  statusLine($("#gpu-state"), "unknown", { unknown: ["The Decider GPU state could not be read", "info"] });
+}
+function tryFail(text) {
+  $("#wake").hidden = true; $("#try-msg").hidden = false; $("#try-msg").textContent = text; $("#try-start").disabled = false;
+}
+async function startRun() {
   const out = await api("/try", { method: "POST", body: "{}" });
   if (out.status === 202 && out.body.token) { location.hash = "#/try/" + encodeURIComponent(out.body.token); return; }
-  msg.hidden = false; msg.textContent = errText(out); btn.disabled = false;
+  tryFail(errText(out));
+}
+function waitAwake(g, since) {
+  $("#wake").hidden = false; $("[data-elapsed]").dataset.elapsed = since;
+  $("#wake-copy").textContent = "Starting the GPU. " + (WAKE_MINUTES ? "Measured wake on 2026-10-20: about " + WAKE_MINUTES +
+    " minutes. " : "Its wake time from zero has not been measured yet. ") + "This page starts the run by itself when the GPU is ready.";
+  let fails = 0;
+  async function tick() {
+    if (g !== gen) return;
+    if (Date.now() - since > WAKE_LIMIT_MS) { tryFail("Could not complete: the GPU did not wake within 45 minutes, so no run was started. It scales back to zero by itself."); return; }
+    const st = await gpuState();
+    if (g !== gen) return;
+    if (st === null) netFail(++fails); else { fails = 0; netFail(0); showGpu(st); }
+    if (st === "awake") { $("#wake").hidden = true; await startRun(); return; }
+    if (st === "asleep") { tryFail("Could not complete: the GPU went back to sleep before it was ready, so no run was started. Try again."); return; }
+    later(tick, 15000);
+  }
+  tickClocks(); later(tick, 15000);
+}
+async function runLive() {
+  const g = gen;
+  $("#try-start").disabled = true; $("#try-msg").hidden = true;
+  let st = await gpuState();
+  if (g !== gen) return;
+  showGpu(st);
+  if (st === "awake") { await startRun(); return; }
+  if (st === null) { tryFail("Could not complete: the GPU state could not be read, so no run was started."); return; }
+  if (st === "asleep") {
+    const out = await api("/wake", { method: "POST", body: "{}" });
+    if (g !== gen) return;
+    if (out.status !== 202) { tryFail(errText(out)); return; }
+    st = out.body.state; showGpu(st);
+    if (st === "awake") { await startRun(); return; }
+  }
+  waitAwake(g, Date.now());
+}
+$("#try-start").addEventListener("click", runLive);
+$("#wake-stop").addEventListener("click", () => {
+  clearTimers(); gen += 1;
+  tryFail("Stopped waiting; no run was started. The GPU scales back to zero by itself when nothing uses it.");
 });
 
 function viewQueue() {
