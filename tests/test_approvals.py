@@ -586,3 +586,19 @@ def test_agent_entrypoint_turn_budget_and_workspace_diff(tmp_path, monkeypatch):
     budget._count(None)
     with pytest.raises(RuntimeError, match="hosted budget: more than 2 model turns"):
         budget._count(None)
+
+
+def test_console_motion_respects_reduced_motion_and_never_animates_numbers():
+    css = _console("app.css")
+    start = css.index("@media (prefers-reduced-motion: no-preference) {\n")
+    depth, end = 0, start
+    for i in range(start, len(css)):
+        depth += {"{": 1, "}": -1}.get(css[i], 0)
+        if depth == 0 and css[i] == "}":
+            end = i
+            break
+    outside = css[:start] + css[end:]
+    stray = outside.replace("animation-delay", "")
+    assert "animation:" not in stray, "animation outside the motion block"
+    js = _console("app.js")
+    assert "countUp" not in js and "prefers-reduced-motion" in js

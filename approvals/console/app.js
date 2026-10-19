@@ -511,6 +511,20 @@ function current() {
   const p = parts();
   return p[0] === "try" ? "try" : p[0] === "queue" ? "queue" : p[0] === "policy" ? "policy" : p[0] === "metrics" ? "metrics" : p[0] === "a" && p[1] ? "detail" : "home";
 }
+// ---- motion layer: parallax, card spotlight, staggered reveal. Numbers never animate: every frame shows the measured value. Inert under prefers-reduced-motion. ----
+const MOTION = window.matchMedia("(prefers-reduced-motion: no-preference)"), FINE = window.matchMedia("(pointer: fine) and (min-width: 900px)");
+const fxState = { frame: 0, x: 0, y: 0 };
+function fxApply() { fxState.frame = 0; const r = document.documentElement.style; r.setProperty("--px", fxState.x.toFixed(3)); r.setProperty("--py", fxState.y.toFixed(3)); r.setProperty("--sy", String(Math.round(window.scrollY))); } const fxQueue = () => { if (!fxState.frame) fxState.frame = requestAnimationFrame(fxApply); };
+window.addEventListener("pointermove", e => {
+  const card = e.target.closest && e.target.closest(".tile, .panel");
+  if (card) { const b = card.getBoundingClientRect(); card.style.setProperty("--mx", Math.round(e.clientX - b.left) + "px"); card.style.setProperty("--my", Math.round(e.clientY - b.top) + "px"); }
+  if (MOTION.matches && FINE.matches) { fxState.x = e.clientX / innerWidth - 0.5; fxState.y = e.clientY / innerHeight - 0.5; fxQueue(); }
+}, { passive: true }); window.addEventListener("scroll", () => { if (MOTION.matches && FINE.matches) fxQueue(); }, { passive: true });
+function fx(view) {
+  const root = $("[data-view=" + view + "]"); if (!root || !MOTION.matches) return;
+  root.querySelectorAll(".tile, .panel, .flow > li").forEach((el, i) => { el.classList.remove("fx-in"); void el.offsetWidth; el.style.setProperty("--d", Math.min(i, 8) * 60 + "ms"); el.classList.add("fx-in"); });
+}
+
 let first = true;
 function route() {
   clearTimers(); gen += 1; netFail(0);
@@ -526,7 +540,7 @@ function route() {
   else if (view === "policy") renderThrSim("0.70");
   else if (view === "metrics") renderMetrics();
   if (!first) { const hd = $("[data-view=" + view + "] h1"); if (hd) hd.focus(); }
-  first = false;
+  first = false; fx(view);
 }
 window.addEventListener("hashchange", route);
 
