@@ -308,12 +308,14 @@ function renderTry(v, ctl) {
     h("div", { class: "step-h" }, (s.tool || "tool") + (CANNED[s.tool] ? " \u00B7 " + CANNED[s.tool] : ""), h("span", { class: "pill pill--info", text: "Proceeded" })),
     h("p", { class: "step-d", text: stepText(s) }))));
   if (Array.isArray(card.changed_files) && card.changed_files.length) {
-    list.append(h("li", { class: "done" }, h("p", { class: "step-d", text: "Workspace changed: " + card.changed_files.join(", ") })));
+    const changed = h("p", { class: "step-d", text: "Workspace changed: " + card.changed_files.join(", ") });
+    if (list.lastChild && list.children.length > 1) list.lastChild.append(changed); else list.append(h("li", { class: "done" }, changed));
   }
   if (card.tool) {
     const target = targetOf(p.args);
-    const item = h("li", { class: v.status === "PENDING" ? "paused" : "stopped" },
-      h("div", { class: "step-h" }, card.tool + (target ? " \u00B7 " + target : ""), h("span", { class: "pill pill--warn", text: "Paused" })));
+    const item = h("li", { class: v.status === "PENDING" ? "paused" : "stopped" });
+    // A pending pause is the card itself, headline included; afterwards one line says what happened.
+    if (v.status !== "PENDING") item.append(h("div", { class: "step-h" }, card.tool + (target ? " \u00B7 " + target : ""), h("span", { class: "pill pill--warn", text: "Paused" })));
     if (v.status === "PENDING") item.append(decisionCard(v, "try", () => ctl.kick()));
     else item.append(h("p", { class: "step-d", text: (AFTER[v.status] || v.status) + (v.decided_by_name === "try-visitor" ? " Decided on this page." : "") }));
     list.append(item);
