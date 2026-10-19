@@ -73,11 +73,17 @@
         <li>The agent proposes deleting <code>refunds_prod_config.py</code>: a destructive write always waits for a person, and so does any call Decider scores under 0.70.</li>
         <li>When the paused call carries a Decider score, you approve or decline it on this page, and the agent resumes: it runs the tests or stands down.</li>
       </ol>
-      <div class="alert alert--info"><p>The Decider GPU scales to zero. If it is asleep, the call still pauses, but with no score, and you cannot decide it here.</p></div>
+      <div class="alert alert--info"><p>The Decider GPU scales to zero when idle. If it is asleep, Run it live asks it to wake and starts the run by itself once it is awake, so the run is scored. Nothing is started on a sleeping GPU from this button.</p></div>
     </div>
     <div class="row">
-      <button id="try-start" class="btn btn--primary" type="button">Start the demo run</button>
+      <button id="try-start" class="btn btn--primary" type="button">Run it live</button>
       <span class="muted">Up to 5 runs per address per day.</span>
+    </div>
+    <p id="gpu-state" class="status" aria-live="polite"></p>
+    <div id="wake" class="alert alert--info" role="status" hidden>
+      <p id="wake-copy"></p>
+      <p class="muted" data-elapsed></p>
+      <button id="wake-stop" class="btn btn--ghost" type="button">Stop waiting</button>
     </div>
     <p id="try-msg" role="alert" class="err" hidden></p>
     <div id="run" hidden>
