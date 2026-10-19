@@ -313,7 +313,9 @@ class ApprovalsStack(cdk.Stack):
         config_js = (
             f'window.LACHESIS_CONFIG = {{"apiUrl": "{api.attr_api_endpoint}", '
             f'"clientId": "{client.user_pool_client_id}", '
-            f'"poolId": "{pool.user_pool_id}", "region": "eu-west-1"}};'
+            f'"poolId": "{pool.user_pool_id}", "region": "eu-west-1", '
+            # The commit the deploy ran from, shown in the console footer.
+            f'"build": "{os.environ.get("GITHUB_SHA", "")[:7]}"}};'
         )
         s3deploy.BucketDeployment(
             self,
