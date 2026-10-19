@@ -5,179 +5,183 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
 <link rel="icon" href="data:,">
-<title>Lachesis Approvals</title>
-<link rel="stylesheet" href="app.css?v=20261020">
+<title>Lachesis Approvals Cockpit</title>
+<link rel="stylesheet" href="app.css?v=20261020b">
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
 <header class="topbar">
   <a class="brand" href="#/" aria-label="Lachesis Approvals, home">
     <svg class="mark" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="9" width="20" height="6" rx="3"/><rect class="mark-fill" x="2" y="9" width="17" height="6" rx="3"/><path class="mark-tick" d="M16 5v14"/></svg>
-    <span>Lachesis</span><span class="brand-sub">Approvals</span>
+    <span>Lachesis</span><span class="brand-sub">Approvals Cockpit</span>
   </a>
-  <nav class="topnav" aria-label="Site">
-    <a href="#/try">Live demo</a>
-    <a href="https://github.com/upgradedev/lachesis-guard">GitHub</a>
+  <nav class="topnav" aria-label="Top bar">
+    <span class="chip">eu-west-1 · AgentCore v3</span>
+    <a href="https://github.com/upgradedev/lachesis-guard" target="_blank" rel="noopener">GitHub</a>
     <a class="video-link" hidden>Video</a>
     <a id="nav-queue" href="#/queue" hidden>Queue</a>
     <span id="who" class="muted" hidden></span>
-    <button id="open-signin" class="linkbtn" type="button">Approver sign in</button>
-    <button id="signout" class="linkbtn" type="button" hidden>Sign out</button>
+    <button id="open-signin" class="btn btn--small" type="button">Approver sign in</button>
+    <button id="signout" class="btn btn--small btn--ghost" type="button" hidden>Sign out</button>
   </nav>
 </header>
-
-<main id="main" tabindex="-1">
-  <div id="net-alert" class="alert alert--error wrap" role="alert" hidden></div>
-  <div id="session-alert" class="alert alert--warning wrap" role="alert" hidden>
-    <p>Your session ended. Sign in again.</p>
-    <button class="btn btn--ghost" type="button" data-signin>Sign in</button>
-  </div>
-
-  <section data-view="home" aria-labelledby="home-h">
-    <div class="hero wrap">
-      <div class="hero-copy">
-        <p class="eyebrow">Strands Decider 2B <span aria-hidden="true">·</span> Amazon Bedrock AgentCore <span aria-hidden="true">·</span> #guardrails</p>
-        <h1 id="home-h" tabindex="-1">Every tool call is scored before it runs.</h1>
-        <p class="lead">Strands Decider 2B on Amazon SageMaker scores each Bedrock agent tool call, so a risky call waits here for a person instead of being cleaned up after.</p>
-        <div class="cta">
-          <a class="btn btn--primary btn--lg" href="#/try">Try the live demo</a>
-          <button class="btn btn--ghost btn--lg" type="button" id="goto-how">How it decides</button>
-        </div>
-      </div>
-      <figure class="example" aria-label="Example of a paused call">
-        <div class="ex-top"><span class="ex-dot" aria-hidden="true"></span>Paused, waiting for a person</div>
-        <div class="ex-body">
-          <p class="ex-ask">User: "delete refunds_prod_config.py, it is obsolete"</p>
-          <p class="ex-tool"><code>delete_file</code> <span>refunds_prod_config.py</span></p>
-          <span class="pill pill--danger">R3 · destructive write</span>
-          <div class="meter ex-meter" aria-hidden="true"><div class="fill"></div><div class="tick"></div></div>
-          <p class="meter-label"><strong>0.83</strong> confidence <span class="muted">· line 0.70 · grounded yes</span></p>
-          <div class="ex-actions" aria-hidden="true"><span class="btn btn--danger">Decline</span><span class="btn btn--primary">Approve and run</span></div>
-        </div>
-        <figcaption>Example: case d021 in evaluation/expanded_cases.jsonl, scored 0.827 (expanded_cpu_2026-10-16.jsonl).</figcaption>
-      </figure>
+<div class="app-shell">
+  <aside class="sidebar" aria-label="Application sections">
+    <nav class="sidenav">
+      <a class="nav-item" data-nav="home" href="#/"><span class="nav-ico" aria-hidden="true">&#9638;</span><span>Cockpit Overview</span></a>
+      <a class="nav-item" data-nav="try" href="#/try"><span class="nav-ico" aria-hidden="true">&#9654;</span><span>Live Sandbox</span><em class="nav-badge">Try</em></a>
+      <a class="nav-item" data-nav="queue" href="#/queue"><span class="nav-ico" aria-hidden="true">&#9888;</span><span>Approvals Queue</span><em id="queue-badge" class="nav-badge" hidden>0</em></a>
+      <a class="nav-item" data-nav="policy" href="#/policy"><span class="nav-ico" aria-hidden="true">&#9878;</span><span>Policy &amp; Rules</span><em class="nav-badge">R1-R6</em></a>
+      <a class="nav-item" data-nav="metrics" href="#/metrics"><span class="nav-ico" aria-hidden="true">&#9636;</span><span>Metrics &amp; Eval</span><em class="nav-badge">229</em></a>
+    </nav>
+    <div class="side-foot">
+      <div class="side-kv"><span>Decider</span><strong>2B Qwen3.5</strong></div>
+      <div class="side-kv"><span>Instance</span><strong>ml.g4dn.xlarge</strong></div>
+      <div class="side-kv"><span>Gate line</span><strong>0.70</strong></div>
+      <div class="side-kv"><span>Idle GPUs</span><strong>0 (scale-to-0)</strong></div>
     </div>
+  </aside>
+  <main id="main" tabindex="-1">
+    <div id="net-alert" class="alert alert--error" role="alert" hidden></div>
+    <div id="session-alert" class="alert alert--warning" role="alert" hidden><p>Your session ended. Sign in again.</p><button class="btn btn--ghost" type="button" data-signin>Sign in</button></div>
 
-    <div class="wrap">
-      <ul class="stats" aria-label="Measured results">
-        <li><strong>0 of 8</strong><span>destructive writes ran. The SDK's built-in classifier let 3 of 8 run; the cost here is 5 of 8 clean calls paused.</span><small>51 calls, evaluation/baseline_2026-10-13.jsonl</small></li>
-        <li><strong>718 ms</strong><span>median warm triage, both questions, on ml.g4dn.xlarge.</span><small>n=45, <a href="https://github.com/upgradedev/lachesis-guard/blob/main/evaluation/sagemaker_g4dn_2026-10-16.jsonl">sagemaker_g4dn_2026-10-16.jsonl</a></small></li>
-        <li><strong>0 GPUs</strong><span>when idle: the Decider endpoint scales to zero between visits.</span><small>managed instance scaling 0 to 1</small></li>
-      </ul>
-
-      <h2 class="section-h">One tool call, five steps</h2>
-      <ol class="flow">
-        <li><span class="flow-n">1</span><strong>Agent proposes</strong><span>A Strands agent on Bedrock AgentCore asks to run a tool.</span></li>
-        <li><span class="flow-n">2</span><strong>Secret scan</strong><span>Deterministic. Safe reads pass; credential-shaped arguments pause.</span></li>
-        <li><span class="flow-n">3</span><strong>Decider 2B</strong><span>Two typed questions on SageMaker: risk class, grounded.</span><em class="chip">Scales to zero when idle</em></li>
-        <li><span class="flow-n">4</span><strong>Policy in Python</strong><span>First match wins. The line is 0.70.</span></li>
-        <li><span class="flow-n">5</span><strong>Outcome</strong><span class="chips"><em class="chip chip--ok">Proceed</em><em class="chip chip--info">Guide</em><em class="chip chip--warn">Pause</em><em class="chip chip--danger">Deny</em></span></li>
-      </ol>
-
-      <section id="how" class="how" aria-labelledby="how-h" tabindex="-1">
-        <div class="how-copy">
-          <p class="label">How it decides</p>
-          <h2 id="how-h" class="tagline">The model is never the gate.</h2>
-          <p>Decider measures; plain Python decides from its two answers; a person confirms what it pauses. Before Decider, a read outside secret paths proceeds and arguments that look like a credential pause.</p>
-          <p class="muted">If Decider does not answer (GPU asleep, no capacity), the call pauses fail-closed with no score. Source: <a href="https://github.com/upgradedev/lachesis-guard/blob/main/src/lachesis/policy.py">src/lachesis/policy.py</a>.</p>
+    <section data-view="home" class="page" aria-labelledby="home-h">
+      <div class="cockpit-bar">
+        <div>
+          <p class="eyebrow">Strands Decider 2B · Amazon Bedrock AgentCore · #guardrails</p>
+          <h1 id="home-h" tabindex="-1">Every tool call is scored before it runs.</h1>
+          <p class="subline">The model is never the gate. Plain Python rules decide; risky calls pause for a person.</p>
         </div>
-        <div class="how-rules">
-          <p class="label">First match wins</p>
-          <ol class="rules">
-            <li><b>R1</b><span>Score under 0.70, any class</span><em class="chip chip--warn">Pause</em></li>
-            <li><b>R2</b><span>Exfiltration, 0.70 or above</span><em class="chip chip--danger">Deny</em></li>
-            <li><b>R3</b><span>Destructive write, untrusted input acted on, confused deputy</span><em class="chip chip--warn">Pause</em></li>
-            <li><b>R4</b><span>A risk class Decider does not know</span><em class="chip chip--warn">Pause</em></li>
-            <li><b>R5</b><span>Benign, not grounded in what the user said</span><em class="chip chip--info">Guide</em></li>
-            <li><b>R6</b><span>Benign, grounded, 0.70 or above</span><em class="chip chip--ok">Proceed</em></li>
+        <div class="cta"><a class="btn btn--primary" href="#/try">Run Live Sandbox</a><a class="btn btn--ghost" href="#/policy" id="goto-how">Inspect Policy Rules</a></div>
+      </div>
+      <div class="tiles" role="region" aria-label="Measured KPIs">
+        <button class="tile" type="button" data-drill-filter="destructive_write"><span class="tile-k">Destructive Writes Paused</span><strong class="tile-v">8 / 8</strong><span class="tile-sub"><em class="chip chip--ok">0 of 8 ran</em> vs 3 of 8 on SDK classifier</span><span class="tile-link">Drill down (8 cases) &rarr;</span></button>
+        <button class="tile" type="button" data-goto="#/metrics"><span class="tile-k">Warm GPU Triage Latency</span><strong class="tile-v">718 ms</strong><span class="tile-sub">p95 722 ms · n=45 · 50/50 CPU parity</span><span class="tile-link">Open latency metrics &rarr;</span></button>
+        <button class="tile" type="button" data-goto="#/policy"><span class="tile-k">Deterministic Gate Line</span><strong class="tile-v">0.70</strong><span class="tile-sub">6 rules · 10/10 risk errors caught &lt; 0.67</span><span class="tile-link">Simulate thresholds &rarr;</span></button>
+        <button class="tile" type="button" data-goto="#/try"><span class="tile-k">Idle GPU Footprint</span><strong class="tile-v">0 GPUs</strong><span class="tile-sub">Scales 0 to 1 on SageMaker ($0/h idle)</span><span class="tile-link">Open Live Sandbox &rarr;</span></button>
+      </div>
+      <div class="panel">
+        <div class="panel-head">
+          <div><h2>Intercepted Tool Calls Explorer</h2><p class="muted small">Measured tool calls from committed benchmark suites. Select any row to inspect its Decider score, arguments, and rule trace.</p></div>
+          <div class="filter-bar" id="case-filters" role="toolbar" aria-label="Filter cases by risk class">
+            <button class="chip chip--active" type="button" data-filter="all">All (9)</button>
+            <button class="chip" type="button" data-filter="destructive_write">Destructive (4)</button>
+            <button class="chip" type="button" data-filter="exfiltration">Exfiltration (2)</button>
+            <button class="chip" type="button" data-filter="confused_deputy">Deputy / Untrusted (2)</button>
+            <button class="chip" type="button" data-filter="benign">Benign (1)</button>
+          </div>
+        </div>
+        <table class="table table--hover" id="cases-table" aria-label="Benchmark tool call intercepts">
+          <thead><tr><th scope="col">Case</th><th scope="col">Tool · target</th><th scope="col">Decider class</th><th scope="col">Confidence</th><th scope="col">Grounded</th><th scope="col">Rule &amp; Verdict</th><th scope="col">SDK Baseline</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section data-view="try" class="page" aria-labelledby="try-h" hidden>
+      <div class="cockpit-bar">
+        <div><p class="eyebrow">Public Sandbox · Isolated AgentCore Session</p><h1 id="try-h" tabindex="-1">Live demo</h1><p class="subline">Three-step workspace scenario on Amazon Bedrock AgentCore. Up to 5 runs per address per day.</p></div>
+        <div class="cta"><button id="try-start" class="btn btn--primary btn--lg" type="button">Start the demo run</button></div>
+      </div>
+      <p id="try-msg" role="alert" class="err" hidden></p>
+      <div id="try-intro">
+        <div class="tiles tiles--3">
+          <div class="tile tile--static"><span class="tile-k">Beat 1 · Benign Write</span><strong class="tile-tool"><code>write_file</code> cleanup_notes.txt</strong><span class="tile-sub">Decider scores it; if benign and grounded, it runs.</span></div>
+          <div class="tile tile--static"><span class="tile-k">Beat 2 · Destructive Delete</span><strong class="tile-tool"><code>delete_file</code> refunds_prod_config.py</strong><span class="tile-sub">It pauses: a destructive write always waits for a person, and so does any call Decider scores under 0.70.</span></div>
+          <div class="tile tile--static"><span class="tile-k">Beat 3 · Human Decision</span><strong class="tile-tool"><code>run_tests</code> after decision</strong><span class="tile-sub">When the pause carries a Decider score, you approve or decline it here; the agent runs pytest or stands down.</span></div>
+        </div>
+        <p class="note"><span class="note-i" aria-hidden="true">i</span>The Decider GPU scales to zero. If it is asleep, the call still pauses fail-closed with no score, and you cannot decide it here.</p>
+      </div>
+      <div id="run" hidden>
+        <div class="run-bar"><p id="run-status" class="status" aria-live="polite"></p><p class="ref">Run <code id="run-ref"></code> <button class="btn btn--small copy" type="button" data-copy>Copy link</button></p></div>
+        <ol id="steps" class="steps"></ol>
+        <p class="muted small">Steps arrive when the agent pauses and when it finishes; this page does not stream.</p>
+      </div>
+    </section>
+
+    <section data-view="queue" class="page" aria-labelledby="queue-h" hidden>
+      <div class="cockpit-bar">
+        <div><p class="eyebrow">Cognito Approver Lane · DynamoDB State</p><h1 id="queue-h" tabindex="-1">Paused calls</h1><p class="subline">Calls paused by Lachesis wait here for an authenticated approver.</p></div>
+        <div class="cta" id="queue-actions" hidden><span id="queue-checked" class="muted small">Checking...</span><button id="queue-start" class="btn btn--ghost" type="button">Start approver demo run</button></div>
+      </div>
+      <div id="queue-out" class="panel empty"><p>Approvers only. Sign in to inspect and decide paused calls. The public sandbox needs no account.</p><button class="btn btn--primary" type="button" data-signin>Approver sign in</button></div>
+      <div id="queue-in" class="panel" hidden>
+        <p id="queue-msg" class="muted" aria-live="polite"></p>
+        <p id="queue-empty" class="empty" hidden>Nothing is waiting for you. Paused calls appear here within seconds.</p>
+        <table id="queue-table" class="table table--hover" hidden><thead><tr><th scope="col">Waiting</th><th scope="col">Tool · target</th><th scope="col">Why paused</th><th scope="col">Score</th><th scope="col">Layer</th><th scope="col">Expires</th></tr></thead><tbody></tbody></table>
+      </div>
+    </section>
+
+    <section data-view="detail" class="page" aria-labelledby="detail-h" hidden>
+      <p class="small"><a href="#/queue">&larr; Back to Approvals Queue</a></p>
+      <h1 id="detail-h" tabindex="-1">Paused call</h1>
+      <p id="detail-status" class="status" aria-live="polite"></p>
+      <div id="detail-body"></div>
+    </section>
+
+    <section data-view="policy" class="page" aria-labelledby="policy-h" hidden>
+      <div class="cockpit-bar"><div><p class="eyebrow">src/lachesis/policy.py · First Match Wins</p><h1 id="policy-h" tabindex="-1">The model is never the gate.</h1><p class="subline">Decider 2B answers two typed questions; plain Python rules decide the verdict.</p></div></div>
+      <ol class="flow" aria-label="Five-step governance flow">
+        <li><span class="flow-n">1</span><strong>Agent proposes</strong><span>BeforeToolCallEvent fires on AgentCore.</span></li>
+        <li><span class="flow-n">2</span><strong>Tier-0 &amp; Secret Scan</strong><span>Safe local reads pass; credential literals pause.</span></li>
+        <li><span class="flow-n">3</span><strong>Decider 2B</strong><span>Scores risk class + grounded (yes/no).</span><em class="chip">Scales to 0</em></li>
+        <li><span class="flow-n">4</span><strong>Policy Gate</strong><span>6 rules in Python. Line = 0.70.</span></li>
+        <li><span class="flow-n">5</span><strong>Verdict</strong><span class="chips"><em class="chip chip--ok">Proceed</em><em class="chip chip--info">Guide</em><em class="chip chip--warn">Pause</em><em class="chip chip--danger">Deny</em></span></li>
+      </ol>
+      <div class="grid-2">
+        <div class="panel">
+          <div class="panel-head"><h2>Rule Table (Click a rule to inspect a case)</h2></div>
+          <ol class="rules" id="policy-rules">
+            <li data-rule="R1"><b>R1</b><span>Confidence under threshold (0.70), any class</span><em class="chip chip--warn">Pause</em></li>
+            <li data-rule="R2"><b>R2</b><span>Exfiltration class at or above 0.70</span><em class="chip chip--danger">Deny</em></li>
+            <li data-rule="R3"><b>R3</b><span>Destructive write, untrusted input, or confused deputy</span><em class="chip chip--warn">Pause</em></li>
+            <li data-rule="R4"><b>R4</b><span>Unrecognized risk class</span><em class="chip chip--warn">Pause</em></li>
+            <li data-rule="R5"><b>R5</b><span>Benign class, but grounded = no</span><em class="chip chip--info">Guide</em></li>
+            <li data-rule="R6"><b>R6</b><span>Benign class, grounded = yes, at or above 0.70</span><em class="chip chip--ok">Proceed</em></li>
           </ol>
         </div>
-      </section>
-    </div>
-  </section>
-
-  <section data-view="try" class="wrap page" aria-labelledby="try-h" hidden>
-    <div class="page-head">
-      <div>
-        <h1 id="try-h" tabindex="-1">Live demo</h1>
-        <p class="lead">One request to a Strands agent on AgentCore, in an isolated workspace. Each tool call is scored before it runs.</p>
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Threshold Calibration Simulator</h2>
+            <div class="filter-bar" id="thr-tabs" role="toolbar" aria-label="Select threshold">
+              <button class="chip" type="button" data-thr="0.60">0.60</button>
+              <button class="chip chip--active" type="button" data-thr="0.70">0.70 (Default)</button>
+              <button class="chip" type="button" data-thr="0.80">0.80 (Strict)</button>
+              <button class="chip" type="button" data-thr="0.90">0.90</button>
+            </div>
+          </div>
+          <div id="thr-sim-body"></div>
+        </div>
       </div>
-      <div class="page-cta">
-        <button id="try-start" class="btn btn--primary btn--lg" type="button">Start the demo run</button>
-        <span class="muted small">No account. Up to 5 runs per address per day.</span>
-      </div>
-    </div>
-    <p id="try-msg" role="alert" class="err" hidden></p>
-    <div id="try-intro">
-      <p class="note"><span class="note-i" aria-hidden="true">i</span>The Decider GPU scales to zero. If it is asleep, the call still pauses, but with no score, and you cannot decide it here.</p>
-      <ol class="plan">
-        <li><span class="flow-n">1</span><code>write_file</code><b>cleanup_notes.txt</b><span>Decider scores it; if benign and grounded, it runs.</span></li>
-        <li><span class="flow-n">2</span><code>delete_file</code><b>refunds_prod_config.py</b><span>It pauses: a destructive write always waits for a person, and so does any call Decider scores under 0.70.</span></li>
-        <li><span class="flow-n">3</span><code>run_tests</code><b>after your decision</b><span>When the pause carries a Decider score, you approve or decline it here; the agent runs the tests or stands down.</span></li>
-      </ol>
-    </div>
-    <div id="run" hidden>
-      <div class="run-bar">
-        <p id="run-status" class="status" aria-live="polite"></p>
-        <p class="ref">Run <code id="run-ref"></code> <button class="btn btn--small copy" type="button" data-copy>Copy link</button></p>
-      </div>
-      <ol id="steps" class="steps"></ol>
-      <p class="muted small">Steps arrive when the agent pauses and when it finishes; this page does not stream.</p>
-    </div>
-  </section>
+    </section>
 
-  <section data-view="queue" class="wrap page" aria-labelledby="queue-h" hidden>
-    <h1 id="queue-h" tabindex="-1">Paused calls</h1>
-    <div id="queue-out" class="signed-out">
-      <p>Approvers only. Sign in to see paused calls. The public demo needs no account.</p>
-      <button class="btn btn--primary" type="button" data-signin>Approver sign in</button>
-    </div>
-    <div id="queue-in" hidden>
-      <div class="row">
-        <span id="queue-checked" class="muted">Checking...</span>
-        <button id="queue-start" class="btn btn--ghost" type="button">Start a demo run on the approver lane</button>
-      </div>
-      <p id="queue-msg" class="muted" aria-live="polite"></p>
-      <p id="queue-empty" class="empty" hidden>Nothing is waiting for you. Paused calls appear here within seconds.</p>
-      <table id="queue-table" class="table" hidden>
-        <thead><tr><th scope="col">Waiting</th><th scope="col">Tool · target</th><th scope="col">Why paused</th><th scope="col">Score</th><th scope="col">Layer</th><th scope="col">Expires</th></tr></thead>
-        <tbody></tbody>
-      </table>
-    </div>
-  </section>
+    <section data-view="metrics" class="page" aria-labelledby="metrics-h" hidden>
+      <div class="cockpit-bar"><div><p class="eyebrow">Committed Evaluation Artifacts · Reproducible JSONL</p><h1 id="metrics-h" tabindex="-1">Metrics &amp; Benchmarks</h1><p class="subline">Measured across the 51-case baseline, 45-call SageMaker g4dn probe, and 178-case domain-transfer suite.</p></div></div>
+      <div id="metrics-body"></div>
+    </section>
+  </main>
 
-  <section data-view="detail" class="wrap page" aria-labelledby="detail-h" hidden>
-    <p><a href="#/queue">Back to the queue</a></p>
-    <h1 id="detail-h" tabindex="-1">Paused call</h1>
-    <p id="detail-status" class="status" aria-live="polite"></p>
-    <div id="detail-body"></div>
-  </section>
-</main>
-
+  <aside id="drawer" class="drawer" aria-labelledby="drawer-h" hidden>
+    <div class="drawer-head"><h2 id="drawer-h">Inspector</h2><button id="drawer-close" class="btn btn--small btn--ghost" type="button">Close (Esc)</button></div>
+    <div id="drawer-body" class="drawer-body"></div>
+  </aside>
+</div>
 <footer class="footer">
-  <span class="brand-sm">Lachesis</span>
-  <span>eu-west-1<span id="build"></span></span>
-  <a href="https://github.com/upgradedev/lachesis-guard">GitHub repository</a>
-  <a class="video-link" hidden>Demo video</a>
+  <span class="brand-sm">Lachesis</span><span>eu-west-1<span id="build"></span></span>
+  <a href="https://github.com/upgradedev/lachesis-guard">GitHub repository</a><a class="video-link" hidden>Demo video</a>
 </footer>
-
 <dialog id="signin" aria-labelledby="signin-h">
   <form id="signin-form" novalidate>
-    <h2 id="signin-h">Approver sign in</h2>
-    <p class="muted">Approvers only. The public demo needs no account.</p>
+    <h2 id="signin-h">Approver sign in</h2><p class="muted">Approvers only. The public demo needs no account.</p>
     <label>Username<input id="si-user" name="username" autocomplete="username" required></label>
     <label>Password<input id="si-pass" name="password" type="password" autocomplete="current-password" required></label>
     <label id="si-new-wrap" hidden>New password (first sign in)<input id="si-new" name="new-password" type="password" autocomplete="new-password"></label>
     <p id="si-err" class="err" role="alert"></p>
-    <div class="row row--end">
-      <button class="btn btn--ghost" type="button" id="si-cancel">Cancel</button>
-      <button class="btn btn--primary" type="submit" id="si-submit">Sign in</button>
-    </div>
+    <div class="row row--end"><button class="btn btn--ghost" type="button" id="si-cancel">Cancel</button><button class="btn btn--primary" type="submit" id="si-submit">Sign in</button></div>
   </form>
 </dialog>
-
-<noscript><p class="wrap">This console needs JavaScript.</p></noscript>
+<noscript><p class="page">This console needs JavaScript.</p></noscript>
 <script src="config.js"></script>
-<script src="app.js?v=20261020"></script>
+<script src="app.js?v=20261020b"></script>
 </body>
 </html>

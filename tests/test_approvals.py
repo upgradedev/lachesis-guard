@@ -380,10 +380,15 @@ def test_console_split_and_budget():
     assert '<script src="config.js"></script>' in html
     assert "app.js?v=" in html and "app.css?v=" in html
     assert '<link rel="icon" href="data:,">' in html
-    for landmark in ("<header", "<main", "<footer", "<dialog", "<form"):
+    for landmark in ("<header", "<aside", "<main", "<footer", "<dialog", "<form"):
         assert landmark in html
+    for view in ("home", "try", "queue", "detail", "policy", "metrics"):
+        assert f'data-view="{view}"' in html
+    for elem in ('class="sidebar"', 'id="cases-table"', 'id="thr-tabs"', 'id="drawer"'):
+        assert elem in html
     total = sum(len(_console(name).splitlines()) for name in CONSOLE_FILES)
     assert total <= 900, total
+
 
 
 def test_console_copy_rules():
