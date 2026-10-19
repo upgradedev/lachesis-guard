@@ -32,7 +32,7 @@
       <a class="nav-item" data-nav="try" href="#/try"><span class="nav-ico" aria-hidden="true">&#9654;</span><span>Live Sandbox</span><em class="nav-badge">Try</em></a>
       <a class="nav-item" data-nav="queue" href="#/queue"><span class="nav-ico" aria-hidden="true">&#9888;</span><span>Approvals Queue</span><em id="queue-badge" class="nav-badge" hidden>0</em></a>
       <a class="nav-item" data-nav="policy" href="#/policy"><span class="nav-ico" aria-hidden="true">&#9878;</span><span>Policy &amp; Rules</span><em class="nav-badge">R1-R6</em></a>
-      <a class="nav-item" data-nav="metrics" href="#/metrics"><span class="nav-ico" aria-hidden="true">&#9636;</span><span>Metrics &amp; Eval</span><em class="nav-badge">229</em></a>
+      <a class="nav-item" data-nav="metrics" href="#/metrics"><span class="nav-ico" aria-hidden="true">&#9636;</span><span>Metrics &amp; Eval</span><em class="nav-badge">178</em></a>
     </nav>
     <div class="side-foot">
       <div class="side-kv"><span>Decider</span><strong>2B Qwen3.5</strong></div>
@@ -57,22 +57,17 @@
       <div class="tiles" role="region" aria-label="Measured KPIs">
         <button class="tile" type="button" data-drill-filter="destructive_write"><span class="tile-k">Destructive Writes Paused</span><strong class="tile-v">8 / 8</strong><span class="tile-sub"><em class="chip chip--ok">0 of 8 ran</em> vs 3 of 8 on SDK classifier</span><span class="tile-link">Drill down (8 cases) &rarr;</span></button>
         <button class="tile" type="button" data-goto="#/metrics"><span class="tile-k">Warm GPU Triage Latency</span><strong class="tile-v">718 ms</strong><span class="tile-sub">p95 722 ms · n=45 · 50/50 CPU parity</span><span class="tile-link">Open latency metrics &rarr;</span></button>
-        <button class="tile" type="button" data-goto="#/policy"><span class="tile-k">Deterministic Gate Line</span><strong class="tile-v">0.70</strong><span class="tile-sub">6 rules · 10/10 risk errors caught &lt; 0.67</span><span class="tile-link">Simulate thresholds &rarr;</span></button>
+        <button class="tile" type="button" data-goto="#/policy"><span class="tile-k">Deterministic Gate Line</span><strong class="tile-v">0.70</strong><span class="tile-sub">6 rules · all 10 risk mistakes on the 50-case set scored under it (highest 0.67)</span><span class="tile-link">Simulate thresholds &rarr;</span></button>
         <button class="tile" type="button" data-goto="#/try"><span class="tile-k">Idle GPU Footprint</span><strong class="tile-v">0 GPUs</strong><span class="tile-sub">Scales 0 to 1 on SageMaker ($0/h idle)</span><span class="tile-link">Open Live Sandbox &rarr;</span></button>
       </div>
       <div class="panel">
         <div class="panel-head">
-          <div><h2>Intercepted Tool Calls Explorer</h2><p class="muted small">Measured tool calls from committed benchmark suites. Select any row to inspect its Decider score, arguments, and rule trace.</p></div>
-          <div class="filter-bar" id="case-filters" role="toolbar" aria-label="Filter cases by risk class">
-            <button class="chip chip--active" type="button" data-filter="all">All (9)</button>
-            <button class="chip" type="button" data-filter="destructive_write">Destructive (4)</button>
-            <button class="chip" type="button" data-filter="exfiltration">Exfiltration (2)</button>
-            <button class="chip" type="button" data-filter="confused_deputy">Deputy / Untrusted (2)</button>
-            <button class="chip" type="button" data-filter="benign">Benign (1)</button>
-          </div>
+          <div><h2>Intercepted Tool Calls Explorer</h2><p class="muted small">Every row is a committed evaluation case. Select one to see the request, the arguments, and the verdict at each line.</p></div>
+          <div class="filter-bar" id="case-filters" role="toolbar" aria-label="Choose the suite and filter by labelled class"></div>
         </div>
+        <div class="explorer-tools"><input id="case-search" type="search" placeholder="Search id, tool, target or request" aria-label="Search cases"><p id="cases-count" class="muted small" aria-live="polite"></p></div>
         <table class="table table--hover" id="cases-table" aria-label="Benchmark tool call intercepts">
-          <thead><tr><th scope="col">Case</th><th scope="col">Tool · target</th><th scope="col">Decider class</th><th scope="col">Confidence</th><th scope="col">Grounded</th><th scope="col">Rule &amp; Verdict</th><th scope="col">SDK Baseline</th></tr></thead>
+          <thead><tr><th scope="col">Case</th><th scope="col">Tool · target</th><th scope="col">Decider class</th><th scope="col">Confidence</th><th scope="col">Grounded</th><th scope="col">Rule &amp; Verdict</th><th scope="col">SDK classifier</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -156,7 +151,7 @@
     </section>
 
     <section data-view="metrics" class="page" aria-labelledby="metrics-h" hidden>
-      <div class="cockpit-bar"><div><p class="eyebrow">Committed Evaluation Artifacts · Reproducible JSONL</p><h1 id="metrics-h" tabindex="-1">Metrics &amp; Benchmarks</h1><p class="subline">Measured across the 51-case baseline, 45-call SageMaker g4dn probe, and 178-case domain-transfer suite.</p></div></div>
+      <div class="cockpit-bar"><div><p class="eyebrow">Committed Evaluation Artifacts · Reproducible JSONL</p><h1 id="metrics-h" tabindex="-1">Metrics &amp; Benchmarks</h1><p class="subline">From the 51-call SDK baseline, the 50-case hosted g4dn probe and the 128-case expanded suite. Every figure is generated from the committed rows.</p></div></div>
       <div id="metrics-body"></div>
     </section>
   </main>
@@ -182,6 +177,7 @@
 </dialog>
 <noscript><p class="page">This console needs JavaScript.</p></noscript>
 <script src="config.js"></script>
+<script src="data.js?v=20261020"></script>
 <script src="app.js?v=20261020b"></script>
 </body>
 </html>

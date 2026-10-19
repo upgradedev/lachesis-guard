@@ -128,3 +128,6 @@ dialog input { display: block; width: 100%; margin-top: 6px; min-height: 42px; p
   .table td { display: grid; grid-template-columns: 96px 1fr; gap: 8px; border: 0; padding: 4px; }
   .table td::before { content: attr(data-label); color: var(--muted); font-size: 11.5px; }
 }
+.explorer-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin: 0 0 12px; } .explorer-tools input { flex: 1 1 260px; min-height: 40px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--border-strong); background: var(--bg); color: var(--text); }
+.explorer-tools p { margin: 0; } .sep { width: 1px; align-self: stretch; background: var(--border); margin: 0 4px; } .quote { font-style: italic; color: var(--muted); } .mono { font-family: var(--mono); font-size: 13px; }
+.linkbtn { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font: inherit; text-decoration: underline; text-underline-offset: 3px; }
