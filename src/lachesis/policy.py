@@ -15,7 +15,7 @@ Precedence (first match wins):
 
 1. confidence below the threshold -> confirm: a person decides. This holds for
    every risk class, including exfiltration: an unsure triage asks, it does
-   not block outright, because Lachesis is never the gate.
+   not block outright, because the model is never the gate.
 2. exfiltration, confidently -> deny: data sent outside cannot be unsent.
 3. destructive write, untrusted input acted on, or confused deputy -> confirm:
    the call pauses for a person.

@@ -2,408 +2,143 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
 <link rel="icon" href="data:,">
 <title>Lachesis Approvals</title>
-<style>
-  body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 44rem; padding: 0 1rem; background: #0b0e14; color: #e6e6e6; }
-  h1 { font-size: 1.4rem; }
-  .card { border: 1px solid #2a3242; border-radius: 8px; padding: 1rem; margin: 1rem 0; background: #121722; }
-  button { background: #2f6fed; color: white; border: 0; border-radius: 6px; padding: 0.5rem 1rem; cursor: pointer; margin-right: 0.5rem; }
-  button:disabled { opacity: 0.55; cursor: not-allowed; }
-  button.decline { background: #8a3033; }
-  button.secondary { background: #2a3242; }
-  input { display: block; margin: 0.4rem 0 0.8rem; padding: 0.5rem; width: 100%; box-sizing: border-box; }
-  pre { white-space: pre-wrap; word-break: break-word; background: #0b0e14; padding: 0.6rem; border-radius: 6px; }
-  .muted { color: #8b94a3; }
-  .gauge { height: 8px; background: #2a3242; border-radius: 4px; margin: 0.4rem 0; }
-  .gauge > div { height: 8px; background: #e0a458; border-radius: 4px; }
-  .banner { border: 1px solid #e0a458; border-radius: 8px; padding: 0.6rem 0.8rem; margin: 0.6rem 0; }
-  .try-actions { margin: 0.6rem 0; }
-</style>
+<link rel="stylesheet" href="app.css?v=20261019">
 </head>
 <body>
-<h1>Lachesis Approvals</h1>
-<p class="muted">A person decides every paused tool call. Lachesis is never the gate.</p>
+<a class="skip" href="#main">Skip to content</a>
+<header class="topbar">
+  <a class="brand" href="#/">Lachesis <span aria-hidden="true">·</span> Approvals</a>
+  <nav class="topnav" aria-label="Site">
+    <a href="https://github.com/upgradedev/lachesis-guard">GitHub</a>
+    <a class="video-link" hidden>Video</a>
+    <a id="nav-queue" href="#/queue" hidden>Queue</a>
+    <span id="who" class="muted" hidden></span>
+    <button id="open-signin" class="btn btn--ghost" type="button">Approver sign in</button>
+    <button id="signout" class="btn btn--ghost" type="button" hidden>Sign out</button>
+  </nav>
+</header>
 
-<section id="login" class="card">
-  <h2>Approver sign-in</h2>
-  <label>Username <input id="username" autocomplete="username"></label>
-  <label>Password <input id="password" type="password" autocomplete="current-password"></label>
-  <div id="new-password-wrap" hidden>
-    <label>New password (required on first sign-in) <input id="new-password" type="password" autocomplete="new-password"></label>
+<main id="main" tabindex="-1">
+  <div id="net-alert" class="alert alert--error" role="alert" hidden></div>
+  <div id="session-alert" class="alert alert--warning" role="alert" hidden>
+    <p>Your session ended. Sign in again.</p>
+    <button class="btn btn--ghost" type="button" data-signin>Sign in</button>
   </div>
-  <button id="signin">Sign in</button>
-  <button id="signout" class="secondary" hidden>Sign out</button>
-  <span id="login-state" class="muted"></span>
-</section>
 
-<section class="card">
-  <h2>Try the demo (no account)</h2>
-  <p class="muted">Runs the three-beat scenario in an isolated workspace: (1) the agent writes <code>cleanup_notes.txt</code>, which Strands Decider 2B scores as grounded and benign so it proceeds; (2) the agent proposes deleting <code>refunds_prod_config.py</code>, which Lachesis pauses below the 0.70 gate; (3) you can approve or decline the paused call right here to watch the agent resume and run <code>pytest</code> (or refuse). On this public lane nobody is emailed.</p>
-  <button id="try">Start the demo run</button>
-  <div id="try-state" class="muted"></div>
-  <div id="try-meta"></div>
-  <pre id="try-result"></pre>
-</section>
+  <section data-view="home" class="container" aria-labelledby="home-h">
+    <div class="hero">
+      <h1 id="home-h" tabindex="-1">Every tool call is scored before it runs.</h1>
+      <p class="lead">Strands Decider 2B on Amazon SageMaker scores each Bedrock agent tool call, so a risky call waits here for a person instead of being cleaned up after.</p>
+      <div class="cta">
+        <a class="btn btn--primary" href="#/try">Run the public demo</a>
+        <button class="btn btn--ghost" type="button" id="goto-how">How it decides</button>
+      </div>
+      <p class="foot">Warm Decider latency: median 718 ms, n=45, ml.g4dn.xlarge, rows in <a href="https://github.com/upgradedev/lachesis-guard/blob/main/evaluation/sagemaker_g4dn_2026-10-16.jsonl">evaluation/sagemaker_g4dn_2026-10-16.jsonl</a>.</p>
+    </div>
+    <h2>The path of one tool call</h2>
+    <ol class="arch">
+      <li><strong>Bedrock agent on AgentCore</strong><span>A Strands agent proposes a tool call.</span></li>
+      <li><strong>Secret scan</strong><span>Deterministic. Safe reads pass; secret-shaped arguments pause.</span></li>
+      <li><strong>Decider 2B on SageMaker</strong><span>Two typed questions: risk class and grounded.</span><span class="muted">Scales to zero when idle.</span></li>
+      <li><strong>Policy in plain Python</strong><span>First match wins. The line is 0.70.</span></li>
+      <li><strong>Proceed, Guide, Pause or Deny</strong><span>A pause waits here for a person.</span></li>
+    </ol>
+    <section id="how" class="card" aria-labelledby="how-h" tabindex="-1">
+      <h2 id="how-h">How it decides</h2>
+      <p class="tagline">The model is never the gate. Decider measures; plain Python decides; a person confirms what it pauses.</p>
+      <p>Before Decider: a read outside secret paths proceeds, and arguments that look like a credential pause for a person.</p>
+      <p class="label">First match wins</p>
+      <ol class="rules">
+        <li><strong>R1</strong> Score under 0.70: pause for a person, whatever the class.</li>
+        <li><strong>R2</strong> Exfiltration at 0.70 or above: deny. Data sent outside cannot be unsent.</li>
+        <li><strong>R3</strong> Destructive write, untrusted input acted on, or confused deputy: pause for a person.</li>
+        <li><strong>R4</strong> A risk class Decider does not know: pause for a person.</li>
+        <li><strong>R5</strong> Benign but not grounded in what the user said: guide. The model asks instead of guessing.</li>
+        <li><strong>R6</strong> Benign, grounded, 0.70 or above: proceed.</li>
+      </ol>
+      <p class="muted">If Decider does not answer (GPU asleep, no capacity), the call pauses fail-closed with no score. Source: <a href="https://github.com/upgradedev/lachesis-guard/blob/main/src/lachesis/policy.py">src/lachesis/policy.py</a>.</p>
+    </section>
+  </section>
 
-<section id="pending-wrap" class="card" hidden>
-  <h2>Paused calls waiting for you</h2>
-  <button id="refresh" class="secondary">Refresh</button>
-  <button id="start" class="secondary">Start a demo run (approver lane)</button>
-  <span id="approver-state" class="muted"></span>
-  <div id="pending"></div>
-  <pre id="approver-result" hidden></pre>
-</section>
+  <section data-view="try" class="container" aria-labelledby="try-h" hidden>
+    <h1 id="try-h" tabindex="-1">Public demo</h1>
+    <div id="try-intro">
+      <p>One click starts a Strands agent on Amazon Bedrock AgentCore, in an isolated workspace, with one request: write <code>cleanup_notes.txt</code>, delete <code>refunds_prod_config.py</code>, then run the tests. Every tool call is triaged before it runs.</p>
+      <ol class="beats">
+        <li>The agent writes <code>cleanup_notes.txt</code>. Decider scores it; if benign and grounded, it runs.</li>
+        <li>The agent proposes deleting <code>refunds_prod_config.py</code>: a destructive write always waits for a person, and so does any call Decider scores under 0.70.</li>
+        <li>When the paused call carries a Decider score, you approve or decline it on this page, and the agent resumes: it runs the tests or stands down.</li>
+      </ol>
+      <div class="alert alert--info"><p>The Decider GPU scales to zero. If it is asleep, the call still pauses, but with no score, and you cannot decide it here.</p></div>
+    </div>
+    <div class="row">
+      <button id="try-start" class="btn btn--primary" type="button">Start the demo run</button>
+      <span class="muted">Up to 5 runs per address per day.</span>
+    </div>
+    <p id="try-msg" role="alert" class="err" hidden></p>
+    <div id="run" hidden>
+      <p class="ref">Run <code id="run-ref"></code> <button class="btn btn--small copy" type="button" data-copy>Copy link</button></p>
+      <p id="run-status" class="status" aria-live="polite"></p>
+      <ol id="steps" class="steps"></ol>
+      <p class="muted">Steps arrive when the agent pauses and when it finishes; this page does not stream.</p>
+    </div>
+  </section>
 
+  <section data-view="queue" class="container" aria-labelledby="queue-h" hidden>
+    <h1 id="queue-h" tabindex="-1">Paused calls</h1>
+    <div id="queue-out" class="signed-out">
+      <p>Approvers only. Sign in to see paused calls. The public demo needs no account.</p>
+      <button class="btn btn--primary" type="button" data-signin>Approver sign in</button>
+    </div>
+    <div id="queue-in" hidden>
+      <div class="row">
+        <span id="queue-checked" class="muted">Checking...</span>
+        <button id="queue-start" class="btn btn--ghost" type="button">Start a demo run on the approver lane</button>
+      </div>
+      <p id="queue-msg" class="muted" aria-live="polite"></p>
+      <p id="queue-empty" class="empty" hidden>Nothing is waiting for you. Paused calls appear here within seconds.</p>
+      <table id="queue-table" class="table" hidden>
+        <thead><tr><th scope="col">Waiting</th><th scope="col">Tool · target</th><th scope="col">Why paused</th><th scope="col">Score</th><th scope="col">Layer</th><th scope="col">Expires</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section data-view="detail" class="container" aria-labelledby="detail-h" hidden>
+    <p><a href="#/queue">Back to the queue</a></p>
+    <h1 id="detail-h" tabindex="-1">Paused call</h1>
+    <p id="detail-status" class="status" aria-live="polite"></p>
+    <div id="detail-body"></div>
+  </section>
+</main>
+
+<footer class="footer">
+  <span>eu-west-1<span id="build"></span></span>
+  <a href="https://github.com/upgradedev/lachesis-guard">GitHub repository</a>
+  <a class="video-link" hidden>Demo video</a>
+</footer>
+
+<dialog id="signin" aria-labelledby="signin-h">
+  <form id="signin-form" novalidate>
+    <h2 id="signin-h">Approver sign in</h2>
+    <p class="muted">Approvers only. The public demo needs no account.</p>
+    <label>Username<input id="si-user" name="username" autocomplete="username" required></label>
+    <label>Password<input id="si-pass" name="password" type="password" autocomplete="current-password" required></label>
+    <label id="si-new-wrap" hidden>New password (first sign in)<input id="si-new" name="new-password" type="password" autocomplete="new-password"></label>
+    <p id="si-err" class="err" role="alert"></p>
+    <div class="row row--end">
+      <button class="btn btn--ghost" type="button" id="si-cancel">Cancel</button>
+      <button class="btn btn--primary" type="submit" id="si-submit">Sign in</button>
+    </div>
+  </form>
+</dialog>
+
+<noscript><p class="container">This console needs JavaScript.</p></noscript>
 <script src="config.js"></script>
-<script>
-const cfg = window.LACHESIS_CONFIG;
-let idToken = sessionStorage.getItem("lachesis_id_token") || null;
-let pendingChallengeSession = null;
-
-async function api(path, options = {}) {
-  const headers = { "content-type": "application/json" };
-  if (idToken) headers.authorization = idToken;
-  const res = await fetch(cfg.apiUrl + path, { ...options, headers });
-  return { status: res.status, body: await res.json().catch(() => ({})) };
-}
-
-function gauge(confidence) {
-  const pct = Math.round((confidence || 0) * 100);
-  return '<div class="gauge"><div style="width:' + pct + '%"></div></div>';
-}
-
-function layerLabel(layer) {
-  if (layer === "secretscan") return "deterministic secret scan (second layer)";
-  if (layer === "unavailable") return "Decider unavailable (GPU cold): a person decides";
-  if (layer === "decider") return "Strands Decider 2B";
-  return layer || "";
-}
-
-function cardMeta(card) {
-  const reason = (card && card.reason) || "";
-  const match = reason.match(/confidence\s+([0-9.]+)/i);
-  const confidence = (card && card.confidence !== null && card.confidence !== undefined)
-    ? card.confidence : (match ? parseFloat(match[1]) : 0);
-  let meta = "";
-  if (card && card.risk) {
-    meta = "Decider: " + card.risk + " at " + Number(confidence).toFixed(2) +
-      " (threshold 0.70)" +
-      (card.latency_ms ? " \u00b7 " + Math.round(card.latency_ms) + " ms" : "") +
-      (card.layer ? " \u00b7 " + layerLabel(card.layer) : "");
-  } else if (card && card.layer) {
-    meta = layerLabel(card.layer);
-  }
-  return { meta, confidence, reason };
-}
-
-function priorStepsText(card) {
-  const steps = (card && Array.isArray(card.prior_steps)) ? card.prior_steps : [];
-  const diff = (card && Array.isArray(card.changed_files)) ? card.changed_files : [];
-  const parts = steps.map(s => {
-    if (s.layer === "decider" && s.confidence !== null && s.confidence !== undefined) {
-      return (s.tool || "tool") + " (PROCEED \u00b7 Decider " + (s.risk || "benign") +
-        " at " + Number(s.confidence).toFixed(2) +
-        (s.latency_ms ? " \u00b7 " + Math.round(s.latency_ms) + " ms" : "") + ")";
-    }
-    return (s.tool || "tool") + " (PROCEED \u00b7 " + (s.layer || "tier0") + ")";
-  });
-  let line = parts.length ? "Earlier calls in this run: " + parts.join(", ") : "";
-  if (diff.length) {
-    line += (line ? " \u00b7 " : "") + "Workspace diff: " + diff.join(", ");
-  }
-  return line;
-}
-
-function coldBanner(card) {
-  if (!card || card.layer !== "unavailable") return "";
-  return '<div class="banner">The Decider GPU is cold: it scales to zero when idle. ' +
-    "This pause is the fail-closed path, so a person decides and there is no Decider score. " +
-    "Nothing is broken; a warm Decider scores the call instead.</div>";
-}
-
-async function pollApproverOutcome(approvalId, statusSpan) {
-  const outBox = document.getElementById("approver-result");
-  for (let i = 0; i < 40; i++) {
-    await new Promise(r => setTimeout(r, 3000));
-    const poll = await api("/approvals/" + approvalId);
-    if (poll.status !== 200) continue;
-    if (poll.body.status === "PENDING") {
-      await loadPending();
-      return;
-    }
-    if (["DONE", "REFUSED_DONE", "EXPIRED", "ERROR"].includes(poll.body.status)) {
-      outBox.hidden = false;
-      outBox.textContent = "Run " + approvalId + " (" + poll.body.status + "):\n" +
-        (poll.body.result_text || poll.body.status);
-      await loadPending();
-      return;
-    }
-    if (statusSpan) statusSpan.textContent = "Agent status: " + poll.body.status + " ...";
-  }
-  await loadPending();
-}
-
-function renderApproval(item) {
-  const div = document.createElement("div");
-  div.className = "card";
-  const card = item.card || {};
-  const { meta, confidence, reason } = cardMeta(card);
-  const prior = priorStepsText(card);
-  div.innerHTML = "<strong>" + item.approval_id + "</strong> " + coldBanner(card) + gauge(confidence) +
-    (prior ? '<div class="muted prior-line"></div>' : "") +
-    (meta ? '<div class="muted meta-line"></div>' : "") +
-    "<pre></pre>" +
-    '<button data-act="approve">Approve</button><button class="decline" data-act="decline">Decline</button> ' +
-    '<span class="muted"></span>';
-  if (prior) div.querySelector("div.prior-line").textContent = prior;
-  if (meta) div.querySelector("div.meta-line").textContent = meta;
-  div.querySelector("pre").textContent = reason;
-  const buttons = div.querySelectorAll("button");
-  const statusSpan = div.querySelector("span.muted");
-  buttons.forEach(btn => btn.addEventListener("click", async () => {
-    buttons.forEach(b => { b.disabled = true; });
-    statusSpan.textContent = "Recording decision...";
-    const out = await api("/approvals/" + item.approval_id + "/decision", {
-      method: "POST", body: JSON.stringify({ decision: btn.dataset.act })
-    });
-    if (out.status === 202) {
-      statusSpan.textContent = "Recorded. The agent is resuming...";
-      await pollApproverOutcome(item.approval_id, statusSpan);
-    } else {
-      statusSpan.textContent = "Refused: " + (out.body.error || out.status);
-      buttons.forEach(b => { b.disabled = false; });
-    }
-  }));
-  return div;
-}
-
-async function loadPending() {
-  const out = await api("/approvals");
-  const wrap = document.getElementById("pending");
-  wrap.textContent = "";
-  if (out.status !== 200) {
-    if (out.status === 401 || out.status === 403) {
-      idToken = null;
-      sessionStorage.removeItem("lachesis_id_token");
-      document.getElementById("signout").hidden = true;
-    }
-    wrap.textContent = "Sign in as an approver to see paused calls.";
-    return;
-  }
-  if (!out.body.approvals.length) wrap.textContent = "Nothing is paused right now.";
-  out.body.approvals.forEach(item => wrap.appendChild(renderApproval(item)));
-}
-
-document.getElementById("signin").addEventListener("click", async () => {
-  const state = document.getElementById("login-state");
-  const username = document.getElementById("username").value.trim();
-  const password = document.getElementById("password").value;
-  const newPassword = document.getElementById("new-password").value;
-  if (!username || !password) {
-    state.textContent = "Enter both username and password.";
-    return;
-  }
-  state.textContent = "Signing in...";
-  const cognitoUrl = "https://cognito-idp." + cfg.region + ".amazonaws.com/";
-  let res;
-  try {
-    if (pendingChallengeSession && newPassword) {
-      res = await fetch(cognitoUrl, {
-        method: "POST",
-        headers: {
-          "content-type": "application/x-amz-json-1.1",
-          "x-amz-target": "AWSCognitoIdentityProviderService.RespondToAuthChallenge"
-        },
-        body: JSON.stringify({
-          ChallengeName: "NEW_PASSWORD_REQUIRED",
-          ClientId: cfg.clientId,
-          Session: pendingChallengeSession,
-          ChallengeResponses: { USERNAME: username, NEW_PASSWORD: newPassword }
-        })
-      });
-    } else {
-      res = await fetch(cognitoUrl, {
-        method: "POST",
-        headers: {
-          "content-type": "application/x-amz-json-1.1",
-          "x-amz-target": "AWSCognitoIdentityProviderService.InitiateAuth"
-        },
-        body: JSON.stringify({
-          AuthFlow: "USER_PASSWORD_AUTH",
-          ClientId: cfg.clientId,
-          AuthParameters: { USERNAME: username, PASSWORD: password }
-        })
-      });
-    }
-  } catch (err) {
-    state.textContent = "Network error during sign-in.";
-    return;
-  }
-  const body = await res.json().catch(() => ({}));
-  if (body.ChallengeName === "NEW_PASSWORD_REQUIRED") {
-    pendingChallengeSession = body.Session;
-    document.getElementById("new-password-wrap").hidden = false;
-    state.textContent = "First sign-in: enter a new password above and click Sign in again.";
-    return;
-  }
-  if (body.AuthenticationResult && body.AuthenticationResult.IdToken) {
-    idToken = body.AuthenticationResult.IdToken;
-    sessionStorage.setItem("lachesis_id_token", idToken);
-    pendingChallengeSession = null;
-    document.getElementById("new-password-wrap").hidden = true;
-    document.getElementById("signout").hidden = false;
-    state.textContent = "Signed in.";
-    document.getElementById("pending-wrap").hidden = false;
-    loadPending();
-  } else {
-    if (pendingChallengeSession && body.__type !== "InvalidPasswordException") {
-      pendingChallengeSession = null;
-      document.getElementById("new-password-wrap").hidden = true;
-    }
-    state.textContent = "Sign-in failed: " + (body.message || res.status);
-  }
-});
-
-document.getElementById("signout").addEventListener("click", () => {
-  idToken = null;
-  pendingChallengeSession = null;
-  sessionStorage.removeItem("lachesis_id_token");
-  document.getElementById("signout").hidden = true;
-  document.getElementById("pending-wrap").hidden = true;
-  document.getElementById("login-state").textContent = "Signed out.";
-});
-
-["username", "password", "new-password"].forEach(id => {
-  document.getElementById(id).addEventListener("keydown", e => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      document.getElementById("signin").click();
-    }
-  });
-});
-
-if (idToken) {
-  document.getElementById("signout").hidden = false;
-  document.getElementById("pending-wrap").hidden = false;
-  loadPending();
-}
-
-document.getElementById("refresh").addEventListener("click", loadPending);
-document.getElementById("start").addEventListener("click", async () => {
-  const startBtn = document.getElementById("start");
-  const approverState = document.getElementById("approver-state");
-  startBtn.disabled = true;
-  approverState.textContent = "Starting approver demo run...";
-  const out = await api("/approvals/start", { method: "POST", body: "{}" });
-  if (out.status !== 202) {
-    approverState.textContent = "Refused: " + (out.body.error || out.status);
-    startBtn.disabled = false;
-    return;
-  }
-  const approvalId = out.body.approval_id;
-  approverState.textContent = "Running " + approvalId + " ...";
-  for (let i = 0; i < 40; i++) {
-    await new Promise(r => setTimeout(r, 3000));
-    const poll = await api("/approvals/" + approvalId);
-    if (poll.status !== 200) continue;
-    approverState.textContent = "Run " + approvalId + ": " + poll.body.status;
-    if (poll.body.status === "PENDING") {
-      await loadPending();
-      startBtn.disabled = false;
-      return;
-    }
-    if (["DONE", "REFUSED_DONE", "EXPIRED", "ERROR"].includes(poll.body.status)) {
-      await loadPending();
-      startBtn.disabled = false;
-      return;
-    }
-  }
-  await loadPending();
-  startBtn.disabled = false;
-});
-
-async function pollTryRun(token) {
-  const tryBtn = document.getElementById("try");
-  const state = document.getElementById("try-state");
-  const result = document.getElementById("try-result");
-  const tryMeta = document.getElementById("try-meta");
-  for (let i = 0; i < 90; i++) {
-    await new Promise(r => setTimeout(r, 4000));
-    const poll = await api("/try/" + token);
-    if (poll.status !== 200) continue;
-    state.textContent = "Status: " + poll.body.status;
-    if (poll.body.status === "PENDING") {
-      const card = poll.body.card || {};
-      const view = cardMeta(card);
-      const prior = priorStepsText(card);
-      const canDecide = card.layer !== "unavailable";
-      tryMeta.innerHTML = coldBanner(card) + gauge(view.confidence) +
-        (prior ? '<div class="muted prior-line"></div>' : "") +
-        (view.meta ? '<div class="muted meta-line"></div>' : "") +
-        (canDecide ? '<div class="try-actions"><button data-act="approve">Approve</button><button class="decline" data-act="decline">Decline</button> <span class="muted try-act-state"></span></div>' : "");
-      if (prior) tryMeta.querySelector("div.prior-line").textContent = prior;
-      if (view.meta) tryMeta.querySelector("div.meta-line").textContent = view.meta;
-      result.textContent = card.reason || "The agent is paused for a person.";
-      if (canDecide) {
-        state.textContent = "Status: PENDING. Approve or decline below to resume this demo run, or leave it to expire refused.";
-        const actBtns = tryMeta.querySelectorAll("button[data-act]");
-        const actState = tryMeta.querySelector("span.try-act-state");
-        actBtns.forEach(btn => btn.addEventListener("click", async () => {
-          actBtns.forEach(b => { b.disabled = true; });
-          tryBtn.disabled = true;
-          actState.textContent = "Recording decision...";
-          const dec = await api("/try/" + token + "/decision", {
-            method: "POST", body: JSON.stringify({ decision: btn.dataset.act })
-          });
-          if (dec.status === 202) {
-            actState.textContent = "Recorded (" + btn.dataset.act + "). Resuming agent...";
-            state.textContent = "Status: RESUMING ...";
-            await pollTryRun(token);
-          } else {
-            actState.textContent = "Refused: " + (dec.body.error || dec.status);
-            actBtns.forEach(b => { b.disabled = false; });
-            tryBtn.disabled = false;
-          }
-        }));
-      } else {
-        state.textContent = "Status: PENDING. In the hosted run an approver decides in this console; on the public lane the pause simply waits and then expires refused.";
-      }
-      tryBtn.disabled = false;
-      return;
-    }
-    if (["DONE", "REFUSED_DONE", "EXPIRED", "ERROR"].includes(poll.body.status)) {
-      const actions = tryMeta.querySelector("div.try-actions");
-      if (actions) actions.remove();
-      result.textContent = poll.body.result_text || poll.body.status;
-      tryBtn.disabled = false;
-      return;
-    }
-  }
-  state.textContent = "Still running; poll again later with the token above.";
-  tryBtn.disabled = false;
-}
-
-document.getElementById("try").addEventListener("click", async () => {
-  const tryBtn = document.getElementById("try");
-  const state = document.getElementById("try-state");
-  const result = document.getElementById("try-result");
-  const tryMeta = document.getElementById("try-meta");
-  tryBtn.disabled = true;
-  state.textContent = "Starting...";
-  tryMeta.innerHTML = "";
-  result.textContent = "";
-  const out = await api("/try", { method: "POST", body: "{}" });
-  if (out.status !== 202) {
-    state.textContent = "Refused: " + (out.body.error || out.status);
-    tryBtn.disabled = false;
-    return;
-  }
-  const token = out.body.token;
-  state.textContent = "Running with token " + token + " ...";
-  await pollTryRun(token);
-});
-</script>
+<script src="app.js?v=20261019"></script>
 </body>
 </html>

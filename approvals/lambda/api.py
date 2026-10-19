@@ -1,7 +1,7 @@
 """The Approvals HTTP API Lambda (B1) plus the anonymous /try lane (B2).
 
 Routes (HTTP API, see infra/stacks/approvals.py):
-- GET  /approvals            approvers group only: pending and recent rows
+- GET  /approvals            approvers group only: pending approver-lane rows
 - GET  /approvals/{id}       approvers group only
 - POST /approvals/{id}/decision  approvers group only; conditional write,
                              409 on a repeat, 202 + async runner resume

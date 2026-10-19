@@ -17,7 +17,7 @@ Wiring (the whole of it)::
 
     agent = Agent(model=..., tools=[...], interventions=[TriageHandler()])
 
-Lachesis is never the gate. The gate behind this triage is deterministic: plain
+The model is never the gate. The gate behind this triage is deterministic: plain
 ``if`` statements over a confidence number, in ``decide`` below. Measure the
 threshold 0.7 was fit on our own 50-case fixture; measure it on your own
 traffic before you trust it for your agent.
@@ -206,7 +206,7 @@ def triage_questions() -> dict[str, dict[str, Any]]:
 #
 # Plain Python over typed numbers. First match wins. Anything the model is
 # unsure about pauses for a person, including exfiltration: an unsure triage
-# asks, it does not block outright, because this pattern is never the gate.
+# asks, it does not block outright, because the model is never the gate.
 
 DEFAULT_THRESHOLD = 0.7
 """Below this confidence a person decides. Fit on our own 50-case fixture
