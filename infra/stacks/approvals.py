@@ -176,6 +176,41 @@ class ApprovalsStack(cdk.Stack):
             maximum_retry_attempts=0,
         )
 
+        # PHASE 2b: GET /status and POST /wake for the public lane. Its own
+        # function so the only role that can change the GPU's copy count
+        # holds nothing else: the two actions on the one component, and
+        # UpdateItem for the daily counter rows.
+        component_arn = (
+            f"arn:aws:sagemaker:eu-west-1:{self.account}:inference-component/lachesis-decider-2b"
+        )
+        gpu_fn = lambda_.Function(
+            self,
+            "Gpu",
+            function_name="lachesis-gpu",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            handler="gpu.handler",
+            code=code,
+            timeout=cdk.Duration.seconds(15),
+            memory_size=128,
+            environment={
+                **common_env,
+                "DECIDER_COMPONENT": "lachesis-decider-2b",
+                "TRY_DAILY_CAP": "100",
+                "TRY_IP_DAILY_CAP": "5",
+            },
+        )
+        table.grant(gpu_fn, "dynamodb:UpdateItem")
+        foundation.key.grant_encrypt_decrypt(gpu_fn)
+        gpu_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "sagemaker:DescribeInferenceComponent",
+                    "sagemaker:UpdateInferenceComponentRuntimeConfig",
+                ],
+                resources=[component_arn],
+            )
+        )
+
         api = apigw.CfnApi(
             self,
             "ApprovalsApi",
@@ -207,17 +242,27 @@ class ApprovalsStack(cdk.Stack):
             integration_uri=api_fn.function_arn,
             payload_format_version="2.0",
         )
+        gpu_integration = apigw.CfnIntegration(
+            self,
+            "GpuIntegration",
+            api_id=api.attr_api_id,
+            integration_type="AWS_PROXY",
+            integration_uri=gpu_fn.function_arn,
+            payload_format_version="2.0",
+        )
         routes = (
-            ("GET /approvals", "JWT"),
-            ("GET /approvals/{id}", "JWT"),
-            ("POST /approvals/{id}/decision", "JWT"),
-            ("POST /approvals/start", "JWT"),
-            ("POST /try", "NONE"),
-            ("GET /try/{token}", "NONE"),
-            ("POST /try/{token}/decision", "NONE"),
+            ("GET /approvals", "JWT", integration),
+            ("GET /approvals/{id}", "JWT", integration),
+            ("POST /approvals/{id}/decision", "JWT", integration),
+            ("POST /approvals/start", "JWT", integration),
+            ("POST /try", "NONE", integration),
+            ("GET /try/{token}", "NONE", integration),
+            ("POST /try/{token}/decision", "NONE", integration),
+            ("GET /status", "NONE", gpu_integration),
+            ("POST /wake", "NONE", gpu_integration),
         )
         route_resources = []
-        for route_key, auth_type in routes:
+        for route_key, auth_type, route_integration in routes:
             slug = "".join(
                 part.title()
                 for part in route_key.replace("/", " ")
@@ -230,11 +275,11 @@ class ApprovalsStack(cdk.Stack):
                 "Route" + slug,
                 api_id=api.attr_api_id,
                 route_key=route_key,
-                target=f"integrations/{integration.attr_integration_id}",
+                target=f"integrations/{route_integration.attr_integration_id}",
                 authorization_type=auth_type,
                 authorizer_id=authorizer.attr_authorizer_id if auth_type == "JWT" else None,
             )
-            route.node.add_dependency(integration)
+            route.node.add_dependency(route_integration)
             route_resources.append(route)
         stage = apigw.CfnStage(
             self,
@@ -250,7 +295,10 @@ class ApprovalsStack(cdk.Stack):
         # ThrottlingBurstLimit / ThrottlingRateLimit verbatim.
         stage.add_property_override(
             "RouteSettings",
-            {"POST /try": {"ThrottlingRateLimit": 0.2, "ThrottlingBurstLimit": 2}},
+            {
+                "POST /try": {"ThrottlingRateLimit": 0.2, "ThrottlingBurstLimit": 2},
+                "POST /wake": {"ThrottlingRateLimit": 0.2, "ThrottlingBurstLimit": 2},
+            },
         )
         # ApiGateway validates RouteSettings against existing routes at
         # stage creation ("Unable to find Route by key POST /try", deploy
@@ -262,6 +310,14 @@ class ApprovalsStack(cdk.Stack):
             "ApiInvokePermission",
             action="lambda:InvokeFunction",
             function_name=api_fn.function_name,
+            principal="apigateway.amazonaws.com",
+            source_arn=f"arn:aws:execute-api:eu-west-1:{self.account}:{api.attr_api_id}/*",
+        )
+        lambda_.CfnPermission(
+            self,
+            "GpuInvokePermission",
+            action="lambda:InvokeFunction",
+            function_name=gpu_fn.function_name,
             principal="apigateway.amazonaws.com",
             source_arn=f"arn:aws:execute-api:eu-west-1:{self.account}:{api.attr_api_id}/*",
         )
