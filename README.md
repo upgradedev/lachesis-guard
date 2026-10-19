@@ -38,7 +38,7 @@ model.
 
 Built for the Agent Experience Hackathon: Strands Decider on AWS Builder Center, pattern `#guardrails`.
 
-**Lachesis is never the gate.** Decider only measures. The gate is the
+**The model is never the gate.** Decider only measures. The gate is the
 deterministic code around it: two pre-checks that never call the model
 (safe reads proceed, secret-shaped arguments pause), and a small policy
 table that maps the model's answers to Proceed, Guide, Confirm or Deny.
