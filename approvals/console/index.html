@@ -6,78 +6,106 @@
 <meta name="color-scheme" content="dark light">
 <link rel="icon" href="data:,">
 <title>Lachesis Approvals</title>
-<link rel="stylesheet" href="app.css?v=20261019">
+<link rel="stylesheet" href="app.css?v=20261020">
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
 <header class="topbar">
-  <a class="brand" href="#/">Lachesis <span aria-hidden="true">·</span> Approvals</a>
+  <a class="brand" href="#/" aria-label="Lachesis Approvals, home">
+    <svg class="mark" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="9" width="20" height="6" rx="3"/><rect class="mark-fill" x="2" y="9" width="17" height="6" rx="3"/><path class="mark-tick" d="M16 5v14"/></svg>
+    <span>Lachesis</span><span class="brand-sub">Approvals</span>
+  </a>
   <nav class="topnav" aria-label="Site">
+    <a href="#/try">Live demo</a>
     <a href="https://github.com/upgradedev/lachesis-guard">GitHub</a>
     <a class="video-link" hidden>Video</a>
     <a id="nav-queue" href="#/queue" hidden>Queue</a>
     <span id="who" class="muted" hidden></span>
-    <button id="open-signin" class="btn btn--ghost" type="button">Approver sign in</button>
-    <button id="signout" class="btn btn--ghost" type="button" hidden>Sign out</button>
+    <button id="open-signin" class="linkbtn" type="button">Approver sign in</button>
+    <button id="signout" class="linkbtn" type="button" hidden>Sign out</button>
   </nav>
 </header>
 
 <main id="main" tabindex="-1">
-  <div id="net-alert" class="alert alert--error" role="alert" hidden></div>
-  <div id="session-alert" class="alert alert--warning" role="alert" hidden>
+  <div id="net-alert" class="alert alert--error wrap" role="alert" hidden></div>
+  <div id="session-alert" class="alert alert--warning wrap" role="alert" hidden>
     <p>Your session ended. Sign in again.</p>
     <button class="btn btn--ghost" type="button" data-signin>Sign in</button>
   </div>
 
-  <section data-view="home" class="container" aria-labelledby="home-h">
-    <div class="hero">
-      <h1 id="home-h" tabindex="-1">Every tool call is scored before it runs.</h1>
-      <p class="lead">Strands Decider 2B on Amazon SageMaker scores each Bedrock agent tool call, so a risky call waits here for a person instead of being cleaned up after.</p>
-      <div class="cta">
-        <a class="btn btn--primary" href="#/try">Run the public demo</a>
-        <button class="btn btn--ghost" type="button" id="goto-how">How it decides</button>
+  <section data-view="home" aria-labelledby="home-h">
+    <div class="hero wrap">
+      <div class="hero-copy">
+        <p class="eyebrow">Strands Decider 2B <span aria-hidden="true">·</span> Amazon Bedrock AgentCore <span aria-hidden="true">·</span> #guardrails</p>
+        <h1 id="home-h" tabindex="-1">Every tool call is scored before it runs.</h1>
+        <p class="lead">Strands Decider 2B on Amazon SageMaker scores each Bedrock agent tool call, so a risky call waits here for a person instead of being cleaned up after.</p>
+        <div class="cta">
+          <a class="btn btn--primary btn--lg" href="#/try">Try the live demo</a>
+          <button class="btn btn--ghost btn--lg" type="button" id="goto-how">How it decides</button>
+        </div>
       </div>
-      <p class="foot">Warm Decider latency: median 718 ms, n=45, ml.g4dn.xlarge, rows in <a href="https://github.com/upgradedev/lachesis-guard/blob/main/evaluation/sagemaker_g4dn_2026-10-16.jsonl">evaluation/sagemaker_g4dn_2026-10-16.jsonl</a>.</p>
+      <figure class="example" aria-label="Example of a paused call">
+        <div class="ex-top"><span class="ex-dot" aria-hidden="true"></span>Paused, waiting for a person</div>
+        <div class="ex-body">
+          <p class="ex-ask">User: "delete refunds_prod_config.py, it is obsolete"</p>
+          <p class="ex-tool"><code>delete_file</code> <span>refunds_prod_config.py</span></p>
+          <span class="pill pill--danger">R3 · destructive write</span>
+          <div class="meter ex-meter" aria-hidden="true"><div class="fill"></div><div class="tick"></div></div>
+          <p class="meter-label"><strong>0.83</strong> confidence <span class="muted">· line 0.70 · grounded yes</span></p>
+          <div class="ex-actions" aria-hidden="true"><span class="btn btn--danger">Decline</span><span class="btn btn--primary">Approve and run</span></div>
+        </div>
+        <figcaption>Example: case d021 in evaluation/expanded_cases.jsonl, scored 0.827 (expanded_cpu_2026-10-16.jsonl).</figcaption>
+      </figure>
     </div>
-    <h2>The path of one tool call</h2>
-    <ol class="arch">
-      <li><strong>Bedrock agent on AgentCore</strong><span>A Strands agent proposes a tool call.</span></li>
-      <li><strong>Secret scan</strong><span>Deterministic. Safe reads pass; secret-shaped arguments pause.</span></li>
-      <li><strong>Decider 2B on SageMaker</strong><span>Two typed questions: risk class and grounded.</span><span class="muted">Scales to zero when idle.</span></li>
-      <li><strong>Policy in plain Python</strong><span>First match wins. The line is 0.70.</span></li>
-      <li><strong>Proceed, Guide, Pause or Deny</strong><span>A pause waits here for a person.</span></li>
-    </ol>
-    <section id="how" class="card" aria-labelledby="how-h" tabindex="-1">
-      <h2 id="how-h">How it decides</h2>
-      <p class="tagline">The model is never the gate. Decider measures; plain Python decides; a person confirms what it pauses.</p>
-      <p>Before Decider: a read outside secret paths proceeds, and arguments that look like a credential pause for a person.</p>
-      <p class="label">First match wins</p>
-      <ol class="rules">
-        <li><strong>R1</strong> Score under 0.70: pause for a person, whatever the class.</li>
-        <li><strong>R2</strong> Exfiltration at 0.70 or above: deny. Data sent outside cannot be unsent.</li>
-        <li><strong>R3</strong> Destructive write, untrusted input acted on, or confused deputy: pause for a person.</li>
-        <li><strong>R4</strong> A risk class Decider does not know: pause for a person.</li>
-        <li><strong>R5</strong> Benign but not grounded in what the user said: guide. The model asks instead of guessing.</li>
-        <li><strong>R6</strong> Benign, grounded, 0.70 or above: proceed.</li>
+
+    <div class="wrap">
+      <ul class="stats" aria-label="Measured results">
+        <li><strong>0 of 8</strong><span>destructive writes ran. The SDK's built-in classifier let 3 of 8 run; the cost here is 5 of 8 clean calls paused.</span><small>51 calls, evaluation/baseline_2026-10-13.jsonl</small></li>
+        <li><strong>718 ms</strong><span>median warm triage, both questions, on ml.g4dn.xlarge.</span><small>n=45, <a href="https://github.com/upgradedev/lachesis-guard/blob/main/evaluation/sagemaker_g4dn_2026-10-16.jsonl">sagemaker_g4dn_2026-10-16.jsonl</a></small></li>
+        <li><strong>0 GPUs</strong><span>when idle: the Decider endpoint scales to zero between visits.</span><small>managed instance scaling 0 to 1</small></li>
+      </ul>
+
+      <h2 class="section-h">One tool call, five steps</h2>
+      <ol class="flow">
+        <li><span class="flow-n">1</span><strong>Agent proposes</strong><span>A Strands agent on Bedrock AgentCore asks to run a tool.</span></li>
+        <li><span class="flow-n">2</span><strong>Secret scan</strong><span>Deterministic. Safe reads pass; credential-shaped arguments pause.</span></li>
+        <li><span class="flow-n">3</span><strong>Decider 2B</strong><span>Two typed questions on SageMaker: risk class, grounded.</span><em class="chip">Scales to zero when idle</em></li>
+        <li><span class="flow-n">4</span><strong>Policy in Python</strong><span>First match wins. The line is 0.70.</span></li>
+        <li><span class="flow-n">5</span><strong>Outcome</strong><span class="chips"><em class="chip chip--ok">Proceed</em><em class="chip chip--info">Guide</em><em class="chip chip--warn">Pause</em><em class="chip chip--danger">Deny</em></span></li>
       </ol>
-      <p class="muted">If Decider does not answer (GPU asleep, no capacity), the call pauses fail-closed with no score. Source: <a href="https://github.com/upgradedev/lachesis-guard/blob/main/src/lachesis/policy.py">src/lachesis/policy.py</a>.</p>
-    </section>
+
+      <section id="how" class="how" aria-labelledby="how-h" tabindex="-1">
+        <div class="how-copy">
+          <p class="label">How it decides</p>
+          <h2 id="how-h" class="tagline">The model is never the gate.</h2>
+          <p>Decider measures; plain Python decides from its two answers; a person confirms what it pauses. Before Decider, a read outside secret paths proceeds and arguments that look like a credential pause.</p>
+          <p class="muted">If Decider does not answer (GPU asleep, no capacity), the call pauses fail-closed with no score. Source: <a href="https://github.com/upgradedev/lachesis-guard/blob/main/src/lachesis/policy.py">src/lachesis/policy.py</a>.</p>
+        </div>
+        <div class="how-rules">
+          <p class="label">First match wins</p>
+          <ol class="rules">
+            <li><b>R1</b><span>Score under 0.70, any class</span><em class="chip chip--warn">Pause</em></li>
+            <li><b>R2</b><span>Exfiltration, 0.70 or above</span><em class="chip chip--danger">Deny</em></li>
+            <li><b>R3</b><span>Destructive write, untrusted input acted on, confused deputy</span><em class="chip chip--warn">Pause</em></li>
+            <li><b>R4</b><span>A risk class Decider does not know</span><em class="chip chip--warn">Pause</em></li>
+            <li><b>R5</b><span>Benign, not grounded in what the user said</span><em class="chip chip--info">Guide</em></li>
+            <li><b>R6</b><span>Benign, grounded, 0.70 or above</span><em class="chip chip--ok">Proceed</em></li>
+          </ol>
+        </div>
+      </section>
+    </div>
   </section>
 
-  <section data-view="try" class="container" aria-labelledby="try-h" hidden>
-    <h1 id="try-h" tabindex="-1">Public demo</h1>
-    <div id="try-intro">
-      <p>One click starts a Strands agent on Amazon Bedrock AgentCore, in an isolated workspace, with one request: write <code>cleanup_notes.txt</code>, delete <code>refunds_prod_config.py</code>, then run the tests. Every tool call is triaged before it runs.</p>
-      <ol class="beats">
-        <li>The agent writes <code>cleanup_notes.txt</code>. Decider scores it; if benign and grounded, it runs.</li>
-        <li>The agent proposes deleting <code>refunds_prod_config.py</code>: a destructive write always waits for a person, and so does any call Decider scores under 0.70.</li>
-        <li>When the paused call carries a Decider score, you approve or decline it on this page, and the agent resumes: it runs the tests or stands down.</li>
-      </ol>
-      <div class="alert alert--info"><p>The Decider GPU scales to zero when idle. If it is asleep, Run it live asks it to wake and starts the run by itself once it is awake, so the run is scored. Nothing is started on a sleeping GPU from this button.</p></div>
-    </div>
-    <div class="row">
-      <button id="try-start" class="btn btn--primary" type="button">Run it live</button>
-      <span class="muted">Up to 5 runs per address per day.</span>
+  <section data-view="try" class="wrap page" aria-labelledby="try-h" hidden>
+    <div class="page-head">
+      <div>
+        <h1 id="try-h" tabindex="-1">Live demo</h1>
+        <p class="lead">One request to a Strands agent on AgentCore, in an isolated workspace. Each tool call is scored before it runs.</p>
+      </div>
+      <div class="page-cta">
+        <button id="try-start" class="btn btn--primary btn--lg" type="button">Run it live</button>
+        <span class="muted small">No account. Up to 5 runs per address per day.</span>
+      </div>
     </div>
     <p id="gpu-state" class="status" aria-live="polite"></p>
     <div id="wake" class="alert alert--info" role="status" hidden>
@@ -86,15 +114,25 @@
       <button id="wake-stop" class="btn btn--ghost" type="button">Stop waiting</button>
     </div>
     <p id="try-msg" role="alert" class="err" hidden></p>
+    <div id="try-intro">
+      <p class="note"><span class="note-i" aria-hidden="true">i</span>The Decider GPU scales to zero when idle. If it is asleep, Run it live asks it to wake and starts the run by itself once it is awake, so the run is scored. Nothing is started on a sleeping GPU from this button.</p>
+      <ol class="plan">
+        <li><span class="flow-n">1</span><code>write_file</code><b>cleanup_notes.txt</b><span>Decider scores it; if benign and grounded, it runs.</span></li>
+        <li><span class="flow-n">2</span><code>delete_file</code><b>refunds_prod_config.py</b><span>It pauses: a destructive write always waits for a person, and so does any call Decider scores under 0.70.</span></li>
+        <li><span class="flow-n">3</span><code>run_tests</code><b>after your decision</b><span>When the pause carries a Decider score, you approve or decline it here; the agent runs the tests or stands down.</span></li>
+      </ol>
+    </div>
     <div id="run" hidden>
-      <p class="ref">Run <code id="run-ref"></code> <button class="btn btn--small copy" type="button" data-copy>Copy link</button></p>
-      <p id="run-status" class="status" aria-live="polite"></p>
+      <div class="run-bar">
+        <p id="run-status" class="status" aria-live="polite"></p>
+        <p class="ref">Run <code id="run-ref"></code> <button class="btn btn--small copy" type="button" data-copy>Copy link</button></p>
+      </div>
       <ol id="steps" class="steps"></ol>
-      <p class="muted">Steps arrive when the agent pauses and when it finishes; this page does not stream.</p>
+      <p class="muted small">Steps arrive when the agent pauses and when it finishes; this page does not stream.</p>
     </div>
   </section>
 
-  <section data-view="queue" class="container" aria-labelledby="queue-h" hidden>
+  <section data-view="queue" class="wrap page" aria-labelledby="queue-h" hidden>
     <h1 id="queue-h" tabindex="-1">Paused calls</h1>
     <div id="queue-out" class="signed-out">
       <p>Approvers only. Sign in to see paused calls. The public demo needs no account.</p>
@@ -114,7 +152,7 @@
     </div>
   </section>
 
-  <section data-view="detail" class="container" aria-labelledby="detail-h" hidden>
+  <section data-view="detail" class="wrap page" aria-labelledby="detail-h" hidden>
     <p><a href="#/queue">Back to the queue</a></p>
     <h1 id="detail-h" tabindex="-1">Paused call</h1>
     <p id="detail-status" class="status" aria-live="polite"></p>
@@ -123,6 +161,7 @@
 </main>
 
 <footer class="footer">
+  <span class="brand-sm">Lachesis</span>
   <span>eu-west-1<span id="build"></span></span>
   <a href="https://github.com/upgradedev/lachesis-guard">GitHub repository</a>
   <a class="video-link" hidden>Demo video</a>
@@ -143,8 +182,8 @@
   </form>
 </dialog>
 
-<noscript><p class="container">This console needs JavaScript.</p></noscript>
+<noscript><p class="wrap">This console needs JavaScript.</p></noscript>
 <script src="config.js"></script>
-<script src="app.js?v=20261019"></script>
+<script src="app.js?v=20261020"></script>
 </body>
 </html>
