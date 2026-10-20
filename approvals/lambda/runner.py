@@ -321,10 +321,14 @@ def _quietly(command, *args) -> bool:
 
 
 def sweep(context=None) -> dict:
+    # Every status is read oldest first, every page of it
+    # (common.list_by_status_oldest), so the rows due longest are handled
+    # first and a deferred expiry resume is always one of the newest.
+    #
     # Rows whose start never reported back sit in STARTING; anything
     # older than STARTING_TIMEOUT_S there is terminal.
     closed_starting = 0
-    for item in common.list_by_status("STARTING", limit=50):
+    for item in common.list_by_status_oldest("STARTING"):
         if int(time.time()) - int(item.get("created_ts", 0)) < STARTING_TIMEOUT_S:
             continue
         run = domain.Run.from_item(item)
@@ -336,7 +340,7 @@ def sweep(context=None) -> dict:
     # have run: after twenty minutes the row ends ERROR, never PENDING,
     # where a person could decide it a second time.
     rescued = 0
-    for item in common.list_by_status("RESUMING", limit=50):
+    for item in common.list_by_status_oldest("RESUMING"):
         if int(time.time()) - int(item.get("resuming_ts", 0)) < RESUMING_TIMEOUT_S:
             continue
         run = domain.Run.from_item(item)
@@ -349,7 +353,7 @@ def sweep(context=None) -> dict:
     # APPROVED or DECLINED, which nothing else moves: hand it over again.
     redispatched = 0
     for status in (domain.APPROVED, domain.DECLINED):
-        for item in common.list_by_status(status, limit=50):
+        for item in common.list_by_status_oldest(status):
             if int(time.time()) - _decided_ts(item) < REDISPATCH_AFTER_S:
                 continue
             try:
@@ -360,7 +364,7 @@ def sweep(context=None) -> dict:
 
     expired = [
         item
-        for item in common.list_by_status("PENDING", limit=100)
+        for item in common.list_by_status_oldest("PENDING")
         if int(item.get("expires_ts", 0)) < int(time.time())
     ]
     closed_try = 0
