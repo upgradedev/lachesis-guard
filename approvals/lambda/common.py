@@ -19,11 +19,20 @@ One DynamoDB table, one row per approval:
     result_text         agent's final text after a resume; on ERROR,
                         "<TypeName>: <detail>" (only TypeName is public)
     lane                "approval" | "try"
+    version             per-run integer, +1 per committed command
+    pause_seq           how many times the run has paused
+    event_seq           seq of the run's last event in lachesis-run-events
+    claimed_request_id  Lambda request id of the runner that claimed it
+    resumed_decision    APPROVED | DECLINED | "" while RESUMING
 
-Every state change is a conditional write on the expected current
-status: a repeat decision gets 409, a duplicate resume event resumes
-once, and an expired row is resumed with "no" by the sweeper. GET
-never approves.
+The row is the Run aggregate of approval/domain.py. Every state change
+is one command of approval/service.py, written by the Unit of Work
+(approval/uow.py) as one TransactWriteItems conditioned on the status
+and version the run was loaded at, together with its domain events: a
+repeat decision gets 409, a duplicate resume event resumes once, a
+duplicate start event is claimed once, and an expired row is resumed
+with "no" by the sweeper. This module keeps the reads, the agent client
+and the public view. GET never approves.
 """
 
 from __future__ import annotations
@@ -33,12 +42,11 @@ import json
 import os
 import re
 import secrets
-import time
 
 import boto3
+from approval.domain import error_label
 from botocore.config import Config
 from botocore.exceptions import (
-    ClientError,
     ConnectTimeoutError,
     EndpointConnectionError,
     NoCredentialsError,
@@ -52,8 +60,14 @@ TTL_SECONDS = int(os.environ.get("APPROVAL_TTL_SECONDS", "1800"))
 TRY_DAILY_CAP = int(os.environ.get("TRY_DAILY_CAP", "100"))
 TRY_IP_DAILY_CAP = int(os.environ.get("TRY_IP_DAILY_CAP", "5"))
 
+EVENTS_TABLE = os.environ.get("RUN_EVENTS_TABLE", "lachesis-run-events")
+
 _ddb = boto3.resource("dynamodb", region_name=REGION)
 _table = _ddb.Table(TABLE)
+# The resource's client: TransactWriteItems with plain Python values
+# (approval/uow.py). Its high-level layer serializes them; floats are
+# refused, so the Unit of Work converts them to Decimal.
+_client = _ddb.meta.client
 
 
 def now_iso() -> str:
@@ -68,77 +82,9 @@ def new_session_id() -> str:
     return "lachesis-" + secrets.token_urlsafe(24)  # 41 chars, >= 33
 
 
-def put_pending(approval_id: str, session_id: str, interrupts: list, lane: str) -> dict:
-    created = time.time()
-    card = {
-        "reason": interrupts[0].get("reason", "") if interrupts else "",
-        "created_at": now_iso(),
-        "expires_at": datetime.datetime.fromtimestamp(
-            created + TTL_SECONDS, datetime.timezone.utc
-        ).isoformat(timespec="seconds"),
-    }
-    item = {
-        "approval_id": approval_id,
-        "session_id": session_id,
-        "status": "PENDING",
-        "lane": lane,
-        "card": json.dumps(card),
-        "interrupts": json.dumps(interrupts),
-        "created_ts": int(created),
-        "expires_ts": int(created + TTL_SECONDS),
-        "ttl": int(created + TTL_SECONDS + 86400),
-    }
-    _table.put_item(Item=item, ConditionExpression="attribute_not_exists(approval_id)")
-    return item
-
-
-def create_row(approval_id: str, session_id: str, lane: str) -> dict:
-    """The STARTING row written before the agent is invoked, so callers
-    can return the token at once and poll for the outcome."""
-    created = int(time.time())
-    item = {
-        "approval_id": approval_id,
-        "session_id": session_id,
-        "status": "STARTING",
-        "lane": lane,
-        "card": "{}",
-        "interrupts": "[]",
-        "created_ts": created,
-        "expires_ts": created + TTL_SECONDS,
-        "ttl": created + TTL_SECONDS + 86400,
-    }
-    _table.put_item(Item=item, ConditionExpression="attribute_not_exists(approval_id)")
-    return item
-
-
 def get(approval_id: str) -> dict | None:
     response = _table.get_item(Key={"approval_id": approval_id})
     return response.get("Item")
-
-
-def transition(approval_id: str, expected: str, target: str, **fields) -> dict | None:
-    """Conditional status move; None when the row is not in `expected`."""
-    names = {"#s": "status"}
-    values = {":expected": expected, ":target": target}
-    sets = ["#s = :target"]
-    for index, (key, value) in enumerate(fields.items()):
-        names[f"#f{index}"] = key
-        values[f":v{index}"] = value
-        sets.append(f"#f{index} = :v{index}")
-    try:
-        response = _table.update_item(
-            Key={"approval_id": approval_id},
-            UpdateExpression="SET " + ", ".join(sets),
-            ConditionExpression="#s = :expected",
-            ExpressionAttributeNames=names,
-            ExpressionAttributeValues=values,
-            ReturnValues="ALL_NEW",
-        )
-    except ClientError as exc:
-        if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
-            return None
-        raise
-    return response["Attributes"]
 
 
 def list_by_status(status: str, limit: int = 50) -> list[dict]:
@@ -231,18 +177,6 @@ CARD_KEYS = (
 )
 STEP_KEYS = ("tool", "verdict", "risk", "confidence", "grounded", "latency_ms", "layer")
 DECISION_KEYS = ("decision", "decided_by_name", "at")
-_TYPE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.]{0,63}")
-
-
-def error_label(text: str) -> str:
-    """Only the exception type name of a stored error: the text before the
-    first colon, and only when it looks like an identifier."""
-    if not text:
-        return ""
-    prefix = str(text).split(":", 1)[0].strip()
-    return prefix if _TYPE_NAME.fullmatch(prefix) else "Error"
-
-
 def _public_card(raw: str) -> dict:
     try:
         card = json.loads(raw or "{}")

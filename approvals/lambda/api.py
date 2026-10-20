@@ -13,20 +13,24 @@ Authorization is checked here from the JWT claims the HTTP API's JWT
 authorizer already validated: membership in the `approvers` group.
 Anything else is 403. The approver is recorded by Cognito `sub` and
 username; an email never enters the record (the token carries none).
+
+This module is a thin adapter: every state change is a command of
+approval/service.py (one transaction each). A start writes the STARTING
+row, and on /try both daily counters, before it answers 202, so the
+token a caller polls always exists.
 """
 
 from __future__ import annotations
 
-import datetime
+import contextlib
 import json
 import os
 
 import boto3
 import common
-from botocore.exceptions import ClientError
+from approval import domain, service
 
 RUNNER_ARN = os.environ.get("RUNNER_ARN", "")
-COUNTER_TTL_SECONDS = 2 * 86400
 # The governed calls must be ones Decider has to judge (F2): no
 # secret-shaped string anywhere, so the deterministic scan stays silent.
 # The first call is a benign write whose content the prompt dictates
@@ -70,48 +74,6 @@ def _is_approver(event: dict) -> bool:
     return "approvers" in [token.strip() for token in tokens]
 
 
-def _counter_ok(key: str, cap: int) -> bool:
-    """One DynamoDB counter row caps a counter per UTC day.
-
-    The row carries a ttl two days out, set on its first write, so the
-    table's TTL removes it (and the visitor address in its key) once the
-    day it counts is over."""
-    import time as _time
-
-    table = common._table
-    try:
-        response = table.update_item(
-            Key={"approval_id": key},
-            UpdateExpression=(
-                "SET #c = if_not_exists(#c, :zero) + :one, #t = if_not_exists(#t, :ttl)"
-            ),
-            ConditionExpression="attribute_not_exists(#c) OR #c < :cap",
-            ExpressionAttributeNames={"#c": "count", "#t": "ttl"},
-            ExpressionAttributeValues={
-                ":zero": 0,
-                ":one": 1,
-                ":cap": cap,
-                ":ttl": int(_time.time()) + COUNTER_TTL_SECONDS,
-            },
-            ReturnValues="ALL_NEW",
-        )
-    except ClientError as exc:
-        if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
-            return False
-        raise
-    return int(response["Attributes"]["count"]) <= cap
-
-
-def _try_counter_ok(event: dict) -> bool:
-    day = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
-    source_ip = (
-        event.get("requestContext", {}).get("http", {}).get("sourceIp", "unknown")
-    )
-    if not _counter_ok(f"try-ip-{source_ip}-{day}", common.TRY_IP_DAILY_CAP):
-        return False
-    return _counter_ok(f"try-counter-{day}", common.TRY_DAILY_CAP)
-
-
 def _invoke_runner(payload: dict, asynchronous: bool) -> dict:
     client = boto3.client("lambda", region_name=common.REGION)
     response = client.invoke(
@@ -135,30 +97,53 @@ def _parse_body(event: dict) -> dict | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+def _error(exc: domain.DomainError, not_found: str = "") -> dict:
+    """A refused command as its HTTP answer; the message is public text."""
+    if isinstance(exc, domain.NotFound) and not_found:
+        return _response(exc.http_status, {"error": not_found})
+    return _response(exc.http_status, {"error": str(exc)})
+
+
+def _dispatch_start(run: domain.Run, prompt: str, id_key: str) -> dict:
+    """Hand a committed STARTING run to the runner. If the hand-off
+    itself fails, the run ends ERROR at once instead of sitting in
+    STARTING until the sweeper closes it."""
+    try:
+        _invoke_runner(
+            {"action": "start", "prompt": prompt, "approval_id": run.approval_id},
+            asynchronous=True,
+        )
+    except Exception as exc:
+        with contextlib.suppress(domain.Conflict):
+            service.record_failure(run, common.error_text(exc))
+        return _response(502, {"error": "the run could not be handed to the runner"})
+    return _response(202, {id_key: run.approval_id, "status": run.status})
+
+
+def _decision(event: dict) -> tuple[str | None, dict | None]:
+    """The decision in the body, or an error response."""
+    body = _parse_body(event)
+    if body is None:
+        return None, _response(400, {"error": "request body must be a JSON object"})
+    decision = body.get("decision")
+    if decision not in {"approve", "decline"}:
+        return None, _response(400, {"error": "decision must be approve or decline"})
+    return decision, None
+
+
 def handler(event, _context):
     route = event.get("routeKey", "")
     params = event.get("pathParameters") or {}
 
     if route == "POST /try":
-        if not _try_counter_ok(event):
-            return _response(
-                429,
-                {
-                    "error": "daily demo cap reached for this address or overall; "
-                    "the counters reset at 00:00 UTC"
-                },
-            )
-        token = common.new_approval_id()
-        _invoke_runner(
-            {
-                "action": "start",
-                "prompt": CANNED_PROMPT,
-                "lane": "try",
-                "approval_id": token,
-            },
-            asynchronous=True,
+        source_ip = (
+            event.get("requestContext", {}).get("http", {}).get("sourceIp", "unknown")
         )
-        return _response(202, {"token": token, "status": "STARTING"})
+        try:
+            run = service.start_try(source_ip)
+        except domain.CapReached as exc:
+            return _error(exc)
+        return _dispatch_start(run, CANNED_PROMPT, "token")
 
     if route == "GET /try/{token}":
         token = params.get("token", "")
@@ -173,41 +158,15 @@ def handler(event, _context):
         token = params.get("token", "")
         if not token:
             return _response(404, {"error": "unknown token"})
-        body = _parse_body(event)
-        if body is None:
-            return _response(400, {"error": "request body must be a JSON object"})
-        decision = body.get("decision")
-        if decision not in {"approve", "decline"}:
-            return _response(400, {"error": "decision must be approve or decline"})
-        item = common.get(token)
-        if item is None or item.get("lane") != "try":
-            return _response(404, {"error": "unknown token"})
-        import time as _time
-
-        if int(item.get("expires_ts", 0)) and int(item["expires_ts"]) < int(_time.time()):
-            return _response(409, {"error": "approval has expired"})
-        card = json.loads(item.get("card") or "{}")
-        if card.get("layer") == "unavailable":
-            return _response(
-                409,
-                {
-                    "error": "Decider GPU is cold (scale-to-zero); "
-                    "a fail-closed pause on the public lane cannot be resumed"
-                },
-            )
-        target = "APPROVED" if decision == "approve" else "DECLINED"
-        moved = common.transition(
-            token,
-            "PENDING",
-            target,
-            decided_by="try-token",
-            decided_by_name="try-visitor",
-            decided_at=common.now_iso(),
-        )
-        if moved is None:
-            return _response(409, {"error": "approval is no longer pending"})
+        decision, refused = _decision(event)
+        if refused:
+            return refused
+        try:
+            run = service.record_decision(token, "try", decision, "try-token", "try-visitor")
+        except domain.DomainError as exc:
+            return _error(exc, "unknown token")
         _invoke_runner({"action": "resume", "approval_id": token}, asynchronous=True)
-        return _response(202, {"token": token, "status": target})
+        return _response(202, {"token": token, "status": run.status})
 
     # Everything below needs an approver.
     if not _is_approver(event):
@@ -217,17 +176,8 @@ def handler(event, _context):
         body = _parse_body(event)
         if body is None:
             return _response(400, {"error": "request body must be a JSON object"})
-        token = common.new_approval_id()
-        _invoke_runner(
-            {
-                "action": "start",
-                "prompt": str(body.get("prompt") or CANNED_PROMPT),
-                "lane": "approval",
-                "approval_id": token,
-            },
-            asynchronous=True,
-        )
-        return _response(202, {"approval_id": token, "status": "STARTING"})
+        run = service.start_run("approval")
+        return _dispatch_start(run, str(body.get("prompt") or CANNED_PROMPT), "approval_id")
 
     if route == "GET /approvals":
         rows = [
@@ -245,32 +195,21 @@ def handler(event, _context):
 
     if route == "POST /approvals/{id}/decision":
         approval_id = params.get("id", "")
-        body = _parse_body(event)
-        if body is None:
-            return _response(400, {"error": "request body must be a JSON object"})
-        decision = body.get("decision")
-        if decision not in {"approve", "decline"}:
-            return _response(400, {"error": "decision must be approve or decline"})
-        item = common.get(approval_id)
-        if item is None or item.get("lane", "approval") != "approval":
-            return _response(404, {"error": "unknown approval"})
-        import time as _time
-
-        if int(item.get("expires_ts", 0)) and int(item["expires_ts"]) < int(_time.time()):
-            return _response(409, {"error": "approval has expired"})
-        target = "APPROVED" if decision == "approve" else "DECLINED"
+        decision, refused = _decision(event)
+        if refused:
+            return refused
         claims = _claims(event)
-        moved = common.transition(
-            approval_id,
-            "PENDING",
-            target,
-            decided_by=claims.get("sub", ""),
-            decided_by_name=claims.get("username", claims.get("cognito:username", "")),
-            decided_at=common.now_iso(),
-        )
-        if moved is None:
-            return _response(409, {"error": "approval is no longer pending"})
+        try:
+            run = service.record_decision(
+                approval_id,
+                "approval",
+                decision,
+                claims.get("sub", ""),
+                claims.get("username", claims.get("cognito:username", "")),
+            )
+        except domain.DomainError as exc:
+            return _error(exc, "unknown approval")
         _invoke_runner({"action": "resume", "approval_id": approval_id}, asynchronous=True)
-        return _response(202, {"approval_id": approval_id, "status": target})
+        return _response(202, {"approval_id": approval_id, "status": run.status})
 
     return _response(404, {"error": "unknown route"})

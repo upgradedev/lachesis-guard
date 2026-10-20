@@ -1,14 +1,20 @@
 """Approvals logic tests (B1 acceptance, offline): a repeat decision is
 refused, a non-approver gets 403, a duplicate resume resumes once, and
 the /try daily counter stops at the cap. DynamoDB is an in-memory fake
-implementing exactly the conditional writes common.py uses.
+(FakeDynamo) that evaluates the conditions the Unit of Work writes and
+applies a TransactWriteItems call all or nothing.
 """
 
 from __future__ import annotations
 
+import copy
 import importlib.util
 import json
+import re
 import sys
+import time
+from dataclasses import fields as dataclass_fields
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -24,77 +30,268 @@ LAMBDA_DIR = Path(__file__).resolve().parents[1] / "approvals" / "lambda"
 sys.path.insert(0, str(LAMBDA_DIR))
 
 
-class FakeTable:
-    def __init__(self):
-        self.items: dict[str, dict] = {}
+APPROVALS = "lachesis-approvals"
+EVENTS = "lachesis-run-events"
 
-    def put_item(self, Item, ConditionExpression=None):  # noqa: N803
-        key = Item["approval_id"]
-        if ConditionExpression and key in self.items:
+_TOKEN = re.compile(r"\s*(attribute_not_exists|attribute_exists|AND|OR|<>|[()=<]|#\w+|:\w+)")
+_ASSIGNMENT = re.compile(
+    r"(#\w+)\s*=\s*(?:if_not_exists\((#\w+),\s*(:\w+)\)(?:\s*\+\s*(:\w+))?|(:\w+))"
+)
+
+
+def _reject_floats(value):
+    """boto3's serializer refuses floats; so does this fake."""
+    if isinstance(value, float):
+        raise TypeError("Float types are not supported. Use Decimal types instead.")
+    if isinstance(value, dict):
+        for item in value.values():
+            _reject_floats(item)
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            _reject_floats(item)
+
+
+def _as_read(value):
+    """DynamoDB returns every number as Decimal."""
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, int):
+        return Decimal(value)
+    if isinstance(value, dict):
+        return {key: _as_read(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_as_read(item) for item in value]
+    return value
+
+
+def evaluate(expression, item, names, values):
+    """The condition grammar the Unit of Work and the counters use:
+    attribute_(not_)exists(#n), #n = :v, #n <> :v, #n < :v, AND, OR,
+    parentheses."""
+    tokens = []
+    position = 0
+    while position < len(expression):
+        match = _TOKEN.match(expression, position)
+        if not match:
+            if expression[position:].strip() == "":
+                break
+            raise ValueError(f"unsupported condition: {expression[position:]!r}")
+        tokens.append(match.group(1))
+        position = match.end()
+    item = item or {}
+
+    def operand(token):
+        if token.startswith("#"):
+            return item.get(names[token])
+        return values[token]
+
+    def factor(index):
+        token = tokens[index]
+        if token == "(":
+            result, index = disjunction(index + 1)
+            assert tokens[index] == ")"
+            return result, index + 1
+        if token in {"attribute_not_exists", "attribute_exists"}:
+            assert tokens[index + 1] == "(" and tokens[index + 3] == ")"
+            present = names[tokens[index + 2]] in item
+            return (present if token == "attribute_exists" else not present), index + 4
+        left, op, right = operand(token), tokens[index + 1], operand(tokens[index + 2])
+        if op == "=":
+            result = left is not None and left == right
+        elif op == "<>":
+            result = left != right
+        elif op == "<":
+            result = left is not None and left < right
+        else:
+            raise ValueError(op)
+        return result, index + 3
+
+    def conjunction(index):
+        result, index = factor(index)
+        while index < len(tokens) and tokens[index] == "AND":
+            right, index = factor(index + 1)
+            result = result and right
+        return result, index
+
+    def disjunction(index):
+        result, index = conjunction(index)
+        while index < len(tokens) and tokens[index] == "OR":
+            right, index = conjunction(index + 1)
+            result = result or right
+        return result, index
+
+    result, index = disjunction(0)
+    assert index == len(tokens), expression
+    return result
+
+
+def apply_update(item, expression, names, values):
+    assert expression.startswith("SET "), expression
+    found = _ASSIGNMENT.findall(expression)
+    assert found, expression
+    for target, source_name, default, increment, plain in found:
+        if plain:
+            item[names[target]] = copy.deepcopy(values[plain])
+            continue
+        current = item.get(names[source_name], values[default])
+        item[names[target]] = current + values[increment] if increment else current
+
+
+class FakeDynamo:
+    """Both tables, in memory. TransactWriteItems is all or nothing: every
+    condition is evaluated first, and on any failure nothing is applied
+    and the error carries CancellationReasons in request order, the way
+    DynamoDB reports them."""
+
+    def __init__(self):
+        self.tables = {APPROVALS: {}, EVENTS: {}}
+        self.transactions = []
+        self.inject = []  # reason-code lists to fail the next calls with
+
+    @staticmethod
+    def _key(table, key):
+        return (key["approval_id"], int(key["seq"])) if table == EVENTS else key["approval_id"]
+
+    def get_item(self, TableName, Key, ConsistentRead=False):  # noqa: N803
+        item = self.tables[TableName].get(self._key(TableName, Key))
+        return {"Item": _as_read(copy.deepcopy(item))} if item else {}
+
+    def transact_write_items(self, TransactItems):  # noqa: N803
+        _reject_floats(TransactItems)
+        self.transactions.append(copy.deepcopy(TransactItems))
+        if self.inject:
+            codes = self.inject.pop(0)
             raise ClientError(
-                {"Error": {"Code": "ConditionalCheckFailedException"}}, "PutItem"
+                {
+                    "Error": {"Code": "TransactionCanceledException"},
+                    "CancellationReasons": [{"Code": code} for code in codes],
+                },
+                "TransactWriteItems",
             )
-        self.items[key] = dict(Item)
+        touched, reasons, plans = set(), [], []
+        for entry in TransactItems:
+            (op, spec), = entry.items()
+            table = spec["TableName"]
+            key = self._key(table, spec["Item"] if op == "Put" else spec["Key"])
+            if (table, key) in touched:
+                raise ClientError(
+                    {"Error": {"Code": "ValidationException"}}, "TransactWriteItems"
+                )
+            touched.add((table, key))
+            current = self.tables[table].get(key)
+            condition = spec.get("ConditionExpression")
+            names = spec.get("ExpressionAttributeNames", {})
+            values = spec.get("ExpressionAttributeValues", {})
+            ok = condition is None or evaluate(condition, current, names, values)
+            reasons.append({"Code": "None" if ok else "ConditionalCheckFailed"})
+            plans.append((op, table, key, spec, current))
+        if any(reason["Code"] != "None" for reason in reasons):
+            raise ClientError(
+                {"Error": {"Code": "TransactionCanceledException"}, "CancellationReasons": reasons},
+                "TransactWriteItems",
+            )
+        for op, table, key, spec, current in plans:
+            if op == "Put":
+                self.tables[table][key] = copy.deepcopy(spec["Item"])
+            else:
+                item = copy.deepcopy(current) if current else dict(spec["Key"])
+                apply_update(
+                    item,
+                    spec["UpdateExpression"],
+                    spec.get("ExpressionAttributeNames", {}),
+                    spec.get("ExpressionAttributeValues", {}),
+                )
+                self.tables[table][key] = item
         return {}
+
+    def events_of(self, approval_id):
+        rows = [row for (aid, _), row in self.tables[EVENTS].items() if aid == approval_id]
+        return sorted(rows, key=lambda row: int(row["seq"]))
+
+
+class FakeTable:
+    """The lachesis-approvals view common.get and list_by_status read."""
+
+    def __init__(self, dynamo):
+        self.dynamo = dynamo
+        self.items = dynamo.tables[APPROVALS]
 
     def get_item(self, Key):  # noqa: N803
         item = self.items.get(Key["approval_id"])
-        return {"Item": dict(item)} if item else {}
-
-    def update_item(self, Key, UpdateExpression, ConditionExpression=None, **kwargs):  # noqa: N803
-        key = Key["approval_id"]
-        item = self.items.get(key)
-        values = kwargs.get("ExpressionAttributeValues", {})
-        names = kwargs.get("ExpressionAttributeNames", {})
-        if ConditionExpression == "#s = :expected" and (
-            item is None or item.get("status") != values[":expected"]
-        ):
-            raise ClientError(
-                {"Error": {"Code": "ConditionalCheckFailedException"}}, "UpdateItem"
-            )
-        if item is None:
-            item = {"approval_id": key}
-            self.items[key] = item
-        if "if_not_exists" in UpdateExpression:
-            current = int(item.get("count", 0))
-            over_cap = "attribute_not_exists(#c) OR #c < :cap" in (ConditionExpression or "")
-            if over_cap and current >= int(values[":cap"]):
-                raise ClientError(
-                    {"Error": {"Code": "ConditionalCheckFailedException"}},
-                    "UpdateItem",
-                )
-            item["count"] = current + 1
-            if "#t = if_not_exists(#t, :ttl)" in UpdateExpression:
-                item.setdefault(names["#t"], values[":ttl"])
-            return {"Attributes": dict(item)}
-        assignments = UpdateExpression.removeprefix("SET ").split(", ")
-        for assignment in assignments:
-            lhs, rhs = [part.strip() for part in assignment.split("=", 1)]
-            field = names.get(lhs, lhs)
-            item[field] = values[rhs]
-        return {"Attributes": dict(item)}
+        return {"Item": copy.deepcopy(item)} if item else {}
 
     def query(self, IndexName, KeyConditionExpression, **kwargs):  # noqa: N803
         status = kwargs["ExpressionAttributeValues"][":status"]
-        rows = [dict(i) for i in self.items.values() if i.get("status") == status]
+        rows = [
+            _as_read(copy.deepcopy(i)) for i in self.items.values() if i.get("status") == status
+        ]
         rows.sort(key=lambda i: int(i.get("created_ts", 0)), reverse=True)
         return {"Items": rows[: kwargs.get("Limit", 50)]}
 
 
 @pytest.fixture()
 def modules(monkeypatch):
-    table = FakeTable()
+    dynamo = FakeDynamo()
+    table = FakeTable(dynamo)
+    for name in [n for n in sys.modules if n == "approval" or n.startswith("approval.")]:
+        monkeypatch.delitem(sys.modules, name)
     spec = importlib.util.spec_from_file_location("common", LAMBDA_DIR / "common.py")
     common = importlib.util.module_from_spec(spec)
+    # The approval package imports `common`: it must be this instance.
+    monkeypatch.setitem(sys.modules, "common", common)
     spec.loader.exec_module(common)
     monkeypatch.setattr(common, "_table", table)
+    monkeypatch.setattr(common, "_client", dynamo)
     for name in ("api", "runner"):
         spec = importlib.util.spec_from_file_location(name, LAMBDA_DIR / f"{name}.py")
         module = importlib.util.module_from_spec(spec)
-        sys.modules[name] = module
+        monkeypatch.setitem(sys.modules, name, module)
         spec.loader.exec_module(module)
-        monkeypatch.setattr(module, "common", common)
+        assert module.common is common
+    assert sys.modules["approval.uow"].common is common
     return common, sys.modules["api"], sys.modules["runner"], table
+
+
+def _layer(name):
+    return sys.modules[f"approval.{name}"]
+
+
+def _create_row(common, approval_id, session_id, lane):
+    """A STARTING row as it was written before the Unit of Work: no
+    version, pause_seq or event_seq (the rows already in the table)."""
+    created = int(time.time())
+    common._table.items[approval_id] = {
+        "approval_id": approval_id,
+        "session_id": session_id,
+        "status": "STARTING",
+        "lane": lane,
+        "card": "{}",
+        "interrupts": "[]",
+        "created_ts": created,
+        "expires_ts": created + common.TTL_SECONDS,
+        "ttl": created + common.TTL_SECONDS + 86400,
+    }
+
+
+def _transition(common, approval_id, expected, target, **fields):
+    """Test setup only: force a row from `expected` to `target` in the
+    fake, without the Unit of Work (no version bump, no event)."""
+    item = common._table.items[approval_id]
+    assert item["status"] == expected, (approval_id, item["status"], expected)
+    item.update(copy.deepcopy(fields), status=target)
+    return dict(item)
+
+
+def _seed_starting(approval_id, lane="try"):
+    """A STARTING row written by the Unit of Work, as POST /try writes it."""
+    domain, work = _layer("domain"), _layer("uow")
+    run = domain.Run.request(approval_id, "s" * 40, lane, time.time(), 1800)
+    work.DynamoUnitOfWork().commit(run)
+
+
+def _start(runner, prompt, lane, approval_id, context=None):
+    _seed_starting(approval_id, lane)
+    return runner.start(prompt, approval_id, context=context)
 
 
 def _event(route, claims=None, body=None, params=None):
@@ -110,13 +307,26 @@ APPROVER = {"sub": "sub-1", "username": "owner", "cognito:groups": "approvers"}
 PLAIN_USER = {"sub": "sub-2", "username": "guest", "cognito:groups": ""}
 
 
-def test_create_and_transition_guard(modules):
-    common, _, _, table = modules
-    common.create_row("appr-1", "s" * 40, "approval")
-    common.transition("appr-1", "STARTING", "PENDING", interrupts="[]", card="{}")
-    moved = common.transition("appr-1", "PENDING", "APPROVED", decided_by="sub-1")
-    assert moved["status"] == "APPROVED"
-    assert common.transition("appr-1", "PENDING", "DECLINED") is None
+def test_transition_table_is_pinned(modules):
+    domain = _layer("domain")
+    assert {status: sorted(targets) for status, targets in domain.TRANSITIONS.items()} == {
+        "STARTING": ["DONE", "ERROR", "PENDING", "STARTING"],
+        "PENDING": ["APPROVED", "DECLINED", "EXPIRED", "RESUMING"],
+        "APPROVED": ["RESUMING"],
+        "DECLINED": ["RESUMING"],
+        "RESUMING": ["DONE", "ERROR", "EXPIRED", "PENDING", "REFUSED_DONE"],
+        "DONE": [],
+        "REFUSED_DONE": [],
+        "EXPIRED": [],
+        "ERROR": [],
+    }
+    assert set(domain.TRANSITIONS) == set(domain.STATUSES)
+    assert {"DONE", "REFUSED_DONE", "EXPIRED", "ERROR"} == domain.TERMINAL
+    run = domain.Run.from_item({"approval_id": "a", "status": "DONE"})
+    with pytest.raises(domain.InvalidTransition) as refused:
+        run.fail("ValueError: late")
+    assert refused.value.current == "DONE"
+    assert run.changes == {} and run.events == []
 
 
 def _decide(api, claims, decision, approval_id):
@@ -128,8 +338,8 @@ def _decide(api, claims, decision, approval_id):
 
 def test_decision_repeat_is_409_and_non_approver_403(modules, monkeypatch):
     common, api, _, _ = modules
-    common.create_row("appr-2", "s" * 40, "approval")
-    common.transition("appr-2", "STARTING", "PENDING", interrupts="[]", card="{}")
+    _create_row(common, "appr-2", "s" * 40, "approval")
+    _transition(common, "appr-2", "STARTING", "PENDING", interrupts="[]", card="{}")
     monkeypatch.setattr(api, "_invoke_runner", lambda payload, asynchronous: {})
     assert _decide(api, PLAIN_USER, "approve", "appr-2")["statusCode"] == 403
     assert _decide(api, APPROVER, "approve", "appr-2")["statusCode"] == 202
@@ -138,10 +348,10 @@ def test_decision_repeat_is_409_and_non_approver_403(modules, monkeypatch):
 
 def test_resume_only_once(modules, monkeypatch):
     common, _, runner, _ = modules
-    common.create_row("appr-3", "s" * 40, "approval")
+    _create_row(common, "appr-3", "s" * 40, "approval")
     interrupts = '[{"interruptId": "i1"}]'
-    common.transition("appr-3", "STARTING", "PENDING", interrupts=interrupts, card="{}")
-    common.transition("appr-3", "PENDING", "APPROVED", decided_by="sub-1")
+    _transition(common, "appr-3", "STARTING", "PENDING", interrupts=interrupts, card="{}")
+    _transition(common, "appr-3", "PENDING", "APPROVED", decided_by="sub-1")
     calls = []
     monkeypatch.setattr(
         common,
@@ -159,10 +369,10 @@ def test_resume_error_before_send_returns_row_to_pending(modules, monkeypatch):
     # go back to PENDING. This test used a RuntimeError before B0, which
     # proves nothing about the send; it now uses a pre-send error.
     common, _, runner, _ = modules
-    common.create_row("appr-4", "s" * 40, "approval")
+    _create_row(common, "appr-4", "s" * 40, "approval")
     interrupts = '[{"interruptId": "i1"}]'
-    common.transition("appr-4", "STARTING", "PENDING", interrupts=interrupts, card="{}")
-    common.transition("appr-4", "PENDING", "APPROVED", decided_by="sub-1")
+    _transition(common, "appr-4", "STARTING", "PENDING", interrupts=interrupts, card="{}")
+    _transition(common, "appr-4", "PENDING", "APPROVED", decided_by="sub-1")
 
     def _boom(session_id, payload, **kw):
         raise EndpointConnectionError(endpoint_url="https://agentcore.invalid")
@@ -204,7 +414,7 @@ def test_start_card_carries_decider_fields(modules, monkeypatch):
             "changed_files": ["cleanup_notes.txt"],
         },
     )
-    out = runner.start("prompt", "try", "appr-card")
+    out = _start(runner, "prompt", "try", "appr-card")
     assert out["status"] == "interrupt"
     import json
 
@@ -222,11 +432,11 @@ def test_start_card_carries_decider_fields(modules, monkeypatch):
 
 def test_resume_repause_card_keeps_decider_fields(modules, monkeypatch):
     common, _, runner, _ = modules
-    common.create_row("appr-5", "s" * 40, "approval")
+    _create_row(common, "appr-5", "s" * 40, "approval")
     common._table.items["appr-5"]["expires_ts"] = 100
     interrupts = '[{"interruptId": "i1"}]'
-    common.transition("appr-5", "STARTING", "PENDING", interrupts=interrupts, card="{}")
-    common.transition(
+    _transition(common, "appr-5", "STARTING", "PENDING", interrupts=interrupts, card="{}")
+    _transition(common, 
         "appr-5", "PENDING", "APPROVED", decided_by="sub-1", decided_by_name="owner"
     )
     monkeypatch.setattr(
@@ -273,8 +483,8 @@ def test_empty_try_token_is_404(modules):
 
 def test_expired_decision_is_409(modules, monkeypatch):
     common, api, _, _ = modules
-    common.create_row("appr-old", "s" * 40, "approval")
-    common.transition("appr-old", "STARTING", "PENDING", interrupts="[]", card="{}")
+    _create_row(common, "appr-old", "s" * 40, "approval")
+    _transition(common, "appr-old", "STARTING", "PENDING", interrupts="[]", card="{}")
     common._table.items["appr-old"]["expires_ts"] = 1
     monkeypatch.setattr(api, "_invoke_runner", lambda payload, asynchronous: {})
     out = _decide(api, APPROVER, "approve", "appr-old")
@@ -283,10 +493,10 @@ def test_expired_decision_is_409(modules, monkeypatch):
 
 def test_approver_queue_hides_try_rows(modules):
     common, api, _, _ = modules
-    common.create_row("appr-q1", "s" * 40, "approval")
-    common.transition("appr-q1", "STARTING", "PENDING", interrupts="[]", card="{}")
-    common.create_row("appr-q2", "s" * 40, "try")
-    common.transition("appr-q2", "STARTING", "PENDING", interrupts="[]", card="{}")
+    _create_row(common, "appr-q1", "s" * 40, "approval")
+    _transition(common, "appr-q1", "STARTING", "PENDING", interrupts="[]", card="{}")
+    _create_row(common, "appr-q2", "s" * 40, "try")
+    _transition(common, "appr-q2", "STARTING", "PENDING", interrupts="[]", card="{}")
     body = api.handler(_event("GET /approvals", APPROVER), None)
     import json
 
@@ -301,14 +511,14 @@ def test_start_failure_lands_in_error(modules, monkeypatch):
         raise RuntimeError("agent down")
 
     monkeypatch.setattr(common, "invoke_agent", _boom)
-    out = runner.start("prompt", "try", "appr-err")
+    out = _start(runner, "prompt", "try", "appr-err")
     assert out["status"] == "error"
     assert common.get("appr-err")["status"] == "ERROR"
 
 
 def test_sweeper_closes_stale_starting_and_caps_attempts(modules, monkeypatch):
     common, _, runner, _ = modules
-    common.create_row("appr-stale", "s" * 40, "try")
+    _create_row(common, "appr-stale", "s" * 40, "try")
     common._table.items["appr-stale"]["created_ts"] = 1
     monkeypatch.setattr(
         common, "invoke_agent", lambda s, p, **kw: {"status": "completed", "text": ""}
@@ -317,12 +527,14 @@ def test_sweeper_closes_stale_starting_and_caps_attempts(modules, monkeypatch):
     assert out["closed_starting"] == 1
     assert common.get("appr-stale")["status"] == "ERROR"
 
-    row = {"approval_id": "appr-x", "sweep_attempts": 2}
-    common.create_row("appr-x", "s" * 40, "approval")
-    common.transition("appr-x", "STARTING", "PENDING", interrupts="[]", card="{}")
-    common.transition("appr-x", "PENDING", "APPROVED")
-    common.transition("appr-x", "APPROVED", "RESUMING")
-    assert runner._attempt_failed(row) == "ERROR"
+    _create_row(common, "appr-x", "s" * 40, "approval")
+    _transition(common, "appr-x", "STARTING", "PENDING", interrupts="[]", card="{}")
+    _transition(common, "appr-x", "PENDING", "APPROVED")
+    _transition(
+        common, "appr-x", "APPROVED", "RESUMING", sweep_attempts=2, resumed_decision="APPROVED"
+    )
+    run = _layer("uow").DynamoUnitOfWork().get("appr-x")
+    assert _layer("service").resume_not_sent(run) == "ERROR"
     assert common.get("appr-x")["status"] == "ERROR"
 
 
@@ -341,8 +553,8 @@ def test_sweeper_expires_try_rows_without_waking_the_agent(modules, monkeypatch)
         common, "invoke_agent", lambda s, p, **kw: calls.append(p) or {"status": "completed"}
     )
     for aid, lane in (("appr-try-old", "try"), ("appr-appr-old", "approval")):
-        common.create_row(aid, "s" * 40, lane)
-        common.transition(aid, "STARTING", "PENDING", interrupts="[]", card="{}")
+        _create_row(common, aid, "s" * 40, lane)
+        _transition(common, aid, "STARTING", "PENDING", interrupts="[]", card="{}")
         common._table.items[aid]["expires_ts"] = 1
     out = runner.sweep()
     assert common.get("appr-try-old")["status"] == "EXPIRED"
@@ -473,23 +685,36 @@ def test_console_reason_parser_matches_confirm_prompt():
         assert phrase in message and phrase in js
 
 
+def _post_try(api, ip):
+    event = {"routeKey": "POST /try", "requestContext": {"http": {"sourceIp": ip}}}
+    return api.handler(event, None)
+
+
+CAP_TEXT = (
+    "daily demo cap reached for this address or overall; the counters reset at 00:00 UTC"
+)
+
+
 def test_try_counter_cap(modules, monkeypatch):
     common, api, _, _ = modules
+    monkeypatch.setattr(api, "_invoke_runner", lambda payload, asynchronous: {})
     monkeypatch.setattr(common, "TRY_DAILY_CAP", 2)
     monkeypatch.setattr(common, "TRY_IP_DAILY_CAP", 5)
-    event = {"requestContext": {"http": {"sourceIp": "203.0.113.7"}}}
-    assert api._try_counter_ok(event) is True
-    assert api._try_counter_ok(event) is True
-    assert api._try_counter_ok(event) is False
+    assert _post_try(api, "203.0.113.7")["statusCode"] == 202
+    assert _post_try(api, "203.0.113.7")["statusCode"] == 202
+    refused = _post_try(api, "203.0.113.7")
+    assert refused["statusCode"] == 429
+    assert json.loads(refused["body"]) == {"error": CAP_TEXT}
 
 
 def test_try_per_ip_cap(modules, monkeypatch):
     common, api, _, _ = modules
+    monkeypatch.setattr(api, "_invoke_runner", lambda payload, asynchronous: {})
     monkeypatch.setattr(common, "TRY_DAILY_CAP", 100)
     monkeypatch.setattr(common, "TRY_IP_DAILY_CAP", 1)
-    event = {"requestContext": {"http": {"sourceIp": "203.0.113.9"}}}
-    assert api._try_counter_ok(event) is True
-    assert api._try_counter_ok(event) is False
+    assert _post_try(api, "203.0.113.9")["statusCode"] == 202
+    assert _post_try(api, "203.0.113.9")["statusCode"] == 429
+    assert _post_try(api, "203.0.113.10")["statusCode"] == 202
 
 
 def test_malformed_json_body_returns_400(modules):
@@ -516,8 +741,8 @@ def test_try_decision_and_cross_lane_isolation(modules, monkeypatch):
         api, "_invoke_runner", lambda payload, asynchronous: invoked.append(payload)
     )
 
-    common.create_row("appr-try-warm", "s" * 40, "try")
-    common.transition(
+    _create_row(common, "appr-try-warm", "s" * 40, "try")
+    _transition(common, 
         "appr-try-warm",
         "STARTING",
         "PENDING",
@@ -553,8 +778,8 @@ def test_try_decision_and_cross_lane_isolation(modules, monkeypatch):
     assert res2["statusCode"] == 409
 
     # Cold GPU (layer == unavailable) on /try cannot be resumed publicly
-    common.create_row("appr-try-cold", "s" * 40, "try")
-    common.transition(
+    _create_row(common, "appr-try-cold", "s" * 40, "try")
+    _transition(common, 
         "appr-try-cold",
         "STARTING",
         "PENDING",
@@ -573,8 +798,8 @@ def test_try_decision_and_cross_lane_isolation(modules, monkeypatch):
     assert cold_res["statusCode"] == 409
 
     # /try/{token}/decision cannot touch an approval-lane row
-    common.create_row("appr-real", "s" * 40, "approval")
-    common.transition("appr-real", "STARTING", "PENDING", interrupts="[]", card="{}")
+    _create_row(common, "appr-real", "s" * 40, "approval")
+    _transition(common, "appr-real", "STARTING", "PENDING", interrupts="[]", card="{}")
     cross = api.handler(
         _event("POST /try/{token}/decision", {}, {"decision": "approve"}, {"token": "appr-real"}),
         None,
@@ -688,7 +913,7 @@ def test_start_records_agent_error_as_error_not_done(modules, monkeypatch, paylo
     # DONE, so an agent error body (HTTP 200) showed as "Finished".
     common, _, runner, _ = modules
     monkeypatch.setattr(common, "invoke_agent", lambda s, p, **kw: payload)
-    out = runner.start("prompt", "try", "appr-agent-err")
+    out = _start(runner, "prompt", "try", "appr-agent-err")
     assert out["status"] == "error"
     row = common.get("appr-agent-err")
     assert row["status"] == "ERROR"
@@ -696,11 +921,11 @@ def test_start_records_agent_error_as_error_not_done(modules, monkeypatch, paylo
 
 
 def _approved_row(common, approval_id, status="APPROVED", lane="approval"):
-    common.create_row(approval_id, "s" * 40, lane)
-    common.transition(
+    _create_row(common, approval_id, "s" * 40, lane)
+    _transition(common, 
         approval_id, "STARTING", "PENDING", interrupts='[{"interruptId": "i1"}]', card="{}"
     )
-    common.transition(
+    _transition(common, 
         approval_id,
         "PENDING",
         status,
@@ -794,7 +1019,7 @@ def test_pre_send_failures_are_capped(modules, monkeypatch):
     for expected in ("PENDING", "PENDING", "ERROR"):
         assert runner.resume("appr-r-cap")["current"] == expected
         if expected == "PENDING":
-            common.transition("appr-r-cap", "PENDING", "APPROVED")
+            _transition(common, "appr-r-cap", "PENDING", "APPROVED")
     assert common.get("appr-r-cap")["status"] == "ERROR"
 
 
@@ -827,7 +1052,7 @@ def test_sweeper_rescue_of_stale_resuming_ends_in_error(modules, monkeypatch):
     # PENDING, although its resume may already have run the paused call.
     common, _, runner, _ = modules
     _approved_row(common, "appr-stuck")
-    common.transition("appr-stuck", "APPROVED", "RESUMING", resuming_ts=1)
+    _transition(common, "appr-stuck", "APPROVED", "RESUMING", resuming_ts=1)
     calls = []
     monkeypatch.setattr(common, "invoke_agent", lambda s, p, **kw: calls.append(p) or {})
     out = runner.sweep()
@@ -839,8 +1064,8 @@ def test_sweeper_rescue_of_stale_resuming_ends_in_error(modules, monkeypatch):
 
 
 def _expired_pending(common, approval_id):
-    common.create_row(approval_id, "s" * 40, "approval")
-    common.transition(
+    _create_row(common, approval_id, "s" * 40, "approval")
+    _transition(common, 
         approval_id, "STARTING", "PENDING", interrupts='[{"interruptId": "i1"}]', card="{}"
     )
     common._table.items[approval_id]["expires_ts"] = 1
@@ -902,8 +1127,8 @@ def test_repause_keeps_every_decision(modules, monkeypatch):
 def test_try_decision_records_decided_at(modules, monkeypatch):
     common, api, _, _ = modules
     monkeypatch.setattr(api, "_invoke_runner", lambda payload, asynchronous: {})
-    common.create_row("appr-try-at", "s" * 40, "try")
-    common.transition(
+    _create_row(common, "appr-try-at", "s" * 40, "try")
+    _transition(common, 
         "appr-try-at", "STARTING", "PENDING", interrupts="[]", card=json.dumps({"layer": "decider"})
     )
     event = _event(
@@ -968,8 +1193,10 @@ def test_public_view_is_a_whitelist(modules):
 
 def test_try_get_returns_the_whitelisted_view(modules):
     common, api, _, _ = modules
-    common.create_row("appr-try-get", "s" * 40, "try")
-    common.transition("appr-try-get", "STARTING", "ERROR", result_text="ValueError: secret detail")
+    _create_row(common, "appr-try-get", "s" * 40, "try")
+    _transition(
+        common, "appr-try-get", "STARTING", "ERROR", result_text="ValueError: secret detail"
+    )
     out = api.handler(_event("GET /try/{token}", {}, None, {"token": "appr-try-get"}), None)
     body = json.loads(out["body"])
     assert body["result_text"] == "ValueError"
@@ -1037,8 +1264,8 @@ def test_expiry_after_a_repause_credits_nobody(modules, monkeypatch, lane, answe
     common, api, runner, _ = modules
     monkeypatch.setattr(api, "_invoke_runner", lambda payload, asynchronous: {})
     aid = "appr-exp-" + lane + "-" + final
-    common.create_row(aid, "s" * 40, lane)
-    common.transition(
+    _create_row(common, aid, "s" * 40, lane)
+    _transition(common, 
         aid,
         "STARTING",
         "PENDING",
@@ -1198,17 +1425,15 @@ def test_try_lane_reason_keeps_only_whitelisted_arguments(modules):
     assert common.public_view(plain)["card"]["reason"] == "plain reason"
 
 
-def test_try_counter_rows_carry_a_ttl(modules):
-    import time as _time
-
+def test_try_counter_rows_carry_a_ttl(modules, monkeypatch):
     _, api, _, table = modules
-    event = {"requestContext": {"http": {"sourceIp": "203.0.113.11"}}}
-    assert api._try_counter_ok(event) is True
+    monkeypatch.setattr(api, "_invoke_runner", lambda payload, asynchronous: {})
+    assert _post_try(api, "203.0.113.11")["statusCode"] == 202
     first = {key: row["ttl"] for key, row in table.items.items() if key.startswith("try-")}
     assert len(first) == 2
     for value in first.values():
-        assert 0 < value - _time.time() <= api.COUNTER_TTL_SECONDS
-    assert api._try_counter_ok(event) is True
+        assert 0 < value - time.time() <= _layer("service").COUNTER_TTL_SECONDS
+    assert _post_try(api, "203.0.113.11")["statusCode"] == 202
     assert {key: table.items[key]["ttl"] for key in first} == first
 
 
@@ -1239,7 +1464,11 @@ def test_agent_timeouts_are_explicit_and_follow_the_lambda_budget(modules, monke
     )
     _approved_row(common, "appr-budget")
     runner.handler({"action": "resume", "approval_id": "appr-budget"}, _Context(120_000))
-    runner.handler({"action": "start", "prompt": "p", "lane": "try"}, _Context(900_000))
+    _seed_starting("appr-budget-start")
+    runner.handler(
+        {"action": "start", "prompt": "p", "approval_id": "appr-budget-start"},
+        _Context(900_000),
+    )
     assert seen == [100, 840]
 
 
@@ -1270,8 +1499,8 @@ def test_sweeper_defers_expiry_resumes_without_lambda_time(modules, monkeypatch)
     calls = []
     monkeypatch.setattr(common, "invoke_agent", lambda s, p, **kw: calls.append(p) or {})
     for aid, lane in (("appr-late-try", "try"), ("appr-late-appr", "approval")):
-        common.create_row(aid, "s" * 40, lane)
-        common.transition(aid, "STARTING", "PENDING", interrupts="[]", card="{}")
+        _create_row(common, aid, "s" * 40, lane)
+        _transition(common, aid, "STARTING", "PENDING", interrupts="[]", card="{}")
         common._table.items[aid]["expires_ts"] = 1
     spec = importlib.util.spec_from_file_location("sweeper", LAMBDA_DIR / "sweeper.py")
     sweeper = importlib.util.module_from_spec(spec)
@@ -1318,8 +1547,357 @@ def test_start_retries_only_refusals_that_never_ran(
 
     monkeypatch.setattr(common, "invoke_agent", _invoke)
     monkeypatch.setattr(runner, "_sleep", slept.append)
-    out = runner.start("p", "try", "appr-start-retry")
+    out = _start(runner, "p", "try", "appr-start-retry")
     assert out["status"] == final
     assert len(calls) == calls_made and slept == sleeps
     expected_row = "DONE" if final == "completed" else "ERROR"
     assert common.get("appr-start-retry")["status"] == expected_row
+
+
+# --- B1: the Unit of Work -------------------------------------------------
+
+
+class _Lambda:
+    def __init__(self, request_id, remaining_ms=900_000):
+        self.aws_request_id = request_id
+        self.remaining_ms = remaining_ms
+
+    def get_remaining_time_in_millis(self):
+        return self.remaining_ms
+
+
+PAUSE_PAYLOAD = {
+    "status": "interrupt",
+    "interrupts": [
+        {
+            "interruptId": "int-secret-7",
+            "name": "lachesis-confirm",
+            "reason": "tool: delete_file\narguments:\n{\"path\": \"prod_secret.py\"}\n\nok?",
+        }
+    ],
+    "triage": [
+        {
+            "tool": "delete_file",
+            "risk": "destructive_write",
+            "confidence": 0.31,
+            "latency_ms": 187.4,
+            "layer": "decider",
+            "verdict": "confirm",
+        }
+    ],
+}
+
+
+def _events(table, approval_id):
+    return table.dynamo.events_of(approval_id)
+
+
+def test_post_try_commits_counters_row_and_event_in_one_transaction(modules, monkeypatch):
+    common, api, _, table = modules
+    seen = []
+
+    def _hand_off(payload, asynchronous):
+        # The row and its first event exist before the runner is invoked:
+        # a poll of the token can never 404 (the race B1 removes).
+        row = common.get(payload["approval_id"])
+        seen.append((payload, row["status"], len(_events(table, payload["approval_id"]))))
+        return {}
+
+    monkeypatch.setattr(api, "_invoke_runner", _hand_off)
+    out = _post_try(api, "198.51.100.4")
+    assert out["statusCode"] == 202
+    token = json.loads(out["body"])["token"]
+    assert json.loads(out["body"]) == {"token": token, "status": "STARTING"}
+    assert len(table.dynamo.transactions) == 1
+    ops = [next(iter(entry)) for entry in table.dynamo.transactions[0]]
+    assert ops == ["Update", "Update", "Put", "Put"]
+    assert seen == [
+        ({"action": "start", "prompt": api.CANNED_PROMPT, "approval_id": token}, "STARTING", 1)
+    ]
+    row = table.items[token]
+    assert row["version"] == 1 and row["event_seq"] == 1 and row["pause_seq"] == 0
+    assert row["lane"] == "try" and len(row["session_id"]) >= 33
+    [event] = _events(table, token)
+    assert event["event_type"] == "RunRequested" and event["seq"] == 1
+    assert event["event_id"] == token + "#1" and event["data"] == {"lane": "try"}
+    assert "198.51.100.4" not in json.dumps(event, default=str)
+
+
+def test_a_capped_start_consumes_nothing(modules, monkeypatch):
+    common, api, _, table = modules
+    monkeypatch.setattr(api, "_invoke_runner", lambda payload, asynchronous: {})
+    monkeypatch.setattr(common, "TRY_DAILY_CAP", 1)
+    monkeypatch.setattr(common, "TRY_IP_DAILY_CAP", 5)
+    assert _post_try(api, "198.51.100.1")["statusCode"] == 202
+    before = copy.deepcopy(table.dynamo.tables)
+    refused = _post_try(api, "198.51.100.2")
+    assert refused["statusCode"] == 429
+    assert json.loads(refused["body"]) == {"error": CAP_TEXT}
+    # The global cap refused the transaction, so the second address's
+    # counter, the row and the event were not written either.
+    assert table.dynamo.tables == before
+    assert not [key for key in table.items if key.startswith("try-ip-198.51.100.2")]
+
+
+def test_duplicate_start_delivery_is_a_noop(modules, monkeypatch):
+    common, _, runner, table = modules
+    calls = []
+    monkeypatch.setattr(
+        common,
+        "invoke_agent",
+        lambda s, p, **kw: calls.append(p) or {"status": "completed", "text": "ok"},
+    )
+    _seed_starting("appr-dup")
+    event = {"action": "start", "prompt": "p", "approval_id": "appr-dup"}
+    assert runner.handler(event, _Lambda("req-1"))["status"] == "completed"
+    # Lambda may deliver one async event twice; neither the same request
+    # id nor another one may run the agent again.
+    assert runner.handler(event, _Lambda("req-1")) == {"status": "noop", "approval_id": "appr-dup"}
+    assert runner.handler(event, _Lambda("req-2")) == {"status": "noop", "approval_id": "appr-dup"}
+    assert len(calls) == 1
+    assert table.items["appr-dup"]["claimed_request_id"] == "req-1"
+    assert [e["event_type"] for e in _events(table, "appr-dup")] == [
+        "RunRequested",
+        "RunClaimed",
+        "RunCompleted",
+    ]
+
+
+def test_concurrent_claims_let_exactly_one_runner_through(modules):
+    _, _, _, table = modules
+    work, domain, service = _layer("uow").DynamoUnitOfWork(), _layer("domain"), _layer("service")
+    _seed_starting("appr-race")
+    first, second = work.get("appr-race"), work.get("appr-race")
+    first.claim("req-a")
+    second.claim("req-b")
+    work.commit(first)
+    with pytest.raises(domain.Conflict):
+        work.commit(second)
+    assert table.items["appr-race"]["claimed_request_id"] == "req-a"
+    assert service.claim_run("appr-race", "req-c") is None
+    assert service.claim_run("appr-missing", "req-d") is None
+    # The claim condition names the attribute, besides status and version.
+    update = table.dynamo.transactions[1][0]["Update"]
+    names = update["ExpressionAttributeNames"]
+    assert "claimed_request_id" in names.values()
+    assert "attribute_not_exists" in update["ConditionExpression"]
+
+
+def test_a_start_without_a_written_row_never_invokes_the_agent(modules, monkeypatch):
+    common, _, runner, table = modules
+    calls = []
+    monkeypatch.setattr(common, "invoke_agent", lambda s, p, **kw: calls.append(p) or {})
+    assert runner.handler({"action": "start", "prompt": "p"}, None)["status"] == "noop"
+    assert runner.start("p", "appr-never-written")["status"] == "noop"
+    assert calls == [] and "appr-never-written" not in table.items
+
+
+def test_a_full_run_appends_contiguous_events(modules, monkeypatch):
+    common, api, runner, table = modules
+    monkeypatch.setattr(api, "_invoke_runner", lambda payload, asynchronous: {})
+    token = json.loads(_post_try(api, "198.51.100.8")["body"])["token"]
+    monkeypatch.setattr(common, "invoke_agent", lambda s, p, **kw: PAUSE_PAYLOAD)
+    assert runner.start("p", token, context=_Lambda("req-9"))["status"] == "interrupt"
+    decide = _event("POST /try/{token}/decision", {}, {"decision": "approve"}, {"token": token})
+    assert api.handler(decide, None)["statusCode"] == 202
+    monkeypatch.setattr(common, "invoke_agent", lambda s, p, **kw: PAUSE_PAYLOAD)
+    assert runner.resume(token)["status"] == "interrupt-again"
+    assert api.handler(
+        _event("POST /try/{token}/decision", {}, {"decision": "decline"}, {"token": token}), None
+    )["statusCode"] == 202
+    monkeypatch.setattr(
+        common, "invoke_agent", lambda s, p, **kw: {"status": "completed", "text": "stood down"}
+    )
+    assert runner.resume(token) == {"status": "REFUSED_DONE", "text": "stood down"}
+
+    events = _events(table, token)
+    assert [e["event_type"] for e in events] == [
+        "RunRequested",
+        "RunClaimed",
+        "RunPaused",
+        "DecisionRecorded",
+        "RunResuming",
+        "RunPaused",
+        "DecisionRecorded",
+        "RunResuming",
+        "RunRefused",
+    ]
+    assert [e["seq"] for e in events] == list(range(1, len(events) + 1))
+    assert [e["event_id"] for e in events] == [f"{token}#{n}" for n in range(1, len(events) + 1)]
+    assert [e["run_version"] for e in events] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    row = table.items[token]
+    assert row["version"] == 9 and row["event_seq"] == 9 and row["pause_seq"] == 2
+    assert [e["data"]["pause_seq"] for e in events[2:]] == [1, 1, 1, 2, 2, 2, 2]
+    assert events[3]["data"] == {
+        "pause_seq": 1,
+        "decision": "approve",
+        "decided_by_name": "try-visitor",
+    }
+    assert events[4]["data"] == {"pause_seq": 1, "answer": "approve", "cause": "decision"}
+    # Each command was exactly one transaction.
+    assert len(table.dynamo.transactions) == 9
+
+
+def test_events_carry_only_whitelisted_fields(modules, monkeypatch):
+    common, api, runner, table = modules
+    monkeypatch.setattr(api, "_invoke_runner", lambda payload, asynchronous: {})
+    _seed_starting("appr-white", "approval")
+    monkeypatch.setattr(common, "invoke_agent", lambda s, p, **kw: PAUSE_PAYLOAD)
+    runner.start("SECRET-PROMPT-TEXT", "appr-white", context=_Lambda("req-w"))
+    assert _decide(api, APPROVER, "approve", "appr-white")["statusCode"] == 202
+
+    def _boom(session_id, payload, **kw):
+        raise ValueError("secret detail from the agent")
+
+    monkeypatch.setattr(common, "invoke_agent", _boom)
+    assert runner.resume("appr-white")["status"] == "ERROR"
+    events = _events(table, "appr-white")
+    dumped = json.dumps(events, default=str)
+    for secret in (
+        "SECRET-PROMPT-TEXT",
+        "prod_secret.py",
+        "arguments",
+        "int-secret-7",
+        "lachesis-confirm",
+        "sub-1",
+        "secret detail",
+        "s" * 40,
+    ):
+        assert secret not in dumped, secret
+    domain = _layer("domain")
+    allowed = {cls.__name__: {f.name for f in dataclass_fields(cls)} for cls in domain.EVENT_TYPES}
+    for event in events:
+        assert set(event["data"]) == allowed[event["event_type"]]
+    paused = next(e for e in events if e["event_type"] == "RunPaused")["data"]
+    assert paused["tool"] == "delete_file" and paused["risk"] == "destructive_write"
+    # Floats reach DynamoDB as Decimal (boto3 refuses floats).
+    assert paused["confidence"] == Decimal("0.31") and paused["latency_ms"] == Decimal("187.4")
+    failed = events[-1]
+    assert failed["event_type"] == "RunFailed"
+    assert failed["data"] == {"pause_seq": 1, "from_status": "RESUMING", "error_type": "ValueError"}
+    # The row still keeps the full text for the owner; public_view cuts it.
+    assert table.items["appr-white"]["result_text"].startswith("ValueError: secret detail")
+
+
+def test_a_stale_version_is_a_conflict_and_writes_nothing(modules, monkeypatch):
+    common, api, _, table = modules
+    monkeypatch.setattr(api, "_invoke_runner", lambda payload, asynchronous: {})
+    _create_row(common, "appr-stale-v", "s" * 40, "approval")
+    _transition(common, "appr-stale-v", "STARTING", "PENDING", interrupts="[]", card="{}")
+    work, domain = _layer("uow").DynamoUnitOfWork(), _layer("domain")
+    stale = work.get("appr-stale-v")
+    assert stale.version == 0
+    # A row written before the Unit of Work: version 0 is conditioned on
+    # the attribute being absent.
+    assert _decide(api, APPROVER, "approve", "appr-stale-v")["statusCode"] == 202
+    first = table.dynamo.transactions[-1][0]["Update"]
+    assert "attribute_not_exists" in first["ConditionExpression"]
+    assert table.items["appr-stale-v"]["version"] == 1
+    _transition(common, "appr-stale-v", "APPROVED", "PENDING")  # same status, newer version
+    before = copy.deepcopy(table.dynamo.tables)
+    stale.decide("decline", "sub-2", "guest", time.time())
+    with pytest.raises(domain.Conflict):
+        work.commit(stale)
+    assert table.dynamo.tables == before
+
+
+def test_cancellation_reasons_map_to_domain_errors(modules):
+    _, _, _, table = modules
+    uow, domain = _layer("uow"), _layer("domain")
+
+    def cancelled(*codes):
+        return ClientError(
+            {
+                "Error": {"Code": "TransactionCanceledException"},
+                "CancellationReasons": [{"Code": code} for code in codes],
+            },
+            "TransactWriteItems",
+        )
+
+    tags = ["cap", "cap", "conflict", "conflict"]
+    assert uow.classify(cancelled("None", "ConditionalCheckFailed", "None", "None"), tags) == "cap"
+    assert uow.classify(cancelled("None", "None", "ConditionalCheckFailed", "None"), tags) == (
+        "conflict"
+    )
+    assert uow.classify(cancelled("None", "None", "None", "ConditionalCheckFailed"), tags) == (
+        "conflict"
+    )
+    assert uow.classify(cancelled("TransactionConflict", "None", "None", "None"), tags) == "retry"
+    assert uow.classify(cancelled("ValidationError"), tags) == "other"
+    other = ClientError({"Error": {"Code": "ProvisionedThroughputExceededException"}}, "T")
+    assert uow.classify(other, tags) == "other"
+
+    work = uow.DynamoUnitOfWork()
+    # A concurrent transaction alone is retried once ...
+    _seed_starting("appr-tc")
+    run = work.get("appr-tc")
+    run.claim("req-1")
+    table.dynamo.inject = [["TransactionConflict", "None"]]
+    work.commit(run)
+    assert table.items["appr-tc"]["claimed_request_id"] == "req-1"
+    # ... and a second one in a row is a Conflict.
+    run.fail("StartTimeout: test")
+    table.dynamo.inject = [["TransactionConflict", "None"], ["TransactionConflict", "None"]]
+    with pytest.raises(domain.Conflict):
+        work.commit(run)
+    # Anything else is not swallowed.
+    run = work.get("appr-tc")
+    run.fail("StartTimeout: test")
+    table.dynamo.inject = [["ValidationError", "None"]]
+    with pytest.raises(ClientError):
+        work.commit(run)
+    assert table.items["appr-tc"]["status"] == "STARTING"
+
+
+def test_runner_hand_off_failure_ends_the_run_at_once(modules, monkeypatch):
+    _, api, _, table = modules
+
+    def _down(payload, asynchronous):
+        raise EndpointConnectionError(endpoint_url="https://lambda.invalid")
+
+    monkeypatch.setattr(api, "_invoke_runner", _down)
+    out = _post_try(api, "198.51.100.20")
+    assert out["statusCode"] == 502
+    [row] = [row for key, row in table.items.items() if key.startswith("appr-")]
+    assert row["status"] == "ERROR"
+    assert row["result_text"].startswith("EndpointConnectionError:")
+
+
+def test_approver_start_prewrites_the_row(modules, monkeypatch):
+    common, api, _, table = modules
+    handed = []
+    monkeypatch.setattr(
+        api, "_invoke_runner", lambda payload, asynchronous: handed.append(payload) or {}
+    )
+    out = api.handler(_event("POST /approvals/start", APPROVER, {"prompt": "do it"}), None)
+    assert out["statusCode"] == 202
+    approval_id = json.loads(out["body"])["approval_id"]
+    assert handed == [{"action": "start", "prompt": "do it", "approval_id": approval_id}]
+    assert table.items[approval_id]["lane"] == "approval"
+    assert table.items[approval_id]["status"] == "STARTING"
+    assert not [key for key in table.items if key.startswith("try-")]
+
+
+def test_outcome_after_the_sweeper_closed_the_run_is_a_conflict(modules, monkeypatch):
+    common, _, runner, table = modules
+    _seed_starting("appr-late")
+
+    def _slow(session_id, payload, **kw):
+        # The sweeper closes the run while the agent is still working.
+        _transition(common, "appr-late", "STARTING", "ERROR", result_text="StartTimeout: x")
+        return {"status": "completed", "text": "late"}
+
+    monkeypatch.setattr(common, "invoke_agent", _slow)
+    assert runner.start("p", "appr-late") == {"status": "conflict", "approval_id": "appr-late"}
+    assert table.items["appr-late"]["status"] == "ERROR"
+    assert table.items["appr-late"]["result_text"] == "StartTimeout: x"
+
+
+def test_sweeper_waits_for_a_claimed_start(modules, monkeypatch):
+    common, _, runner, table = modules
+    _seed_starting("appr-slow")
+    table.items["appr-slow"]["created_ts"] = int(time.time()) - 900
+    assert runner.sweep()["closed_starting"] == 0
+    table.items["appr-slow"]["created_ts"] = int(time.time()) - runner.STARTING_TIMEOUT_S - 1
+    assert runner.sweep()["closed_starting"] == 1
+    assert [e["event_type"] for e in _events(table, "appr-slow")][-1] == "RunFailed"
