@@ -656,6 +656,7 @@ def test_decider_is_not_asked_without_time_left(gate):
     gate.sagemaker.copies = 1
     _, view = _post(gate, _body([_change("infra/main.tf")]), lambda_context=Context())
     assert view["summary"]["decider"] == "skipped" and gate.sagemaker.invoked == []
+    assert gate.sagemaker.described == []
 
 
 @pytest.mark.parametrize("answer", [

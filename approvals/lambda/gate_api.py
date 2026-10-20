@@ -239,10 +239,13 @@ def _read_pull(gh: Any, request: policy.Request, pull_json: dict) -> policy.Pull
 def _reading(
     pull: policy.PullRequest, result: policy.GateScan, context: Any
 ) -> decider.Reading:
+    # The time budget is checked before any SageMaker call: the describe
+    # and the invoke together can take about 10 s.
+    remaining = getattr(context, "get_remaining_time_in_millis", None)
+    if result.needs_person and remaining is not None and remaining() < DECIDER_MIN_REMAINING_MS:
+        return decider.Reading(decider.SKIPPED if result.flagged else decider.NOT_ASKED)
+
     def allow() -> bool:
-        remaining = getattr(context, "get_remaining_time_in_millis", None)
-        if remaining is not None and remaining() < DECIDER_MIN_REMAINING_MS:
-            return False
         try:
             return service.take_gate_reading()
         except Exception as exc:  # the cap could not be read: do not ask
