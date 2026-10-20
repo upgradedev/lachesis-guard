@@ -13,7 +13,7 @@ const STATUS = {
 };
 const ICON = { success: "\u2713", warning: "!", error: "\u2715", info: "i", progress: "\u2026", stopped: "\u25A0" };
 const EFFECT = { benign: "Low risk", destructive_write: "Deletes or overwrites data", exfiltration: "Sends data outside", untrusted_to_action: "Acts on untrusted input", confused_deputy: "Uses authority on someone else's behalf" };
-const LAYER = { decider: "Strands Decider 2B", secretscan: "Secret scan (deterministic)", tier0: "Safe read (deterministic)", unavailable: "Fail-closed: Decider did not answer" };
+const LAYER = { decider: "Strands Decider 2B", secretscan: "Secret scan (deterministic)", tier0: "Safe read (deterministic)", unavailable: "Fail-closed: Decider did not answer", refusal: "Repeat of a call already declined" };
 const CANNED = { write_file: "cleanup_notes.txt", delete_file: "refunds_prod_config.py" };
 
 // Committed benchmark intercepts from evaluation/*.jsonl (no synthetic data).
@@ -290,7 +290,7 @@ function decisionCard(view, lane, onDecided) {
       text: "At or above " + thr.toFixed(2) + " Decider's class is trusted; a destructive class still asks a person." }) : null]
       : h("p", { class: "muted", text: "No Decider score for this call." }),
     kv([["Risk class", card.risk ? card.risk.replace(/_/g, " ") : "not scored"], ["Grounded", p.grounded === null ? "" : p.grounded ? "yes" : "no"],
-      ["Paused by", LAYER[card.layer] || card.layer || ""], ["Decided by", view.decided_by_name ? (view.decided_by_name === "try-visitor" ? "a visitor on this page" : view.decided_by_name) : ""],
+      ["Paused by", LAYER[card.layer] || card.layer || ""], ["Decided by", view.decided_by_name && view.status !== "PENDING" ? (view.decided_by_name === "try-visitor" ? "a visitor on this page" : view.decided_by_name) : ""],
       ["Latency", card.latency_ms ? Math.round(card.latency_ms) + " ms" : ""], ["Paused at", isFinite(Date.parse(card.created_at)) ? hhmmss(Date.parse(card.created_at)) + " UTC" : ""],
       ["Ref", h("span", {}, h("code", { text: view.approval_id || "" }), " ", copyBtn(view.approval_id || ""))]]));
   const limit = window.matchMedia("(max-width: 719px)").matches ? 12 : 24;
@@ -395,14 +395,16 @@ function viewTry(token) {
   $("[data-copy]").onclick = async e => { try { await navigator.clipboard.writeText(location.href); e.target.textContent = "Copied"; } catch (err) { e.target.textContent = "Copy failed"; } };
   const g = gen;
   later(() => { if (g === gen && !$("#steps").children.length) $("#steps").append(h("li", {}, h("div", { class: "skeleton" }), h("div", { class: "skeleton" }))); }, 200);
-  const ctl = poll("/try/" + encodeURIComponent(token), v => renderTry(v, ctl), () => {
+  const ctl = poll("/try/" + encodeURIComponent(token), v => renderTry(v, ctl), denied => {
+    const mine = store(s => JSON.parse(s.getItem("lachesis_try_started") || "null")) || {}; // the 202 races the runner's first row write
+    if (!denied && mine.token === token && Date.now() - mine.t < 20000) { if (!$("#run-status").textContent) renderTry({ status: "STARTING", card: {} }, ctl); ctl.kick(); return; }
     $("#steps").textContent = ""; $("#run-status").textContent = ""; msg.hidden = false; msg.textContent = "No demo run matches this link. Runs are removed about a day after they end.";
   });
 }
 $("#try-start").addEventListener("click", async () => {
   const btn = $("#try-start"), msg = $("#try-msg"); btn.disabled = true; msg.hidden = true;
   const out = await api("/try", { method: "POST", body: "{}" });
-  if (out.status === 202 && out.body.token) { location.hash = "#/try/" + encodeURIComponent(out.body.token); return; }
+  if (out.status === 202 && out.body.token) { store(s => s.setItem("lachesis_try_started", JSON.stringify({ token: out.body.token, t: Date.now() }))); location.hash = "#/try/" + encodeURIComponent(out.body.token); return; }
   msg.hidden = false; msg.textContent = errText(out); btn.disabled = false;
 });
 
