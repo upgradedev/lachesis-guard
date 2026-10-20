@@ -9,7 +9,8 @@ Three reads, all GET, all on https://api.github.com:
   its files (GitHub pages the files of a large commit).
 
 Pagination follows the ``Link`` header's rel="next", and only to a URL
-on https://api.github.com/, so the token is never sent to another host.
+on https://api.github.com/; an HTTP redirect is followed only to that
+host too (_ApiOnlyRedirect), so the token is never sent to another host.
 At most MAX_PAGES pages per listing are read.
 
 Rate limits: every response's X-RateLimit-Remaining and X-RateLimit-Reset
@@ -94,6 +95,22 @@ def _path(url: str) -> str:
 Opener = Callable[..., Any]
 
 
+class _ApiOnlyRedirect(urllib.request.HTTPRedirectHandler):
+    """Follows a redirect only to the API host. urllib copies every
+    request header, Authorization included, into the redirected request
+    whatever its host; a redirect elsewhere is refused instead, and
+    urllib raises it as an HTTPError (a GitHubError here)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not str(newurl).startswith(API_PREFIX):
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def default_opener() -> Opener:
+    return urllib.request.build_opener(_ApiOnlyRedirect()).open
+
+
 class GitHub:
     def __init__(
         self,
@@ -104,7 +121,7 @@ class GitHub:
         max_pages: int = MAX_PAGES,
     ) -> None:
         self._token = token
-        self._open = opener or urllib.request.urlopen
+        self._open = opener or default_opener()
         self.rate_floor = rate_floor
         self.max_pages = max_pages
         self.remaining: int | None = None

@@ -491,6 +491,21 @@ def test_a_next_link_to_another_host_is_never_followed(world):
     assert github.next_link('<https://api.github.com.evil.io/x>; rel="next"') is None
 
 
+def test_a_redirect_is_followed_only_on_the_api_host():
+    handler = github._ApiOnlyRedirect()
+    request = github.GitHub(TOKEN, opener=lambda *a, **k: None)._request(
+        github.API + "/repos/o/r"
+    )
+    off_host = handler.redirect_request(request, None, 302, "Found", {}, "https://evil.example/x")
+    assert off_host is None
+    same = handler.redirect_request(request, None, 301, "Moved", {},
+                                    github.API + "/repositories/1")
+    assert same is not None and same.full_url == github.API + "/repositories/1"
+    # The default opener carries that handler.
+    opener = github.default_opener()
+    assert any(isinstance(h, github._ApiOnlyRedirect) for h in opener.__self__.handlers)
+
+
 def test_the_files_of_a_large_commit_are_paged(world):
     server, _, _, gh, _, _ = world
     files = [{"filename": f"f{i}.py", "status": "added"} for i in range(7)]
