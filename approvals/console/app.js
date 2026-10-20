@@ -387,15 +387,41 @@ function renderTry(v, ctl) {
   tickClocks(); if (had) { $("#run-status").setAttribute("tabindex", "-1"); $("#run-status").focus(); }
 }
 
+// ---- B5: the run ledger, from GET /try/{token}/events or /approvals/{id}/events (lachesis-run-events). It sits beside the step timeline and never replaces it: empty hides it, a failed read leaves it as it was. ----
+function ledgerFacts(e) {
+  const facts = [];
+  if (e.tool) facts.push("tool " + e.tool);
+  if (e.layer) facts.push("layer " + (LAYER[e.layer] || e.layer));
+  if (e.risk) facts.push("risk " + String(e.risk).replace(/_/g, " "));
+  if (e.verdict) facts.push("verdict " + e.verdict);
+  if (typeof e.confidence === "number" && isFinite(e.confidence)) facts.push("confidence " + e.confidence.toFixed(2));
+  if (typeof e.latency_ms === "number" && isFinite(e.latency_ms)) facts.push(Math.round(e.latency_ms) + " ms");
+  if (e.cached === true) facts.push("re-issued pause, no new Decider call");
+  return facts.join(" · ");
+}
+function renderLedger(el, events) {
+  el.textContent = ""; el.hidden = !Array.isArray(events) || !events.length;
+  if (el.hidden) return;
+  el.append(h("h2", { text: "Run ledger" }), h("p", { class: "muted small", text: "Each committed state change of this run, read from its event log. Arguments and prompts are never in it." }),
+    h("ol", { class: "steps" }, events.map(e => { const t = Date.parse(e.at), facts = ledgerFacts(e);
+      return h("li", { class: e.type === "RunFailed" ? "stopped" : e.type === "RunPaused" ? "paused" : "done" },
+        h("div", { class: "step-h" }, h("code", { text: "#" + e.seq }), h("span", { text: e.type }), isFinite(t) ? h("span", { class: "muted", text: hhmmss(t) + " UTC" }) : null,
+          e.status ? h("span", { class: "pill", text: (STATUS[e.status] || [e.status])[0] }) : null), facts ? h("p", { class: "step-d", text: facts }) : null); })));
+}
+function loadLedger(path, el) {
+  const g = gen;
+  api(path).then(out => { if (g === gen && out.status === 200 && out.body) renderLedger(el, out.body.events); });
+}
 function viewTry(token) {
   const run = $("#run"), msg = $("#try-msg");
   msg.hidden = true; $("#try-start").disabled = false; $("#try-intro").hidden = !!token; $("#try-start").textContent = token ? "Start another run" : "Start the demo run";
+  const led = $("#run-ledger"); led.hidden = true; led.textContent = "";
   if (!token) { run.hidden = true; return; }
   run.hidden = false; $("#run-ref").textContent = token; $("#steps").textContent = ""; $("#run-status").textContent = "";
   $("[data-copy]").onclick = async e => { try { await navigator.clipboard.writeText(location.href); e.target.textContent = "Copied"; } catch (err) { e.target.textContent = "Copy failed"; } };
   const g = gen;
   later(() => { if (g === gen && !$("#steps").children.length) $("#steps").append(h("li", {}, h("div", { class: "skeleton" }), h("div", { class: "skeleton" }))); }, 200);
-  const ctl = poll("/try/" + encodeURIComponent(token), v => renderTry(v, ctl), denied => {
+  const ctl = poll("/try/" + encodeURIComponent(token), v => { renderTry(v, ctl); loadLedger("/try/" + encodeURIComponent(token) + "/events", led); }, denied => {
     const mine = store(s => JSON.parse(s.getItem("lachesis_try_started") || "null")) || {}; // the 202 races the runner's first row write
     if (!denied && mine.token === token && Date.now() - mine.t < 20000) { if (!$("#run-status").textContent) renderTry({ status: "STARTING", card: {} }, ctl); ctl.kick(); return; }
     $("#steps").textContent = ""; $("#run-status").textContent = ""; msg.hidden = false; msg.textContent = "No demo run matches this link. Runs are removed about a day after they end.";
@@ -449,7 +475,7 @@ $("#queue-start").addEventListener("click", async () => {
 });
 
 function viewDetail(id) {
-  const body = $("#detail-body"), st = $("#detail-status"); body.textContent = ""; st.textContent = "";
+  const body = $("#detail-body"), st = $("#detail-status"), led = $("#detail-ledger"); body.textContent = ""; st.textContent = ""; led.hidden = true; led.textContent = "";
   if (!auth.token) {
     body.append(h("p", { text: "Approvers only. Sign in to decide this call." }), h("button", { class: "btn btn--primary", type: "button", text: "Approver sign in", onclick: openSignin })); return;
   }
@@ -459,6 +485,7 @@ function viewDetail(id) {
     statusLine(st, v.status); body.textContent = ""; const card = v.card || {};
     if (card.tool || card.reason) body.append(decisionCard(v, "approval", () => ctl.kick()));
     const end = outcomeRow(v); if (end) body.append(h("ol", { class: "steps" }, end)); tickClocks();
+    loadLedger("/approvals/" + encodeURIComponent(id) + "/events", led);
   }, out => {
     body.textContent = ""; body.append(h("p", { class: "err", role: "alert", text: out && out.status === 403 ? "This account is not in the approvers group." : out ? "" : "No paused call matches this link." }));
   });
@@ -511,7 +538,7 @@ document.querySelectorAll("#thr-tabs [data-thr]").forEach(b => b.addEventListene
 function parts() { return (location.hash.replace(/^#\/?/, "") || "").split("/").filter(Boolean).map(decodeURIComponent); }
 function current() {
   const p = parts();
-  return p[0] === "try" ? "try" : p[0] === "queue" ? "queue" : p[0] === "policy" ? "policy" : p[0] === "metrics" ? "metrics" : p[0] === "a" && p[1] ? "detail" : "home";
+  return p[0] === "try" ? "try" : p[0] === "queue" ? "queue" : p[0] === "policy" ? "policy" : p[0] === "metrics" ? "metrics" : p[0] === "architecture" ? "architecture" : p[0] === "a" && p[1] ? "detail" : "home";
 }
 // ---- motion layer: parallax, card spotlight, staggered reveal. Numbers never animate: every frame shows the measured value. Inert under prefers-reduced-motion. ----
 const MOTION = window.matchMedia("(prefers-reduced-motion: no-preference)"), FINE = window.matchMedia("(pointer: fine) and (min-width: 900px)");
@@ -524,7 +551,7 @@ window.addEventListener("pointermove", e => {
 }, { passive: true }); window.addEventListener("scroll", () => { if (MOTION.matches && FINE.matches) fxQueue(); }, { passive: true });
 function fx(view) {
   const root = $("[data-view=" + view + "]"); if (!root || !MOTION.matches) return;
-  root.querySelectorAll(".tile, .panel, .flow > li").forEach((el, i) => { el.classList.remove("fx-in"); void el.offsetWidth; el.style.setProperty("--d", Math.min(i, 8) * 60 + "ms"); el.classList.add("fx-in"); });
+  root.querySelectorAll(".tile, .panel, .flow > li, .arch-node").forEach((el, i) => { el.classList.remove("fx-in"); void el.offsetWidth; el.style.setProperty("--d", Math.min(i, 8) * 60 + "ms"); el.classList.add("fx-in"); });
 }
 
 let first = true;

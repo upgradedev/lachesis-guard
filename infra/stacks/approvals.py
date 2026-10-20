@@ -33,6 +33,11 @@ receives only what the runner does not handle itself (an uncaught
 exception, a timeout, an out-of-memory, an event too old to run); not
 yet observed on AWS.
 
+The run ledger (B5): GET /try/{token}/events (no auth, try lane) and
+GET /approvals/{id}/events (approvers) answer with one run's rows of
+lachesis-run-events, cut to the whitelist of approvals/lambda/ledger.py.
+The API function gains dynamodb:Query on the event log, nothing else.
+
 Deploy isolation: the iac workflow deploys this stack with
 --exclusively, so a deploy here never redeploys LachesisFoundation,
 LachesisDecider or LachesisAgent. A change here that needs something
@@ -274,6 +279,10 @@ class ApprovalsStack(cdk.Stack):
         # Puts new run rows, updates counters and decisions, reads rows
         # and the approver queue.
         grant_store(api_fn, ("GetItem", "PutItem", "UpdateItem", "Query"))
+        # B5: reads one run's ledger (GET /try/{token}/events and GET
+        # /approvals/{id}/events, approvals/lambda/ledger.py). Query only,
+        # on the event log; the CMK grant above already covers its reads.
+        events_table.grant(api_fn, "dynamodb:Query")
         runner.grant_invoke(api_fn)
         # B4: where an async runner event goes when the runner fails it
         # (an uncaught exception, a timeout, an out-of-memory) or when it
@@ -371,6 +380,9 @@ class ApprovalsStack(cdk.Stack):
             ("POST /try", "NONE"),
             ("GET /try/{token}", "NONE"),
             ("POST /try/{token}/decision", "NONE"),
+            # B5: the run ledger, per lane (the API checks the lane).
+            ("GET /approvals/{id}/events", "JWT"),
+            ("GET /try/{token}/events", "NONE"),
         )
         route_resources = []
         for route_key, auth_type in routes:
