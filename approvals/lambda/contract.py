@@ -1,7 +1,12 @@
 """Tolerant reader of the AgentCore result payload (anti-corruption layer).
 
-The agent (agent/entrypoint.py) answers every invocation with HTTP 200
-and one JSON object whose ``status`` is one of:
+The agent (agent/entrypoint.py) answers a handled invocation with HTTP
+200 and one JSON object whose ``status`` is one of the three below. An
+exception that escapes the agent is answered with HTTP 500 and a
+``status: error`` body; depending on how InvokeAgentRuntime surfaces
+it, that reaches the runner as an exception (handled by the runner as
+a failure after the send) or as an error body (handled here). Both end
+in ERROR. The statuses:
 
 - ``"interrupt"``: Lachesis paused a tool call; ``interrupts`` holds
   ``[{interruptId, name, reason}]`` plus ``triage`` and ``changed_files``.
