@@ -126,6 +126,16 @@ class InvalidTransition(Conflict):
         self.current = current
 
 
+class Busy(Conflict):
+    """Concurrent transactions kept cancelling the command (contention
+    on a shared item, such as the /try daily counter), and the retries
+    ran out. Nothing was written. A Conflict to every caller that treats
+    a lost race as a no-op; the API answers it as a retryable 503."""
+
+    http_status = 503
+    default_message = "busy, try again in a moment"
+
+
 class AlreadyClaimed(Conflict):
     """A runner already claimed this run (a duplicate async delivery)."""
 

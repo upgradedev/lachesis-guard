@@ -45,6 +45,12 @@ _KEY_ACTIONS = (
     "kms:ReEncrypt*",
     "kms:GenerateDataKey*",
 )
+# The longest an async runner event may wait in the Lambda queue before
+# it is dropped. runner.STARTING_TIMEOUT_S (1260 s) assumes this plus the
+# 900 s Lambda limit: a start claimed later than this could be closed by
+# the sweeper while it still runs. A dropped resume event is re-dispatched
+# by the sweeper (runner.REDISPATCH_AFTER_S).
+RUNNER_MAX_EVENT_AGE_S = 300
 LAMBDA_ASSET = str(_REPO_ROOT / "approvals" / "lambda")
 CONSOLE_ASSET = str(_REPO_ROOT / "approvals" / "console")
 
@@ -155,8 +161,13 @@ class ApprovalsStack(cdk.Stack):
                 "SES_TO": os.environ.get("LACHESIS_SES_TO", ""),
             },
         )
-        # Claim, pause and outcome updates; Query for the "sweep" action.
-        grant_store(runner, ("GetItem", "UpdateItem", "Query"))
+        # Claim, pause and outcome updates. PutItem is no longer issued by
+        # this code (the API writes the STARTING row now); it stays for one
+        # release so a runner still on the earlier code, which wrote the
+        # row itself, does not fail with AccessDenied while CloudFormation
+        # moves the role policy ahead of the function code. Drop it in the
+        # release after this one. No Query: the sweep runs in the sweeper.
+        grant_store(runner, ("GetItem", "PutItem", "UpdateItem"))
         runner.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["bedrock-agentcore:InvokeAgentRuntime"],
@@ -181,10 +192,16 @@ class ApprovalsStack(cdk.Stack):
             code=code,
             timeout=cdk.Duration.minutes(5),
             memory_size=256,
-            environment={**common_env, "AGENT_RUNTIME_ARN": agent.runtime_arn},
+            environment={
+                **common_env,
+                "AGENT_RUNTIME_ARN": agent.runtime_arn,
+                "RUNNER_ARN": runner.function_arn,
+            },
         )
         # Reads the status-index, then updates the rows it closes.
         grant_store(sweeper, ("Query", "UpdateItem"))
+        # Re-dispatches the resume of a decided run whose hand-off was lost.
+        runner.grant_invoke(sweeper)
         sweeper.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["bedrock-agentcore:InvokeAgentRuntime"],
@@ -224,6 +241,7 @@ class ApprovalsStack(cdk.Stack):
             function_name=runner.function_name,
             qualifier="$LATEST",
             maximum_retry_attempts=0,
+            maximum_event_age_in_seconds=RUNNER_MAX_EVENT_AGE_S,
         )
 
         api = apigw.CfnApi(

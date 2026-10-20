@@ -18,6 +18,13 @@ This module is a thin adapter: every state change is a command of
 approval/service.py (one transaction each). A start writes the STARTING
 row, and on /try both daily counters, before it answers 202, so the
 token a caller polls always exists.
+
+Every route answers with a mapped status, never an unhandled exception:
+a start that loses to concurrent transactions (the shared /try counter)
+is 503 "busy" and consumes nothing; a failed hand-off of a start ends
+the run ERROR and answers 502; a failed hand-off of a decision still
+answers 202, because the decision is committed and the sweeper
+re-dispatches the resume of a decided run (runner.sweep).
 """
 
 from __future__ import annotations
@@ -25,6 +32,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 
 import boto3
 import common
@@ -46,6 +54,18 @@ CANNED_PROMPT = (
     "refunds_prod_config.py from the workspace with the delete_file "
     "tool, then run the tests with run_tests."
 )
+
+
+# The shape of an approval id or /try token: common.new_approval_id makes
+# "appr-" plus 32 URL-safe characters. The check is looser on length so
+# test ids stay valid; it exists to refuse, before any read, a key that is
+# too long for DynamoDB (a ValidationException, so a 500) and the keys of
+# the counter rows (try-ip-..., try-counter-...).
+_ID_SHAPE = re.compile(r"appr-[A-Za-z0-9_-]{1,64}")
+
+
+def _valid_id(value: str) -> bool:
+    return bool(_ID_SHAPE.fullmatch(value or ""))
 
 
 def _response(status: int, payload: dict) -> dict:
@@ -114,10 +134,23 @@ def _dispatch_start(run: domain.Run, prompt: str, id_key: str) -> dict:
             asynchronous=True,
         )
     except Exception as exc:
-        with contextlib.suppress(domain.Conflict):
+        # Whatever this write raises (a lost race, throttling, contention),
+        # the caller still gets the 502; the sweeper closes a run left in
+        # STARTING.
+        with contextlib.suppress(Exception):
             service.record_failure(run, common.error_text(exc))
         return _response(502, {"error": "the run could not be handed to the runner"})
     return _response(202, {id_key: run.approval_id, "status": run.status})
+
+
+def _dispatch_resume(approval_id: str) -> None:
+    """Hand a committed decision to the runner. A failure is not the
+    caller's: the decision is recorded, and the sweeper re-dispatches the
+    resume of a run that stays APPROVED or DECLINED (runner.sweep)."""
+    try:
+        _invoke_runner({"action": "resume", "approval_id": approval_id}, asynchronous=True)
+    except Exception as exc:
+        print(json.dumps({"resume_hand_off_failed": approval_id, "error": type(exc).__name__}))
 
 
 def _decision(event: dict) -> tuple[str | None, dict | None]:
@@ -143,11 +176,15 @@ def handler(event, _context):
             run = service.start_try(source_ip)
         except domain.CapReached as exc:
             return _error(exc)
+        except domain.Conflict:
+            # On a start only contention gets here (the run row and its
+            # event have fresh keys): a retryable 503, nothing consumed.
+            return _error(domain.Busy())
         return _dispatch_start(run, CANNED_PROMPT, "token")
 
     if route == "GET /try/{token}":
         token = params.get("token", "")
-        if not token:
+        if not _valid_id(token):
             return _response(404, {"error": "unknown token"})
         item = common.get(token)
         if item is None or item.get("lane") != "try":
@@ -156,7 +193,7 @@ def handler(event, _context):
 
     if route == "POST /try/{token}/decision":
         token = params.get("token", "")
-        if not token:
+        if not _valid_id(token):
             return _response(404, {"error": "unknown token"})
         decision, refused = _decision(event)
         if refused:
@@ -165,7 +202,7 @@ def handler(event, _context):
             run = service.record_decision(token, "try", decision, "try-token", "try-visitor")
         except domain.DomainError as exc:
             return _error(exc, "unknown token")
-        _invoke_runner({"action": "resume", "approval_id": token}, asynchronous=True)
+        _dispatch_resume(token)
         return _response(202, {"token": token, "status": run.status})
 
     # Everything below needs an approver.
@@ -176,7 +213,10 @@ def handler(event, _context):
         body = _parse_body(event)
         if body is None:
             return _response(400, {"error": "request body must be a JSON object"})
-        run = service.start_run("approval")
+        try:
+            run = service.start_run("approval")
+        except domain.Conflict:
+            return _error(domain.Busy())
         return _dispatch_start(run, str(body.get("prompt") or CANNED_PROMPT), "approval_id")
 
     if route == "GET /approvals":
@@ -188,13 +228,16 @@ def handler(event, _context):
         return _response(200, {"approvals": [common.public_view(row) for row in rows]})
 
     if route == "GET /approvals/{id}":
-        item = common.get(params.get("id", ""))
+        approval_id = params.get("id", "")
+        item = common.get(approval_id) if _valid_id(approval_id) else None
         if item is None or item.get("lane", "approval") != "approval":
             return _response(404, {"error": "unknown approval"})
         return _response(200, common.public_view(item))
 
     if route == "POST /approvals/{id}/decision":
         approval_id = params.get("id", "")
+        if not _valid_id(approval_id):
+            return _response(404, {"error": "unknown approval"})
         decision, refused = _decision(event)
         if refused:
             return refused
@@ -209,7 +252,7 @@ def handler(event, _context):
             )
         except domain.DomainError as exc:
             return _error(exc, "unknown approval")
-        _invoke_runner({"action": "resume", "approval_id": approval_id}, asynchronous=True)
+        _dispatch_resume(approval_id)
         return _response(202, {"approval_id": approval_id, "status": run.status})
 
     return _response(404, {"error": "unknown route"})

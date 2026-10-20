@@ -17,8 +17,17 @@ One command is one TransactWriteItems call:
 A cancelled transaction is mapped from its CancellationReasons, which
 come back one per item in request order: a failed counter condition is
 CapReached (429), any other failed condition is Conflict (409). A
-cancellation caused only by a concurrent transaction is tried once more,
-then reported as Conflict. Anything else is re-raised.
+cancellation caused only by a concurrent transaction (TransactionConflict
+on every failed item) wrote nothing, so it is tried again up to
+CONTENTION_RETRIES times after a short jittered pause, then reported as
+domain.Busy (a Conflict the API answers with 503). Anything else is
+re-raised.
+
+Each transact_write_items call carries a ClientRequestToken that botocore
+generates for it (the operation's idempotency token), so botocore's own
+retries of one call are idempotent. No deterministic token is passed: two
+different commands loaded at the same version would then collide with
+IdempotentParameterMismatch instead of one of them losing the condition.
 
 The client is the DynamoDB resource's client (common._client), whose
 high-level layer serializes plain Python values; floats are not
@@ -28,6 +37,7 @@ accepted there, so event payloads are converted to Decimal here.
 from __future__ import annotations
 
 import os
+import random
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -45,6 +55,13 @@ _CAP = "cap"
 _CONFLICT = "conflict"
 _RETRY = "retry"
 _OTHER = "other"
+
+# Retries of a contention-only cancellation, and the pause before each
+# (seconds, drawn uniformly). Seams for the tests.
+CONTENTION_RETRIES = 3
+CONTENTION_PAUSE_S = (0.025, 0.150)
+_sleep = time.sleep
+_jitter = random.uniform
 
 
 @dataclass(frozen=True)
@@ -235,7 +252,8 @@ class DynamoUnitOfWork:
 
     def commit(self, run: domain.Run, counters: Iterable[Counter] = ()) -> domain.Run:
         """Write the command's changes and events atomically, or raise
-        domain.Conflict / domain.CapReached and write nothing."""
+        domain.Conflict / domain.Busy / domain.CapReached and write
+        nothing."""
         if not run.is_new and not run.changes:
             return run
         now = self._clock()
@@ -249,17 +267,20 @@ class DynamoUnitOfWork:
         for seq, event in run.events:
             items.append(self._event_item(run, seq, event, now))
             tags.append(_CONFLICT)
-        for attempt in (0, 1):
+        for attempt in range(CONTENTION_RETRIES + 1):
             try:
                 self.client.transact_write_items(TransactItems=items)
                 break
             except ClientError as exc:
                 kind = classify(exc, tags)
-                if kind == _RETRY and attempt == 0:
+                if kind == _RETRY and attempt < CONTENTION_RETRIES:
+                    _sleep(_jitter(*CONTENTION_PAUSE_S))
                     continue
                 if kind == _CAP:
                     raise domain.CapReached() from exc
-                if kind in {_CONFLICT, _RETRY}:
+                if kind == _RETRY:
+                    raise domain.Busy() from exc
+                if kind == _CONFLICT:
                     raise domain.Conflict() from exc
                 raise
         run.committed()

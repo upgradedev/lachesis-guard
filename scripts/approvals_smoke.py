@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -40,6 +41,15 @@ def _call(api_url: str, method: str, path: str, token: str | None, body=None):
             return response.status, json.loads(response.read() or b"{}")
     except urllib.error.HTTPError as exc:
         return exc.code, json.loads(exc.read() or b"{}")
+
+
+def _call_or_network_error(api_url: str, method: str, path: str):
+    """_call without a token; (None, {}) when the request never got an
+    HTTP answer."""
+    try:
+        return _call(api_url, method, path, None)
+    except (urllib.error.URLError, TimeoutError, ConnectionError):
+        return None, {}
 
 
 def _sign_in(idp, pool_id: str, client_id: str, username: str, password: str) -> str:
@@ -187,14 +197,17 @@ def main() -> int:
         status, trial = _call(api_url, "POST", "/try", None, {})
         assert status == 202, trial
         token = trial["token"]
-        # POST /try returns the token before the async runner writes the
-        # row, so a 404 right after it is expected for a few seconds.
-        deadline = time.time() + 20
-        status, view = _call(api_url, "GET", f"/try/{token}", None)
-        while status == 404 and time.time() < deadline:
-            time.sleep(2)
-            status, view = _call(api_url, "GET", f"/try/{token}", None)
-        assert status == 200, view
+        # The API commits the STARTING row before it answers 202, so the
+        # first read of the token must find it: a 404 here fails the smoke.
+        # Only a 5xx or a network error is retried, briefly.
+        deadline = time.time() + 10
+        status, view = _call_or_network_error(api_url, "GET", f"/try/{token}")
+        while (status is None or status >= 500) and time.time() < deadline:
+            time.sleep(1)
+            status, view = _call_or_network_error(api_url, "GET", f"/try/{token}")
+        assert status != 404, "the token answered 404 right after its 202"
+        assert status == 200, (status, view)
+        print("first read of the /try token after its 202: 200, no 404 seen")
         status, _ = _call(api_url, "GET", "/try/appr-foreign-token", None)
         assert status == 404, f"foreign token must be 404, got {status}"
         print("/try token ok, foreign token 404 ok")

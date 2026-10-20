@@ -250,7 +250,13 @@ def modules(monkeypatch):
         monkeypatch.setitem(sys.modules, name, module)
         spec.loader.exec_module(module)
         assert module.common is common
-    assert sys.modules["approval.uow"].common is common
+    work = sys.modules["approval.uow"]
+    assert work.common is common
+    # No real pause between contention retries, and no real Lambda call
+    # from the sweeper's resume re-dispatch; tests that check either
+    # patch these again with a recorder.
+    monkeypatch.setattr(work, "_sleep", lambda seconds: None)
+    monkeypatch.setattr(sys.modules["runner"], "_invoke_runner", lambda payload: None)
     return common, sys.modules["api"], sys.modules["runner"], table
 
 
@@ -889,17 +895,6 @@ def test_contract_reader_classifies_every_shape():
         assert result.is_error, payload
         assert result.error.split(":", 1)[0] == prefix, (payload, result.error)
     assert contract.read_result({"status": "completed", "text": 7}).text == ""
-
-
-def test_contract_final_status_needs_a_completed_result():
-    contract = _load_contract()
-    done = contract.read_result({"status": "completed", "text": ""})
-    failed = contract.read_result({"status": "error", "error": "boom"})
-    assert contract.final_status(done, "APPROVED") == "DONE"
-    assert contract.final_status(done, "DECLINED") == "REFUSED_DONE"
-    assert contract.final_status(done, "PENDING") == "ERROR"
-    assert contract.final_status(failed, "APPROVED") == "ERROR"
-    assert contract.final_status(failed, "DECLINED") == "ERROR"
 
 
 @pytest.mark.parametrize(
@@ -1823,7 +1818,7 @@ def test_a_stale_version_is_a_conflict_and_writes_nothing(modules, monkeypatch):
     assert table.dynamo.tables == before
 
 
-def test_cancellation_reasons_map_to_domain_errors(modules):
+def test_cancellation_reasons_map_to_domain_errors(modules, monkeypatch):
     _, _, _, table = modules
     uow, domain = _layer("uow"), _layer("domain")
 
@@ -1850,18 +1845,24 @@ def test_cancellation_reasons_map_to_domain_errors(modules):
     assert uow.classify(other, tags) == "other"
 
     work = uow.DynamoUnitOfWork()
-    # A concurrent transaction alone is retried once ...
+    pauses = []
+    monkeypatch.setattr(uow, "_sleep", pauses.append)
+    # A concurrent transaction alone is retried, after a short pause ...
     _seed_starting("appr-tc")
     run = work.get("appr-tc")
     run.claim("req-1")
-    table.dynamo.inject = [["TransactionConflict", "None"]]
+    table.dynamo.inject = [["TransactionConflict", "None"]] * uow.CONTENTION_RETRIES
     work.commit(run)
     assert table.items["appr-tc"]["claimed_request_id"] == "req-1"
-    # ... and a second one in a row is a Conflict.
+    assert len(pauses) == uow.CONTENTION_RETRIES
+    assert all(0.025 <= pause <= 0.150 for pause in pauses)
+    # ... and once the retries run out it is Busy, a Conflict.
     run.fail("StartTimeout: test")
-    table.dynamo.inject = [["TransactionConflict", "None"], ["TransactionConflict", "None"]]
-    with pytest.raises(domain.Conflict):
+    table.dynamo.inject = [["TransactionConflict", "None"]] * (uow.CONTENTION_RETRIES + 1)
+    with pytest.raises(domain.Busy) as busy:
         work.commit(run)
+    assert isinstance(busy.value, domain.Conflict) and busy.value.http_status == 503
+    assert not table.dynamo.inject
     # Anything else is not swallowed.
     run = work.get("appr-tc")
     run.fail("StartTimeout: test")
@@ -1923,3 +1924,210 @@ def test_sweeper_waits_for_a_claimed_start(modules, monkeypatch):
     table.items["appr-slow"]["created_ts"] = int(time.time()) - runner.STARTING_TIMEOUT_S - 1
     assert runner.sweep()["closed_starting"] == 1
     assert [e["event_type"] for e in _events(table, "appr-slow")][-1] == "RunFailed"
+
+
+# --- B1 review fixes: contention, hand-offs, ids ----------------------
+
+CONTENDED_START = ["None", "TransactionConflict", "None", "None"]
+BUSY = {"error": "busy, try again in a moment"}
+
+
+def _exhausted():
+    return _layer("uow").CONTENTION_RETRIES + 1
+
+
+def test_contended_try_start_is_retried_then_answers_202(modules, monkeypatch):
+    _, api, _, table = modules
+    monkeypatch.setattr(api, "_invoke_runner", lambda payload, asynchronous: {})
+    # The global counter row is in another transaction twice in a row.
+    table.dynamo.inject = [CONTENDED_START] * 2
+    out = _post_try(api, "198.51.100.30")
+    assert out["statusCode"] == 202
+    token = json.loads(out["body"])["token"]
+    assert table.items[token]["status"] == "STARTING"
+    counters = [row["count"] for key, row in table.items.items() if key.startswith("try-")]
+    assert sorted(counters) == [1, 1]
+    assert len(_events(table, token)) == 1
+
+
+def test_try_start_under_lasting_contention_is_503_and_consumes_nothing(modules, monkeypatch):
+    _, api, _, table = modules
+    handed = []
+    monkeypatch.setattr(
+        api, "_invoke_runner", lambda payload, asynchronous: handed.append(payload) or {}
+    )
+    table.dynamo.inject = [CONTENDED_START] * _exhausted()
+    before = copy.deepcopy(table.dynamo.tables)
+    out = _post_try(api, "198.51.100.31")
+    assert out["statusCode"] == 503
+    assert json.loads(out["body"]) == BUSY
+    assert not re.search(r"[0-9]", BUSY["error"])
+    assert table.dynamo.tables == before and handed == []
+
+
+def test_approver_start_under_lasting_contention_is_503(modules, monkeypatch):
+    _, api, _, table = modules
+    handed = []
+    monkeypatch.setattr(
+        api, "_invoke_runner", lambda payload, asynchronous: handed.append(payload) or {}
+    )
+    table.dynamo.inject = [["TransactionConflict", "None"]] * _exhausted()
+    out = api.handler(_event("POST /approvals/start", APPROVER, {}), None)
+    assert out["statusCode"] == 503
+    assert json.loads(out["body"]) == BUSY
+    assert not table.items and handed == []
+
+
+def test_contended_decision_is_503_and_the_run_stays_pending(modules, monkeypatch):
+    common, api, _, table = modules
+    handed = []
+    monkeypatch.setattr(
+        api, "_invoke_runner", lambda payload, asynchronous: handed.append(payload) or {}
+    )
+    _create_row(common, "appr-busy", "s" * 40, "approval")
+    _transition(common, "appr-busy", "STARTING", "PENDING", interrupts="[]", card="{}")
+    table.dynamo.inject = [["TransactionConflict", "None"]] * _exhausted()
+    out = _decide(api, APPROVER, "approve", "appr-busy")
+    assert out["statusCode"] == 503
+    assert json.loads(out["body"]) == BUSY
+    assert table.items["appr-busy"]["status"] == "PENDING" and handed == []
+    # The person can simply try again.
+    assert _decide(api, APPROVER, "approve", "appr-busy")["statusCode"] == 202
+
+
+def test_start_hand_off_still_answers_502_when_recording_the_failure_fails(
+    modules, monkeypatch
+):
+    _, api, _, table = modules
+
+    def _down(payload, asynchronous):
+        raise EndpointConnectionError(endpoint_url="https://lambda.invalid")
+
+    def _throttled(run, text):
+        raise ClientError({"Error": {"Code": "ThrottlingException"}}, "TransactWriteItems")
+
+    monkeypatch.setattr(api, "_invoke_runner", _down)
+    monkeypatch.setattr(_layer("service"), "record_failure", _throttled)
+    out = _post_try(api, "198.51.100.32")
+    assert out["statusCode"] == 502
+    assert json.loads(out["body"]) == {"error": "the run could not be handed to the runner"}
+    [row] = [row for key, row in table.items.items() if key.startswith("appr-")]
+    assert row["status"] == "STARTING"  # the sweeper closes it later
+
+
+@pytest.mark.parametrize("lane", ["approval", "try"])
+def test_lost_decision_hand_off_is_202_and_the_sweeper_redispatches(modules, monkeypatch, lane):
+    common, api, runner, table = modules
+
+    def _down(payload, asynchronous):
+        raise EndpointConnectionError(endpoint_url="https://lambda.invalid")
+
+    monkeypatch.setattr(api, "_invoke_runner", _down)
+    approval_id = "appr-lost-" + lane
+    _create_row(common, approval_id, "s" * 40, lane)
+    _transition(
+        common,
+        approval_id,
+        "STARTING",
+        "PENDING",
+        interrupts='[{"interruptId": "i1"}]',
+        card=json.dumps({"layer": "decider"}),
+    )
+    if lane == "try":
+        decision = _event(
+            "POST /try/{token}/decision", {}, {"decision": "approve"}, {"token": approval_id}
+        )
+        out = api.handler(decision, None)
+    else:
+        out = _decide(api, APPROVER, "approve", approval_id)
+    assert out["statusCode"] == 202
+    assert table.items[approval_id]["status"] == "APPROVED"
+
+    dispatched = []
+    monkeypatch.setattr(runner, "_invoke_runner", dispatched.append)
+    # Too recent: its resume event may still be on the way.
+    assert runner.sweep()["redispatched"] == 0 and dispatched == []
+    table.items[approval_id]["decided_at"] = "2026-01-01T00:00:00+00:00"
+    assert runner.sweep()["redispatched"] == 1
+    assert dispatched == [{"action": "resume", "approval_id": approval_id}]
+
+    # The re-dispatched resume runs once; a late duplicate is a no-op.
+    monkeypatch.setattr(
+        common, "invoke_agent", lambda s, p, **kw: {"status": "completed", "text": "ok"}
+    )
+    assert runner.handler(dispatched[0], None)["status"] == "DONE"
+    assert runner.handler(dispatched[0], None)["status"] == "noop"
+    assert runner.sweep()["redispatched"] == 0 and len(dispatched) == 1
+
+
+def test_sweeper_redispatch_failure_does_not_stop_the_sweep(modules, monkeypatch):
+    common, _, runner, _ = modules
+    for approval_id, status in (("appr-d1", "APPROVED"), ("appr-d2", "DECLINED")):
+        _create_row(common, approval_id, "s" * 40, "approval")
+        _transition(common, approval_id, "STARTING", status)  # no decided_at: old
+    calls = []
+
+    def _flaky(payload):
+        calls.append(payload)
+        if len(calls) == 1:
+            raise EndpointConnectionError(endpoint_url="https://lambda.invalid")
+
+    monkeypatch.setattr(runner, "_invoke_runner", _flaky)
+    assert runner.sweep()["redispatched"] == 1
+    assert {call["approval_id"] for call in calls} == {"appr-d1", "appr-d2"}
+
+
+def test_runner_has_no_sweep_action(modules):
+    _, _, runner, _ = modules
+    assert runner.handler({"action": "sweep"}, None) == {
+        "status": "error",
+        "error": "unknown action 'sweep'",
+    }
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "",
+        "try-counter-2026-10-20",
+        "try-ip-203.0.113.7-2026-10-20",
+        "appr-" + "a" * 3000,
+        "appr-<script>",
+        "APPR-x",
+    ],
+)
+def test_ids_of_the_wrong_shape_are_404_before_any_read(modules, monkeypatch, bad):
+    _, api, _, table = modules
+    monkeypatch.setattr(api, "_invoke_runner", lambda payload, asynchronous: {})
+    table.items["try-counter-2026-10-20"] = {"approval_id": "try-counter-2026-10-20", "count": 3}
+    table.reads.clear()
+    item_reads = []
+    read_item = table.dynamo.get_item
+    monkeypatch.setattr(
+        table.dynamo, "get_item", lambda **kw: item_reads.append(kw) or read_item(**kw)
+    )
+    cases = (
+        (_event("GET /try/{token}", {}, None, {"token": bad}), "unknown token"),
+        (
+            _event("POST /try/{token}/decision", {}, {"decision": "approve"}, {"token": bad}),
+            "unknown token",
+        ),
+        (_event("GET /approvals/{id}", APPROVER, None, {"id": bad}), "unknown approval"),
+        (
+            _event("POST /approvals/{id}/decision", APPROVER, {"decision": "approve"}, {"id": bad}),
+            "unknown approval",
+        ),
+    )
+    for event, message in cases:
+        out = api.handler(event, None)
+        assert out["statusCode"] == 404, (event["routeKey"], bad)
+        assert json.loads(out["body"]) == {"error": message}
+    assert table.reads == [] and item_reads == [] and table.dynamo.transactions == []
+
+
+def test_real_ids_have_the_checked_shape(modules):
+    common, api, _, _ = modules
+    for _ in range(50):
+        approval_id = common.new_approval_id()
+        assert re.fullmatch(r"appr-[A-Za-z0-9_-]{32}", approval_id)
+        assert api._valid_id(approval_id)

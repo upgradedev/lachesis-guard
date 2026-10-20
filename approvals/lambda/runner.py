@@ -16,8 +16,11 @@ Two actions:
   the agent session with the human's answer, and store the outcome.
   Invoked with MaximumRetryAttempts=0 so retries never double-resume.
 
-Also ``sweep``: expired PENDING rows are resumed with "no" and marked
-EXPIRED, so a forgotten pause ends refused, never open.
+``sweep`` is not an action of this handler: the sweeper Lambda runs it
+in-process under its own role (sweeper.py). It resumes expired PENDING
+rows with "no" and marks them EXPIRED, so a forgotten pause ends
+refused, never open, and it re-dispatches the resume of a decided run
+whose hand-off from the API was lost.
 
 Every agent answer goes through contract.read_result: an agent error
 (which comes back with HTTP 200) is recorded as ERROR, never as DONE.
@@ -35,6 +38,7 @@ reports "conflict" and writes nothing.
 
 from __future__ import annotations
 
+import datetime
 import html
 import json
 import os
@@ -261,10 +265,39 @@ def resume(approval_id: str, context=None) -> dict:
 
 # A claimed start can sit in STARTING for up to the runner's read
 # timeout (AGENT_READ_TIMEOUT, under the 900 s Lambda limit) after a
-# queue delay, so the sweeper closes STARTING only after 1260 s
-# (ESTIMATE, from the design review). RESUMING is closed after 1200 s.
+# queue delay. The async queue delay is bounded by the runner's
+# MaximumEventAgeInSeconds (RUNNER_MAX_EVENT_AGE_S in
+# infra/stacks/approvals.py: an older event is dropped, never run), so
+# 300 s of queue plus 900 s of Lambda stays under the 1260 s after which
+# the sweeper closes STARTING (ESTIMATE, from the design review).
+# RESUMING is closed after 1200 s.
 STARTING_TIMEOUT_S = 1260
 RESUMING_TIMEOUT_S = 1200
+# A decided run (APPROVED or DECLINED) whose resume event has not moved
+# it to RESUMING after this long is handed to the runner again: the API's
+# hand-off failed, or the event aged out of the queue. A duplicate resume
+# is a no-op (the APPROVED/DECLINED -> RESUMING move is conditioned on
+# the version), so re-dispatching a run whose event is merely late is
+# safe.
+REDISPATCH_AFTER_S = 120
+RUNNER_ARN = os.environ.get("RUNNER_ARN", "")
+
+
+def _decided_ts(item: dict) -> int:
+    """When the current decision was recorded; 0 (so: old) when unknown."""
+    try:
+        return int(datetime.datetime.fromisoformat(str(item.get("decided_at", ""))).timestamp())
+    except (TypeError, ValueError):
+        return 0
+
+
+def _invoke_runner(payload: dict) -> None:
+    """Async-invoke the runner Lambda (the sweeper's resume re-dispatch)."""
+    boto3.client("lambda", region_name=common.REGION).invoke(
+        FunctionName=RUNNER_ARN,
+        InvocationType="Event",
+        Payload=json.dumps(payload).encode(),
+    )
 
 
 def _quietly(command, *args) -> bool:
@@ -300,6 +333,19 @@ def sweep(context=None) -> dict:
             service.record_failure, run, "ResumeOutcomeUnknown: the resume did not report back"
         ):
             rescued += 1
+
+    # A decision whose resume never reached the runner leaves the run
+    # APPROVED or DECLINED, which nothing else moves: hand it over again.
+    redispatched = 0
+    for status in (domain.APPROVED, domain.DECLINED):
+        for item in common.list_by_status(status, limit=50):
+            if int(time.time()) - _decided_ts(item) < REDISPATCH_AFTER_S:
+                continue
+            try:
+                _invoke_runner({"action": "resume", "approval_id": str(item["approval_id"])})
+            except Exception:  # never crash the sweep; the next one tries again
+                continue
+            redispatched += 1
 
     expired = [
         item
@@ -352,6 +398,7 @@ def sweep(context=None) -> dict:
         "closed_starting": closed_starting,
         "closed_try": closed_try,
         "deferred": deferred,
+        "redispatched": redispatched,
     }
 
 
@@ -365,6 +412,4 @@ def handler(event, context):
         )
     if action == "resume":
         return resume(str(event.get("approval_id", "")), context=context)
-    if action == "sweep":
-        return sweep(context)
     return {"status": "error", "error": f"unknown action {action!r}"}
