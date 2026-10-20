@@ -28,7 +28,8 @@ One function, five actions, one per task state:
   then the run moves to RESUMING and the workflow loops to AgentTurn. A
   decision that can no longer be applied, past the deadline or refused
   by the aggregate, sends the run to Expire, so it ends refused and
-  never stays open.
+  never stays open. Contention (domain.Busy) or any other error is
+  raised, and the state machine retries this idempotent task.
 - ``expire`` (Expire, after the wait's timeout): as runner.sweep does,
   a /try pause simply ends EXPIRED (no agent call, no GPU wake); an
   approval-lane pause is resumed with "no", then EXPIRED.
@@ -264,15 +265,28 @@ def apply_decision(approval_id: str, decision: dict[str, Any]) -> dict[str, Any]
                 now=float(decision.get("decided_ts") or time.time()),
                 by_workflow=True,
             )
+        except domain.Busy:
+            raise  # transient contention: the state machine retries the task
         except domain.DomainError as exc:
-            # Past the deadline, or refused by the aggregate: the pause
-            # ends the way an undecided one does, never left open.
-            _log(decision_not_applied=type(exc).__name__)
-            return _result(EXPIRED)
+            run = work.get(approval_id)
+            moved = run is not None and run.status in {
+                domain.APPROVED,
+                domain.DECLINED,
+                domain.RESUMING,
+            }
+            if not (isinstance(exc, domain.Conflict) and moved):
+                # Past the deadline, or refused by the aggregate: the pause
+                # ends the way an undecided one does, never left open.
+                _log(decision_not_applied=type(exc).__name__)
+                return _result(EXPIRED)
+            if run.status == domain.RESUMING:
+                return _result(RESUME)
         run = work.get(approval_id)
     if run is not None and run.status in {domain.APPROVED, domain.DECLINED}:
         try:
             service.resume(approval_id)
+        except domain.Busy:
+            raise  # transient contention: the state machine retries the task
         except domain.Conflict:
             run = work.get(approval_id)
             moved = run is not None and run.status == domain.RESUMING

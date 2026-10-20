@@ -28,12 +28,16 @@ and ApplyDecision, the decision the API sent. ApplyDecision writes its
 result over that decision, so the approver's identity leaves the state
 at once.
 
-Retries: every task retries only the Lambda service's own errors,
-named one by one (never States.ALL, States.TaskFailed or
-Lambda.ClientExecutionTimeoutException). A retried AgentTurn or Expire
-cannot run the agent twice: the turn claims the run first, and a
-retried invocation that finds the claim taken reports the row's outcome
-instead (workflow.py).
+Retries: every task retries the Lambda service's own errors, named one
+by one (never States.ALL or Lambda.ClientExecutionTimeoutException). A
+retried AgentTurn or Expire cannot run the agent twice: the turn claims
+the run first, and a retried invocation that finds the claim taken
+reports the row's outcome instead (workflow.py). ApplyDecision and
+RecordFailure never invoke the agent and are idempotent, so they also
+retry a failed invocation of their own (States.TaskFailed, for example a
+DynamoDB throttle): without it one transient error would leave a decided
+run open, since RecordFailure cannot move PENDING, APPROVED or DECLINED
+to ERROR and the sweeper skips workflow-owned runs.
 """
 
 from __future__ import annotations
@@ -62,8 +66,8 @@ AGENT_TASK_TIMEOUT_S = 960
 SHORT_TASK_TIMEOUT_S = 60
 
 
-def _retry() -> list[dict[str, Any]]:
-    return [
+def _retry(idempotent: bool = False) -> list[dict[str, Any]]:
+    retries = [
         {
             "ErrorEquals": list(LAMBDA_SERVICE_ERRORS),
             "IntervalSeconds": 2,
@@ -71,13 +75,25 @@ def _retry() -> list[dict[str, Any]]:
             "BackoffRate": 2.0,
         }
     ]
+    if idempotent:
+        retries.append(
+            {
+                "ErrorEquals": ["States.TaskFailed"],
+                "IntervalSeconds": 2,
+                "MaxAttempts": 3,
+                "BackoffRate": 2.0,
+            }
+        )
+    return retries
 
 
 def _to_failure() -> dict[str, Any]:
     return {"ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "RecordFailure"}
 
 
-def _task(action: str, extra: dict[str, Any], timeout_s: int) -> dict[str, Any]:
+def _task(
+    action: str, extra: dict[str, Any], timeout_s: int, idempotent: bool = False
+) -> dict[str, Any]:
     return {
         "Type": "Task",
         "Resource": LAMBDA_INVOKE,
@@ -86,7 +102,7 @@ def _task(action: str, extra: dict[str, Any], timeout_s: int) -> dict[str, Any]:
             "Payload": {"action": action, "approval_id.$": "$.approval_id", **extra},
         },
         "TimeoutSeconds": timeout_s,
-        "Retry": _retry(),
+        "Retry": _retry(idempotent),
     }
 
 
@@ -144,7 +160,9 @@ def definition() -> dict[str, Any]:
         "Next": "ApplyDecision",
     }
 
-    apply_decision = _task("apply", {"decision.$": "$.decision"}, SHORT_TASK_TIMEOUT_S)
+    apply_decision = _task(
+        "apply", {"decision.$": "$.decision"}, SHORT_TASK_TIMEOUT_S, idempotent=True
+    )
     apply_decision.update(
         ResultSelector=_outcome_selector(),
         ResultPath="$.decision",
@@ -160,7 +178,9 @@ def definition() -> dict[str, Any]:
         Next="ExpiryOutcome",
     )
 
-    record_failure = _task("fail", {"error.$": "$.error.Error"}, SHORT_TASK_TIMEOUT_S)
+    record_failure = _task(
+        "fail", {"error.$": "$.error.Error"}, SHORT_TASK_TIMEOUT_S, idempotent=True
+    )
     record_failure.update(
         ResultPath=None,
         Catch=[{"ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "Failed"}],

@@ -394,21 +394,27 @@ def test_every_task_invokes_the_task_function_and_retries_only_lambda_service_er
     tasks = {name: spec for name, spec in states.items() if spec["Type"] == "Task"}
     assert set(tasks) == {"AgentTurn", "WaitForDecision", "ApplyDecision", "Expire",
                           "RecordFailure"}
-    forbidden = {"States.ALL", "States.TaskFailed", "Lambda.ClientExecutionTimeoutException",
-                 "States.Timeout"}
+    forbidden = {"States.ALL", "Lambda.ClientExecutionTimeoutException", "States.Timeout"}
+    # Only the tasks that never invoke the agent retry their own failures.
+    idempotent = {"ApplyDecision", "RecordFailure"}
     for name, spec in tasks.items():
         assert spec["Parameters"]["FunctionName"] == "${TaskFunctionArn}", name
         assert spec["Parameters"]["Payload"]["approval_id.$"] == "$.approval_id"
         assert spec["Parameters"]["Payload"]["action"] in asl_actions(), name
-        [retry] = spec["Retry"]
+        retry, *own = spec["Retry"]
         assert retry["ErrorEquals"] == [
             "Lambda.ServiceException",
             "Lambda.AWSLambdaException",
             "Lambda.SdkClientException",
             "Lambda.TooManyRequestsException",
         ], name
-        assert not forbidden & set(retry["ErrorEquals"])
-        assert retry["MaxAttempts"] <= 3
+        if name in idempotent:
+            assert [r["ErrorEquals"] for r in own] == [["States.TaskFailed"]], name
+        else:
+            assert own == [], name
+        for rule in spec["Retry"]:
+            assert not forbidden & set(rule["ErrorEquals"])
+            assert rule["MaxAttempts"] <= 3
         # Every caught failure is recorded, except RecordFailure's own.
         last = spec["Catch"][-1]
         assert last["ErrorEquals"] == ["States.ALL"]
@@ -1178,3 +1184,30 @@ def test_existing_logical_ids_stay_and_new_ones_are_unique():
 def test_no_em_or_en_dashes(path):
     text = (ROOT / path).read_text(encoding="utf-8")
     assert chr(0x2014) not in text and chr(0x2013) not in text
+
+
+def test_contention_on_apply_is_raised_for_the_retry_and_a_lost_race_still_resumes(
+    wf, monkeypatch
+):
+    _flag_on(monkeypatch)
+    monkeypatch.setattr(wf.common, "invoke_agent", Agent(PAUSE_PAYLOAD))
+    token = _start_try(wf)
+    sim = Sim(wf.workflow, wf.sfn).start(token)
+    _try_decide(wf, token)
+    _, output = sim.answered
+    # Lasting contention: raised, so States.TaskFailed retries the task.
+    for _ in range(4):
+        wf.table.dynamo.inject.append(["TransactionConflict"])
+    with pytest.raises(wf.domain.Busy):
+        wf.workflow.apply_decision(token, output)
+    assert wf.table.items[token]["status"] == "PENDING"
+    # A duplicate apply that lost the race to the first one still resumes.
+    real = wf.workflow.service.record_decision
+
+    def _lose(*args, **kwargs):
+        real(*args, **kwargs)
+        raise wf.domain.Conflict()
+
+    monkeypatch.setattr(wf.workflow.service, "record_decision", _lose)
+    assert wf.workflow.apply_decision(token, output)["outcome"] == "resume"
+    assert wf.table.items[token]["status"] == "RESUMING"
