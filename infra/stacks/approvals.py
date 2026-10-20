@@ -41,15 +41,16 @@ The API function gains dynamodb:Query on the event log, nothing else.
 The lachesis-run workflow (B6), deployed dark: a Standard state
 machine (definition in stacks/run_workflow.py, task code in
 approvals/lambda/workflow.py) that owns a run from start to end and is
-then its single status writer, with the human pause as a
+then its status writer (the sweeper closes a row only once no execution
+can still write it), with the human pause as a
 lambda:invoke.waitForTaskToken task. Nothing starts it unless the API's
 USE_STEP_FUNCTIONS is "true" (LACHESIS_USE_STEP_FUNCTIONS at synth time,
 "false" by default); with it "false" the API, runner and sweeper behave
 as before B6. Least privilege: the state machine role may invoke the
 task function only; the API may StartExecution and SendTaskSuccess on
 this state machine only; the task function may SendTaskFailure on it
-only. An alarm on failed executions goes to the alerts topic. Not yet
-deployed or run on AWS.
+only. Alarms on failed, aborted and timed-out executions go to the
+alerts topic. Not yet deployed or run on AWS.
 
 Deploy isolation: the iac workflow deploys this stack with
 --exclusively, so a deploy here never redeploys LachesisFoundation,
@@ -64,6 +65,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+from email.utils import parseaddr
 
 import aws_cdk as cdk
 from aws_cdk import aws_apigatewayv2 as apigw
@@ -118,6 +120,31 @@ RUN_FAILED_METRIC = "RunFailedPublished"
 USE_STEP_FUNCTIONS = os.environ.get("LACHESIS_USE_STEP_FUNCTIONS", "false").strip().lower()
 if USE_STEP_FUNCTIONS not in {"true", "false"}:
     raise ValueError("LACHESIS_USE_STEP_FUNCTIONS must be true or false")
+
+
+def ses_identity_arns(account: str, region: str = "eu-west-1") -> list[str]:
+    """The exact SES identities the optional approval card may use, from
+    LACHESIS_SES_FROM and LACHESIS_SES_TO at synth time: each address,
+    and its domain, whichever of the two is the verified identity. The To
+    side is included because in the SES sandbox the recipient must be a
+    verified identity too. Empty when no From address is set (the hosted
+    demo), and then no SES statement is added at all: the card is not
+    sent without one (runner._send_card)."""
+    sender = parseaddr(os.environ.get("LACHESIS_SES_FROM", ""))[1]
+    if "@" not in sender:
+        return []
+    recipient = parseaddr(os.environ.get("LACHESIS_SES_TO", ""))[1]
+    arns: list[str] = []
+    for address in (sender, recipient):
+        if "@" not in address:
+            continue
+        for identity in (address, address.rsplit("@", 1)[1]):
+            arn = f"arn:aws:ses:{region}:{account}:identity/{identity}"
+            if arn not in arns:
+                arns.append(arn)
+    return arns
+
+
 LAMBDA_ASSET = str(_REPO_ROOT / "approvals" / "lambda")
 CONSOLE_ASSET = str(_REPO_ROOT / "approvals" / "console")
 
@@ -241,14 +268,13 @@ class ApprovalsStack(cdk.Stack):
                 resources=[agent.runtime_arn, f"{agent.runtime_arn}/*"],
             )
         )
-        runner.add_to_role_policy(
-            iam.PolicyStatement(
-                actions=["ses:SendEmail"],
-                resources=[
-                    f"arn:aws:ses:eu-west-1:{self.account}:identity/*",
-                ],
+        # The optional card: only the identities LACHESIS_SES_FROM and
+        # LACHESIS_SES_TO name, and no statement when they are unset.
+        ses_identities = ses_identity_arns(self.account)
+        if ses_identities:
+            runner.add_to_role_policy(
+                iam.PolicyStatement(actions=["ses:SendEmail"], resources=ses_identities)
             )
-        )
 
         sweeper = lambda_.Function(
             self,
@@ -395,14 +421,10 @@ class ApprovalsStack(cdk.Stack):
                 resources=[agent.runtime_arn, f"{agent.runtime_arn}/*"],
             )
         )
-        run_task.add_to_role_policy(
-            iam.PolicyStatement(
-                actions=["ses:SendEmail"],
-                resources=[
-                    f"arn:aws:ses:eu-west-1:{self.account}:identity/*",
-                ],
+        if ses_identities:
+            run_task.add_to_role_policy(
+                iam.PolicyStatement(actions=["ses:SendEmail"], resources=ses_identities)
             )
-        )
         state_machine_arn = (
             f"arn:aws:states:{self.region}:{self.account}:stateMachine:"
             f"{run_workflow.STATE_MACHINE_NAME}"
@@ -411,13 +433,27 @@ class ApprovalsStack(cdk.Stack):
             iam.PolicyStatement(actions=["states:SendTaskFailure"], resources=[state_machine_arn])
         )
         # The state machine role: invoke the task function, nothing else.
-        # The definition is a string, so CDK adds no grant of its own.
+        # The definition is a string, so CDK adds no grant of its own. The
+        # trust is limited to this account and to this state machine (the
+        # confused-deputy guard), by literal ARN: a reference would be a
+        # cycle (role, state machine, role). Both the state machine ARN and
+        # its executions' ARNs are listed, since which of the two Step
+        # Functions presents as aws:SourceArn is not verified here.
+        workflow_execution_arns = (
+            f"arn:aws:states:{self.region}:{self.account}:execution:"
+            f"{run_workflow.STATE_MACHINE_NAME}:*"
+        )
         workflow_role = iam.Role(
             self,
             "RunWorkflowRole",
             assumed_by=iam.ServicePrincipal(
                 "states.amazonaws.com",
-                conditions={"StringEquals": {"aws:SourceAccount": self.account}},
+                conditions={
+                    "StringEquals": {"aws:SourceAccount": self.account},
+                    "ArnLike": {
+                        "aws:SourceArn": [state_machine_arn, workflow_execution_arns]
+                    },
+                },
             ),
         )
         workflow_role.add_to_policy(
@@ -455,6 +491,42 @@ class ApprovalsStack(cdk.Stack):
             treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
         )
         workflow_failed_alarm.add_alarm_action(cw_actions.SnsAction(foundation.alerts_topic))
+        # An aborted or timed-out execution writes nothing to its row; the
+        # sweeper closes the row after its grace, and these say it happened.
+        workflow_aborted_alarm = cloudwatch.Alarm(
+            self,
+            "RunWorkflowAbortedAlarm",
+            metric=cloudwatch.Metric(
+                namespace="AWS/States",
+                metric_name="ExecutionsAborted",
+                dimensions_map={"StateMachineArn": state_machine.attr_arn},
+                statistic="Sum",
+                period=cdk.Duration.minutes(5),
+            ),
+            threshold=1,
+            evaluation_periods=1,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            alarm_description="A lachesis-run execution was aborted (B6 workflow)",
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+        workflow_aborted_alarm.add_alarm_action(cw_actions.SnsAction(foundation.alerts_topic))
+        workflow_timed_out_alarm = cloudwatch.Alarm(
+            self,
+            "RunWorkflowTimedOutAlarm",
+            metric=cloudwatch.Metric(
+                namespace="AWS/States",
+                metric_name="ExecutionsTimedOut",
+                dimensions_map={"StateMachineArn": state_machine.attr_arn},
+                statistic="Sum",
+                period=cdk.Duration.minutes(5),
+            ),
+            threshold=1,
+            evaluation_periods=1,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            alarm_description="A lachesis-run execution timed out (B6 workflow)",
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+        workflow_timed_out_alarm.add_alarm_action(cw_actions.SnsAction(foundation.alerts_topic))
         # B6: the API starts executions and answers a decision with
         # SendTaskSuccess, on this state machine only. With the flag
         # "false" it calls neither.

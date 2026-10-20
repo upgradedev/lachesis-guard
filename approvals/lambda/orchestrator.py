@@ -20,13 +20,25 @@ The flag picks how a NEW run starts. A decision follows the row: a run
 the workflow owns is decided through it even after the flag is turned
 off, and a runner-owned run through the runner even with the flag on.
 
-The SendTaskSuccess output carries the decision, the approver's Cognito
-sub and username, and the decision time. Step Functions keeps it in the
-execution history, which only principals of this account with Step
-Functions read access can see; it never reaches public_view, the ledger
-or an event. The approval id is the execution name and input; for a /try
-run it is the token of that run's decision endpoint, so the same holds
-for the history and the execution list.
+Accepted risks, both in-account only (not yet observed on AWS):
+
+- The SendTaskSuccess output carries the decision, the approver's
+  Cognito sub and username, and the decision time. Step Functions keeps
+  it in the execution history for 90 days after the execution closes,
+  longer than the row, whose copy is CMK-encrypted and removed by TTL a
+  day after the expiry. Any principal of this account with
+  states:GetExecutionHistory or states:DescribeExecution can read it
+  (the AWS managed ReadOnlyAccess policy includes both). It never
+  reaches public_view, the ledger or an event. Moving the identity out
+  of the output would need an API write ahead of SendTaskSuccess, which
+  races the expiry and needs undoing when the send fails, so it is kept.
+- The approval id is the execution name and input, as the design
+  requires (execution name = approval_id, which makes a repeated start
+  idempotent). For a /try run it is the bearer token of that run's
+  decision endpoint, so it also appears in ListExecutions, the execution
+  ARN, the CloudTrail StartExecution request and the execution status
+  change events on the default bus. The token decides only for about
+  the run's expiry window, and reads it until the row's TTL.
 """
 
 from __future__ import annotations

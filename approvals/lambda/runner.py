@@ -294,6 +294,32 @@ RESUMING_TIMEOUT_S = 1200
 REDISPATCH_AFTER_S = 120
 RUNNER_ARN = os.environ.get("RUNNER_ARN", "")
 
+# B6: a run the lachesis-run workflow owns is written by its execution,
+# and the sweep leaves it alone while one could still be live. Past these
+# graces no execution can still write the row (an aborted or failed one,
+# or an Expire that lost every race), so the sweep closes it, without
+# ever re-dispatching a resume. The task numbers mirror
+# infra/stacks/run_workflow.py (the Lambda bundle cannot import infra/);
+# tests/test_run_workflow.py pins them against the definition.
+#
+# - STARTING and RESUMING: STARTING_TIMEOUT_S and RESUMING_TIMEOUT_S, as
+#   for a runner-owned run; both are longer than one AgentTurn or Expire
+#   (WORKFLOW_TASK_TIMEOUT_S) plus its retry intervals.
+# - PENDING: the wait ends at expires_ts; its Expire task then has
+#   WORKFLOW_TASK_TIMEOUT_S, after up to WORKFLOW_RETRY_INTERVALS_S of
+#   retries of the Lambda service's own errors.
+# - APPROVED or DECLINED: every ApplyDecision attempt but the last ends
+#   inside its 60 s task timeout (a timeout is not retried), and the last
+#   one, once timed out, can run on to the 900 s Lambda limit: about
+#   6 x 60 s plus 28 s of retry intervals plus 900 s, under this grace.
+WORKFLOW_WAIT_GRACE_S = 5
+WORKFLOW_TASK_TIMEOUT_S = 960
+WORKFLOW_RETRY_INTERVALS_S = 2 + 4 + 8
+WORKFLOW_PENDING_GRACE_S = (
+    WORKFLOW_WAIT_GRACE_S + WORKFLOW_TASK_TIMEOUT_S + WORKFLOW_RETRY_INTERVALS_S + 60
+)
+WORKFLOW_DECIDED_GRACE_S = 1500
+
 
 def _decided_ts(item: dict) -> int:
     """When the current decision was recorded; 0 (so: old) when unknown."""
@@ -313,10 +339,27 @@ def _invoke_runner(payload: dict) -> None:
 
 
 def _owned_by_workflow(item: dict) -> bool:
-    """A run the lachesis-run workflow owns (B6): the workflow is its only
-    status writer, so the sweep leaves it alone. Its waits end at the
-    row's expiry through the state machine, not through this sweep."""
+    """A run the lachesis-run workflow owns (B6): its execution writes the
+    status, and its waits end at the row's expiry through the state
+    machine. The sweep closes such a row only once no execution can still
+    write it (the WORKFLOW_*_GRACE_S rules above)."""
     return item.get("orchestrator") == domain.WORKFLOW
+
+
+def _close_decided(run: domain.Run, now: float) -> None:
+    """A workflow-owned APPROVED or DECLINED run whose execution ended
+    without resuming it. The transition table moves a decided run only to
+    RESUMING, so this one commit moves it there and on to ERROR. The agent
+    is not invoked, and the resume is never re-dispatched: the execution
+    that owned it is gone."""
+    run.begin_resume(now)
+    run.fail("WorkflowLost: the decision was recorded but never resumed")
+    service.unit_of_work().commit(run)
+
+
+def _pending_grace(item: dict) -> int:
+    """How long past its expiry a PENDING row is left to its owner."""
+    return WORKFLOW_PENDING_GRACE_S if _owned_by_workflow(item) else 0
 
 
 def _quietly(command, *args) -> bool:
@@ -339,11 +382,10 @@ def sweep(context=None) -> dict:
     for item in common.list_by_status_oldest("STARTING"):
         if int(time.time()) - int(item.get("created_ts", 0)) < STARTING_TIMEOUT_S:
             continue
-        # A workflow-owned run that no execution ever claimed (its
-        # StartExecution failed, and so did recording that) has no other
-        # writer, so the sweep closes it like any stale start.
-        if _owned_by_workflow(item) and item.get("claimed_request_id"):
-            continue
+        # A workflow-owned run is closed the same way: one that no
+        # execution claimed (its StartExecution failed, and so did
+        # recording that) has no other writer, and a claimed one is past
+        # any AgentTurn, so its execution is gone.
         run = domain.Run.from_item(item)
         if _quietly(service.record_failure, run, "StartTimeout: the start did not report back"):
             closed_starting += 1
@@ -353,9 +395,9 @@ def sweep(context=None) -> dict:
     # have run: after twenty minutes the row ends ERROR, never PENDING,
     # where a person could decide it a second time.
     rescued = 0
+    # A workflow-owned RESUMING run past the same timeout is past any
+    # AgentTurn or Expire, so it is closed the same way.
     for item in common.list_by_status_oldest("RESUMING"):
-        if _owned_by_workflow(item):
-            continue
         if int(time.time()) - int(item.get("resuming_ts", 0)) < RESUMING_TIMEOUT_S:
             continue
         run = domain.Run.from_item(item)
@@ -367,9 +409,14 @@ def sweep(context=None) -> dict:
     # A decision whose resume never reached the runner leaves the run
     # APPROVED or DECLINED, which nothing else moves: hand it over again.
     redispatched = 0
+    closed_decided = 0
     for status in (domain.APPROVED, domain.DECLINED):
         for item in common.list_by_status_oldest(status):
             if _owned_by_workflow(item):
+                if int(time.time()) - _decided_ts(item) < WORKFLOW_DECIDED_GRACE_S:
+                    continue
+                if _quietly(_close_decided, domain.Run.from_item(item), time.time()):
+                    closed_decided += 1
                 continue
             if int(time.time()) - _decided_ts(item) < REDISPATCH_AFTER_S:
                 continue
@@ -379,15 +426,19 @@ def sweep(context=None) -> dict:
                 continue
             redispatched += 1
 
+    # A workflow-owned PENDING run joins this loop only once its execution
+    # can no longer be live; its dead task token is dropped in the same
+    # write that ends the pause.
     expired = [
         item
         for item in common.list_by_status_oldest("PENDING")
-        if int(item.get("expires_ts", 0)) < int(time.time()) and not _owned_by_workflow(item)
+        if int(item.get("expires_ts", 0)) + _pending_grace(item) < int(time.time())
     ]
     closed_try = 0
     deferred = 0
     for item in expired:
         run = domain.Run.from_item(item)
+        run.clear_task_token()
         if run.lane == "try":
             # A public /try pause that nobody decided simply ends. It
             # must not resume the agent: resuming re-invokes the runtime
@@ -431,6 +482,7 @@ def sweep(context=None) -> dict:
         "closed_try": closed_try,
         "deferred": deferred,
         "redispatched": redispatched,
+        "closed_decided": closed_decided,
     }
 
 

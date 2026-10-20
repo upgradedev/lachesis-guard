@@ -2,9 +2,12 @@
 
 lachesis-run is a Standard state machine (infra/stacks/run_workflow.py)
 that owns one run from its start to its end when USE_STEP_FUNCTIONS is
-on. It is then the single writer of the run's status: every write below
-is a command of approval/service.py, one Unit of Work transaction
-guarded by the status and version the run was loaded at. The state
+on. It is then the writer of the run's status, with two exceptions: the
+API records ERROR when StartExecution fails, and the sweeper closes a row
+that no live execution can still write (runner.sweep, after a grace
+longer than any task). Every write below is a command of
+approval/service.py, one Unit of Work transaction guarded by the status
+and version the run was loaded at. The state
 carries the approval id and these small results only; the prompt, the
 card and the interrupts stay on the run row.
 
@@ -32,11 +35,15 @@ One function, five actions, one per task state:
   raised, and the state machine retries this idempotent task.
 - ``expire`` (Expire, after the wait's timeout): as runner.sweep does,
   a /try pause simply ends EXPIRED (no agent call, no GPU wake); an
-  approval-lane pause is resumed with "no", then EXPIRED.
+  approval-lane pause is resumed with "no", then EXPIRED. The wait's own
+  Lambda may commit the pause and its token after Expire loaded the row;
+  the writes before the agent call are then tried again on the fresh row
+  (_begin_expiry), never reported as an open interrupt.
 - ``fail`` (RecordFailure, after any caught task failure): ERROR from
   STARTING or RESUMING, with only the error name. A run that is PENDING,
   APPROVED or DECLINED cannot move to ERROR by the transition table; it
-  is left as it is and the execution ends Failed, which alarms.
+  is left as it is, the execution ends Failed, which alarms, and the
+  sweeper closes the row once its grace has passed.
 
 Outcomes the Choice states branch on: interrupt, completed, refused,
 failed, expired, resume.
@@ -69,7 +76,7 @@ OUTCOMES = (INTERRUPT, COMPLETED, REFUSED, FAILED, EXPIRED, RESUME)
 # The heartbeat window therefore ends the wait at the row's expiry, and
 # the task timeout, which Step Functions requires to be longer, is this
 # much later. Both are caught and lead to Expire.
-WAIT_GRACE_S = 5
+WAIT_GRACE_S = runner.WORKFLOW_WAIT_GRACE_S
 
 _TERMINAL_OUTCOME = {
     domain.DONE: COMPLETED,
@@ -82,6 +89,11 @@ _TERMINAL_OUTCOME = {
 # invocation (there is no later sweep for a workflow-owned run).
 EXPIRY_BACKOFF_S = (1.0, 2.0)
 _sleep = time.sleep
+
+# Expire's writes before the agent call are tried this many times, each on
+# a freshly loaded row, when a concurrent commit (the wait's own Lambda)
+# moved the row under them (_begin_expiry).
+EXPIRE_ATTEMPTS = 3
 
 
 def _log(**fields: Any) -> None:
@@ -312,23 +324,63 @@ def _expiry_answer(run: domain.Run, answer: str, context) -> dict:
     raise AssertionError("unreachable")  # pragma: no cover
 
 
+def _open_for_expiry(run: domain.Run) -> bool:
+    """A row Expire may still close before any agent call: PENDING, or a
+    pause staged on STARTING or RESUMING that the wait never opened."""
+    if run.status == domain.PENDING:
+        return True
+    return bool(run.staged_pause) and run.status in {domain.STARTING, domain.RESUMING}
+
+
+def _begin_expiry(work, approval_id: str) -> tuple[str, domain.Run | None, str]:
+    """The writes of Expire that come before the agent call, each attempt
+    on a freshly loaded row.
+
+    The wait's heartbeat can fire before its own Lambda (a cold start, or
+    a wait of about a second after a resume that failed before it was
+    sent) has committed the pause and the token. That commit then lands
+    between this load and this write, and the write conflicts. The row is
+    loaded again and the expiry tried again on what is there now, so a
+    lost race never leaves the run PENDING with a dead token.
+
+    Returns ("expired", None, ""), ("resume", run, answer) once the
+    approval-lane run is RESUMING (nothing after that point may be
+    retried: the agent is about to be invoked), ("settled", None, "")
+    when the row is no longer open, or ("stuck", None, "") when every
+    attempt lost its race."""
+    for _ in range(EXPIRE_ATTEMPTS):
+        run = work.get(approval_id)
+        if run is None or not _open_for_expiry(run):
+            return "settled", None, ""
+        try:
+            if run.status != domain.PENDING:
+                # The wait timed out before its Lambda opened the pause.
+                run.await_decision("", common.TTL_SECONDS)
+                work.commit(run)
+            run.clear_task_token()
+            if run.lane == "try":
+                service.expire(run)
+                return EXPIRED, None, ""
+            return RESUME, run, service.expiry_resume(run)
+        except domain.Conflict:
+            continue  # includes Busy: nothing was written, load and try again
+    return "stuck", None, ""
+
+
 def expire(approval_id: str, context=None) -> dict[str, Any]:
     work = service.unit_of_work()
-    run = work.get(approval_id)
-    if run is None:
+    step, run, answer = _begin_expiry(work, approval_id)
+    if step == EXPIRED:
+        return _result(EXPIRED)
+    if step == "stuck":
+        # Still open after every attempt. The execution ends Failed, which
+        # alarms, and the sweeper closes the row once no execution can
+        # still write it (the WORKFLOW_*_GRACE_S rules in runner.py).
+        _log(expiry_unrecorded="Conflict")
         return _result(FAILED)
+    if step != RESUME or run is None:
+        return _settled(approval_id, "ResumeOutcomeUnknown")
     try:
-        if run.staged_pause and run.status in {domain.STARTING, domain.RESUMING}:
-            # The wait timed out before its Lambda opened the pause.
-            run.await_decision("", common.TTL_SECONDS)
-            work.commit(run)
-        if run.status != domain.PENDING:
-            return _settled(approval_id, "ResumeOutcomeUnknown")
-        run.clear_task_token()
-        if run.lane == "try":
-            service.expire(run)
-            return _result(EXPIRED)
-        answer = service.expiry_resume(run)
         try:
             raw = _expiry_answer(run, answer, context)
         except Exception as exc:

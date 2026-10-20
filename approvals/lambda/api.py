@@ -43,7 +43,8 @@ workflow owns is checked against the same refusals without a write, then
 sent with SendTaskSuccess (a wait that already ended is 409, any other
 failure 503); the workflow records it. The one status this API still
 writes for such a run is ERROR when StartExecution fails, because then
-no execution exists to write it.
+no execution exists to write it; if an execution did start and has
+already taken the run, that write conflicts and the start answers 202.
 """
 
 from __future__ import annotations
@@ -149,16 +150,44 @@ def _error(exc: domain.DomainError, not_found: str = "") -> dict:
     return _response(exc.http_status, {"error": str(exc)})
 
 
+def _claimed_by_an_execution(approval_id: str) -> domain.Run | None:
+    """The row, if an execution has taken it: claimed, or moved on from
+    STARTING. None when it is still an unclaimed STARTING row, or when it
+    cannot be read."""
+    try:
+        current = service.unit_of_work().get(approval_id)
+    except Exception:
+        return None
+    if current is None:
+        return None
+    if current.status == domain.STARTING and not current.row.get("claimed_request_id"):
+        return None
+    return current
+
+
 def _start_workflow(run: domain.Run, id_key: str) -> dict:
     """Start the lachesis-run execution of a committed STARTING run (B6).
     If StartExecution fails, the run ends ERROR at once, as a failed
-    runner hand-off does."""
+    runner hand-off does.
+
+    StartExecution can succeed on the server while every client attempt
+    fails (a read timeout after the request was accepted). The execution
+    then claims the run, and the ERROR write conflicts. A row that an
+    execution has taken is answered 202 with its real status, since the
+    run goes on; 502 means no execution has it. An unclaimed STARTING row
+    whose ERROR write failed is still 502, and the sweeper closes it."""
     try:
         orchestrator.start(run.approval_id)
     except Exception as exc:
-        with contextlib.suppress(Exception):
-            service.record_failure(run, common.error_text(exc))
         print(json.dumps({"workflow_start_failed": type(exc).__name__}))
+        try:
+            service.record_failure(run, common.error_text(exc))
+        except domain.Conflict:
+            owned = _claimed_by_an_execution(run.approval_id)
+            if owned is not None:
+                return _response(202, {id_key: owned.approval_id, "status": owned.status})
+        except Exception:  # the ERROR write failed: the sweeper closes STARTING
+            pass
         return _response(502, {"error": "the run could not be handed to the workflow"})
     return _response(202, {id_key: run.approval_id, "status": run.status})
 

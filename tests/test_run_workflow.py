@@ -12,7 +12,9 @@ scripted stub of common.invoke_agent.
 Both flag states are covered: with USE_STEP_FUNCTIONS unset or "false"
 the API never builds a Step Functions client and the runner path is the
 one test_approvals pins; with it "true" a start is a StartExecution and a
-decision a SendTaskSuccess, and the workflow writes every status.
+decision a SendTaskSuccess, and the workflow writes every status except
+ERROR on a failed StartExecution (the API) and the close of a row that no
+live execution can still write (the sweeper, after its grace).
 """
 
 from __future__ import annotations
@@ -140,12 +142,31 @@ def _with_result(data, result_path, value):
     return data
 
 
-class Sim:
-    """One execution of the definition, run state by state. Retries are
-    not simulated (they name only Lambda service errors, which the task
-    function never raises); retried invocations are tested directly."""
+TIMEOUTS = ("States.Timeout", "States.HeartbeatTimeout")
 
-    def __init__(self, workflow, sfn, definition=None):
+
+def _matches(error, names):
+    """ErrorEquals: States.TaskFailed matches any error but a timeout."""
+    if error in names or "States.ALL" in names:
+        return True
+    return "States.TaskFailed" in names and error not in TIMEOUTS
+
+
+class Sim:
+    """One execution of the definition, run state by state.
+
+    Each Task honours its Retry list: the first retrier whose ErrorEquals
+    matches is used, its attempts are counted per state entry, and past
+    its MaxAttempts the error falls through to Catch. A function error is
+    its exception's type name (domain.Busy is "Busy"), as Lambda reports
+    it. ``lost`` simulates at-least-once delivery: {state: n} lets the
+    function run, then reports Lambda.ServiceException for its first n
+    invocations, so the retry runs it again with a fresh request id (and,
+    for the wait, a fresh task token). ``late_await`` holds the wait's
+    invocation back, like a cold start, until deliver_late() runs it,
+    which a test can do after the wait has already timed out."""
+
+    def __init__(self, workflow, sfn, definition=None, lost=None, late_await=False):
         self.definition = definition or asl.definition()
         self.workflow = workflow
         self.sfn = sfn
@@ -159,6 +180,10 @@ class Sim:
         self.answered = None
         self.failed = None
         self.payloads = []
+        self.retries = []  # (state name, error) per retried attempt
+        self.lost = dict(lost or {})
+        self.late_await = late_await
+        self.late = None  # the held-back wait payload
         self._ids = itertools.count(1)
 
     def start(self, approval_id):
@@ -169,7 +194,7 @@ class Sim:
 
     def _catch(self, spec, error, cause):
         for catcher in spec.get("Catch", []):
-            if error in catcher["ErrorEquals"] or "States.ALL" in catcher["ErrorEquals"]:
+            if _matches(error, catcher["ErrorEquals"]):
                 self.data = _with_result(
                     self.data, catcher["ResultPath"], {"Error": error, "Cause": cause}
                 )
@@ -180,6 +205,66 @@ class Sim:
     def _invoke(self, payload):
         self.payloads.append(copy.deepcopy(payload))
         return self.workflow.handler(payload, _Lambda(f"req-{next(self._ids)}"))
+
+    def _attempt(self, name, spec):
+        """One invocation: ("done", raw), ("wait", None) or ("error", (error, cause))."""
+        waits = spec["Resource"].endswith(".waitForTaskToken")
+        token = ""
+        if waits:
+            token = f"tok-{next(self._ids)}-" + "x" * 40
+            self.waiting = (name, token)
+            self.failed = None
+        payload = _template(spec["Parameters"]["Payload"], self.data, token)
+        if waits and self.late_await:
+            self.late = payload
+            return "wait", None
+        try:
+            raw = self._invoke(payload)
+        except Exception as exc:
+            self.waiting = None
+            return "error", (type(exc).__name__, str(exc))
+        if self.lost.get(name):
+            self.lost[name] -= 1
+            self.waiting = None
+            return "error", ("Lambda.ServiceException", "the response was lost")
+        if waits:
+            if self.failed is not None:
+                return "error", self.failed
+            return "wait", None
+        return "done", raw
+
+    def _task(self, name, spec):
+        """Run a Task with its retries. False while it waits for a token."""
+        if spec["Resource"].endswith(".waitForTaskToken"):
+            self.bounds.append(
+                (
+                    _path(spec["HeartbeatSecondsPath"], self.data),
+                    _path(spec["TimeoutSecondsPath"], self.data),
+                )
+            )
+        retry = spec.get("Retry", [])
+        attempts = [0] * len(retry)
+        while True:
+            kind, value = self._attempt(name, spec)
+            if kind == "wait":
+                return False
+            if kind == "done":
+                result = {"Payload": value}
+                if "ResultSelector" in spec:
+                    result = _template(spec["ResultSelector"], result)
+                self.data = _with_result(self.data, spec.get("ResultPath", "$"), result)
+                self.state = spec["Next"]
+                return True
+            error, cause = value
+            index = next(
+                (i for i, rule in enumerate(retry) if _matches(error, rule["ErrorEquals"])), None
+            )
+            if index is not None and attempts[index] < retry[index]["MaxAttempts"]:
+                attempts[index] += 1
+                self.retries.append((name, error))
+                continue
+            self._catch(spec, error, cause)
+            return True
 
     def _run(self):
         while True:
@@ -200,39 +285,14 @@ class Sim:
                         break
                 continue
             assert kind == "Task"
-            if spec["Resource"].endswith(".waitForTaskToken"):
-                token = f"tok-{next(self._ids)}-" + "x" * 40
-                self.bounds.append(
-                    (
-                        _path(spec["HeartbeatSecondsPath"], self.data),
-                        _path(spec["TimeoutSecondsPath"], self.data),
-                    )
-                )
-                self.waiting = (name, token)
-                self.failed = None
-                payload = _template(spec["Parameters"]["Payload"], self.data, token)
-                try:
-                    self._invoke(payload)
-                except Exception as exc:
-                    self.waiting = None
-                    self._catch(spec, type(exc).__name__, str(exc))
-                    continue
-                if self.failed is not None:
-                    error, cause = self.failed
-                    self._catch(spec, error, cause)
-                    continue
+            if not self._task(name, spec):
                 return  # waits for answer() or time_out()
-            payload = _template(spec["Parameters"]["Payload"], self.data)
-            try:
-                raw = self._invoke(payload)
-            except Exception as exc:
-                self._catch(spec, type(exc).__name__, str(exc))
-                continue
-            result = {"Payload": raw}
-            if "ResultSelector" in spec:
-                result = _template(spec["ResultSelector"], result)
-            self.data = _with_result(self.data, spec.get("ResultPath", "$"), result)
-            self.state = spec["Next"]
+
+    def deliver_late(self):
+        """The held-back wait invocation finally runs (its result is moot
+        once the wait has ended)."""
+        payload, self.late = self.late, None
+        return self._invoke(payload)
 
     def answer(self, token, output):
         """SendTaskSuccess: False when no wait holds this token."""
@@ -999,39 +1059,108 @@ def test_an_expiry_racing_the_wait_opens_the_staged_pause_first(wf, monkeypatch)
     assert _events(wf, token)[-2:] == ["RunPaused", "RunExpired"]
 
 
-# --- the sweeper leaves workflow-owned runs alone ---------------------
+# --- the sweeper: hands off while an execution can be live -----------
 
 
-def test_the_sweeper_skips_workflow_owned_rows_in_every_loop(wf, monkeypatch):
-    common = wf.common
-    calls = []
-    monkeypatch.setattr(common, "invoke_agent", lambda *a, **k: calls.append(a) or {})
-    monkeypatch.setattr(wf.runner, "_invoke_runner", lambda payload: calls.append(payload))
-    old = int(time.time()) - 5000
-    base = {"session_id": "s" * 40, "lane": "approval", "card": "{}", "interrupts": "[]",
-            "orchestrator": "sfn", "created_ts": old, "expires_ts": old, "ttl": old + 99999,
-            "version": 3, "pause_seq": 1, "event_seq": 3}
+def _workflow_rows(w, moment, lane="approval"):
+    base = {"session_id": "s" * 40, "lane": lane, "card": "{}", "interrupts": "[]",
+            "orchestrator": "sfn", "created_ts": moment, "expires_ts": moment,
+            "ttl": moment + 99999, "version": 3, "pause_seq": 1, "event_seq": 3}
+    decided = w.domain.iso(moment)
     rows = {
         "appr-wf-start": {"status": "STARTING", "claimed_request_id": "req-1"},
-        "appr-wf-resuming": {"status": "RESUMING", "resuming_ts": old},
-        "appr-wf-approved": {"status": "APPROVED", "decided_at": "2020-01-01T00:00:00+00:00"},
-        "appr-wf-pending": {"status": "PENDING"},
+        "appr-wf-resuming": {"status": "RESUMING", "resuming_ts": moment,
+                             "resumed_decision": "APPROVED"},
+        "appr-wf-approved": {"status": "APPROVED", "decided_at": decided},
+        "appr-wf-declined": {"status": "DECLINED", "decided_at": decided},
+        "appr-wf-pending": {"status": "PENDING", "task_token": "tok-dead"},
         "appr-wf-unclaimed": {"status": "STARTING"},
     }
     for approval_id, extra in rows.items():
-        wf.table.items[approval_id] = {**base, "approval_id": approval_id, **extra}
+        w.table.items[approval_id] = {**base, "approval_id": approval_id, **extra}
+    return rows
+
+
+def test_the_sweeper_leaves_workflow_owned_rows_alone_inside_their_grace(wf, monkeypatch):
+    calls = []
+    monkeypatch.setattr(wf.common, "invoke_agent", lambda *a, **k: calls.append(a) or {})
+    monkeypatch.setattr(wf.runner, "_invoke_runner", lambda payload: calls.append(payload))
+    # Past every runner-path rule (expiry, REDISPATCH_AFTER_S), inside
+    # every workflow grace: an execution may still be live.
+    recent = int(time.time()) - 200
+    rows = _workflow_rows(wf, recent)
     out = wf.runner.sweep(None)
     assert calls == []
     assert out["rescued"] == out["redispatched"] == out["expired"] == 0
+    assert out["closed_starting"] == out["closed_decided"] == 0
     assert {k: wf.table.items[k]["status"] for k in rows} == {
-        "appr-wf-start": "STARTING",
-        "appr-wf-resuming": "RESUMING",
-        "appr-wf-approved": "APPROVED",
-        "appr-wf-pending": "PENDING",
-        # No execution ever claimed it, so nothing else would close it.
+        k: extra["status"] for k, extra in rows.items()
+    }
+    assert wf.table.items["appr-wf-pending"]["task_token"] == "tok-dead"
+
+
+def test_the_sweeper_closes_workflow_owned_rows_past_their_grace(wf, monkeypatch):
+    agent = Agent(COMPLETED)
+    monkeypatch.setattr(wf.common, "invoke_agent", agent)
+    dispatched = []
+    monkeypatch.setattr(wf.runner, "_invoke_runner", lambda payload: dispatched.append(payload))
+    old = int(time.time()) - 5000
+    rows = _workflow_rows(wf, old)
+    wf.table.items["try-wf-pending"] = {
+        **wf.table.items["appr-wf-pending"], "approval_id": "try-wf-pending", "lane": "try"}
+    out = wf.runner.sweep(None)
+    # A resume is never re-dispatched for a workflow-owned run.
+    assert dispatched == [] and out["redispatched"] == 0
+    assert {k: wf.table.items[k]["status"] for k in (*rows, "try-wf-pending")} == {
+        "appr-wf-start": "ERROR",
+        "appr-wf-resuming": "ERROR",
+        "appr-wf-approved": "ERROR",
+        "appr-wf-declined": "ERROR",
+        # The approval lane still gets its "no"; the /try lane never wakes the agent.
+        "appr-wf-pending": "EXPIRED",
+        "try-wf-pending": "EXPIRED",
         "appr-wf-unclaimed": "ERROR",
     }
-    assert out["closed_starting"] == 1
+    assert [c["interrupt_responses"] for c in agent.calls] == [[]]
+    assert out["closed_starting"] == 2 and out["rescued"] == 1
+    assert out["closed_decided"] == 2 and out["closed_try"] == 1
+    for approval_id in ("appr-wf-pending", "try-wf-pending"):
+        assert wf.table.items[approval_id]["task_token"] == ""
+    # A decided run moves through RESUMING to ERROR in one write; the agent
+    # was not invoked for it.
+    assert _events(wf, "appr-wf-approved") == ["RunResuming", "RunFailed"]
+    assert wf.table.items["appr-wf-approved"]["result_text"].startswith("WorkflowLost")
+
+
+def test_the_sweeper_graces_outlast_every_task_of_the_definition(wf):
+    runner, states = wf.runner, _states()
+
+    def intervals(spec):
+        return sum(
+            rule["IntervalSeconds"] * rule["BackoffRate"] ** k
+            for rule in spec["Retry"]
+            for k in range(rule["MaxAttempts"])
+        )
+
+    agent_turn, expire, apply = states["AgentTurn"], states["Expire"], states["ApplyDecision"]
+    assert runner.WORKFLOW_TASK_TIMEOUT_S == asl.AGENT_TASK_TIMEOUT_S
+    assert agent_turn["TimeoutSeconds"] == expire["TimeoutSeconds"] == asl.AGENT_TASK_TIMEOUT_S
+    assert wf.workflow.WAIT_GRACE_S == runner.WORKFLOW_WAIT_GRACE_S
+    assert runner.WORKFLOW_RETRY_INTERVALS_S >= intervals(agent_turn) == intervals(expire)
+    # PENDING: the wait ends at the expiry, then one Expire with its retries.
+    assert (
+        runner.WORKFLOW_WAIT_GRACE_S + expire["TimeoutSeconds"] + intervals(expire)
+    ) < runner.WORKFLOW_PENDING_GRACE_S
+    # STARTING and RESUMING: one AgentTurn (or Expire) with its retries.
+    for timeout in (runner.STARTING_TIMEOUT_S, runner.RESUMING_TIMEOUT_S):
+        assert timeout > agent_turn["TimeoutSeconds"] + intervals(agent_turn)
+    # APPROVED or DECLINED: every ApplyDecision attempt but the last ends
+    # inside its task timeout; the last may run on to the Lambda limit.
+    attempts = 1 + sum(rule["MaxAttempts"] for rule in apply["Retry"])
+    lambda_limit_s = 900
+    assert (
+        (attempts - 1) * apply["TimeoutSeconds"] + intervals(apply) + lambda_limit_s
+    ) < runner.WORKFLOW_DECIDED_GRACE_S
 
 
 # --- domain and public view -------------------------------------------
@@ -1164,7 +1293,14 @@ def test_existing_logical_ids_stay_and_new_ones_are_unique():
     constructs = safety._constructs()
     for logical_id in (*safety.EXISTING_IDS, "RunnerDlq", "RunnerDlqSentAlarm"):
         assert len(constructs.get(logical_id, [])) == 1, logical_id
-    for logical_id in ("RunTask", "RunWorkflowRole", "RunStateMachine", "RunWorkflowFailedAlarm"):
+    for logical_id in (
+        "RunTask",
+        "RunWorkflowRole",
+        "RunStateMachine",
+        "RunWorkflowFailedAlarm",
+        "RunWorkflowAbortedAlarm",
+        "RunWorkflowTimedOutAlarm",
+    ):
         assert len(constructs.get(logical_id, [])) == 1, logical_id
     assert all(len(calls) == 1 for calls in constructs.values())
 
@@ -1211,3 +1347,310 @@ def test_contention_on_apply_is_raised_for_the_retry_and_a_lost_race_still_resum
     monkeypatch.setattr(wf.workflow.service, "record_decision", _lose)
     assert wf.workflow.apply_decision(token, output)["outcome"] == "resume"
     assert wf.table.items[token]["status"] == "RESUMING"
+
+
+# --- Expire racing the wait's own Lambda ------------------------------
+
+
+def _start_lane(w, lane):
+    if lane == "try":
+        return _start_try(w)
+    out = w.api.handler(_event("POST /approvals/start", APPROVER, {"prompt": "go"}), None)
+    assert out["statusCode"] == 202, out
+    return json.loads(out["body"])["approval_id"]
+
+
+def _decide_lane(w, lane, approval_id):
+    if lane == "try":
+        return _try_decide(w, approval_id)
+    return _approver_decide(w, approval_id, "approve")
+
+
+def _once_before(monkeypatch, target, name, action):
+    """Run ``action`` once, just before the first call of target.name, so
+    a concurrent commit lands between Expire's load and its own write."""
+    real = getattr(target, name)
+    fired = []
+
+    def hooked(*args, **kwargs):
+        if not fired:
+            fired.append(True)
+            action()
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(target, name, hooked)
+    return fired
+
+
+@pytest.mark.parametrize("lane", ["try", "approval"])
+def test_expire_retries_when_a_late_wait_opens_the_staged_pause_first(wf, monkeypatch, lane):
+    _flag_on(monkeypatch)
+    agent = Agent(PAUSE_PAYLOAD, COMPLETED)
+    monkeypatch.setattr(wf.common, "invoke_agent", agent)
+    approval_id = _start_lane(wf, lane)
+    # A cold-started wait Lambda: the heartbeat fires before it commits.
+    sim = Sim(wf.workflow, wf.sfn, late_await=True).start(approval_id)
+    assert wf.table.items[approval_id]["staged_pause"] != ""
+    real_await = wf.domain.Run.await_decision
+    delivered = []
+
+    def await_decision(run, task_token, ttl_seconds):
+        # Expire opens the stage with no token; the late Lambda commits
+        # the pause and its token first, so Expire's commit conflicts.
+        if task_token == "" and sim.late is not None:
+            delivered.append(sim.deliver_late())
+            assert wf.table.items[approval_id]["task_token"].startswith("tok-")
+        return real_await(run, task_token, ttl_seconds)
+
+    monkeypatch.setattr(wf.domain.Run, "await_decision", await_decision)
+    sim.time_out("States.HeartbeatTimeout")
+    assert delivered == [{"status": "waiting"}]
+    assert sim.trail[-3:] == ["Expire", "ExpiryOutcome", "Refused"]
+    assert sim.data["expiry"] == {"outcome": "expired"}
+    row = wf.table.items[approval_id]
+    assert row["status"] == "EXPIRED" and row["task_token"] == "" and row["staged_pause"] == ""
+    answers = [c["interrupt_responses"][0]["response"] for c in agent.calls[1:]]
+    assert answers == ([] if lane == "try" else ["no"])
+    assert _events(wf, approval_id)[-1] == "RunExpired"
+
+
+@pytest.mark.parametrize("lane", ["try", "approval"])
+def test_expire_retries_when_a_late_wait_sets_the_token_on_a_pending_row(
+    wf, monkeypatch, lane
+):
+    _flag_on(monkeypatch)
+    agent = Agent(
+        PAUSE_PAYLOAD, EndpointConnectionError(endpoint_url="https://x.invalid"), COMPLETED
+    )
+    monkeypatch.setattr(wf.common, "invoke_agent", agent)
+    approval_id = _start_lane(wf, lane)
+    sim = Sim(wf.workflow, wf.sfn).start(approval_id)
+    assert _decide_lane(wf, lane, approval_id)["statusCode"] == 202
+    # The resume fails before it is sent: back to PENDING with no token,
+    # and the next wait's Lambda is slow.
+    sim.late_await = True
+    sim.drain()
+    row = wf.table.items[approval_id]
+    assert row["status"] == "PENDING" and row["task_token"] == "" and sim.late is not None
+    command = "expire" if lane == "try" else "expiry_resume"
+    fired = _once_before(monkeypatch, wf.workflow.service, command, sim.deliver_late)
+    sim.time_out("States.HeartbeatTimeout")
+    assert fired and sim.ended == "Refused"
+    row = wf.table.items[approval_id]
+    assert row["status"] == "EXPIRED" and row["task_token"] == ""
+    # The approval lane's "no" is sent exactly once; /try never wakes the agent.
+    assert len(agent.calls) == (2 if lane == "try" else 3)
+
+
+def test_an_expire_that_loses_every_race_fails_and_the_sweeper_closes_the_row(
+    wf, monkeypatch, capsys
+):
+    _flag_on(monkeypatch)
+    monkeypatch.setattr(wf.common, "invoke_agent", Agent(PAUSE_PAYLOAD))
+    token = _start_try(wf)
+    sim = Sim(wf.workflow, wf.sfn).start(token)
+    real_expire = wf.workflow.service.expire
+    lost = []
+
+    def always_lose(run):
+        lost.append(run.version)
+        raise wf.domain.Conflict()
+
+    monkeypatch.setattr(wf.workflow.service, "expire", always_lose)
+    sim.time_out("States.HeartbeatTimeout")
+    # Never reported as an open interrupt: FAILED, and the execution fails.
+    assert sim.data["expiry"] == {"outcome": "failed"} and sim.ended == "Failed"
+    assert len(lost) == wf.workflow.EXPIRE_ATTEMPTS
+    assert '"expiry_unrecorded": "Conflict"' in capsys.readouterr().out
+    row = wf.table.items[token]
+    assert row["status"] == "PENDING"
+    monkeypatch.setattr(wf.workflow.service, "expire", real_expire)
+    # Inside the grace the sweeper leaves it; past it, the row ends EXPIRED.
+    assert wf.runner.sweep(None)["closed_try"] == 0
+    row["expires_ts"] = int(time.time()) - wf.runner.WORKFLOW_PENDING_GRACE_S - 1
+    assert wf.runner.sweep(None)["closed_try"] == 1
+    assert wf.table.items[token]["status"] == "EXPIRED"
+    assert wf.table.items[token]["task_token"] == ""
+
+
+# --- at-least-once task delivery, through the definition --------------
+
+
+@pytest.mark.parametrize("state", ["AgentTurn", "WaitForDecision", "ApplyDecision"])
+def test_a_lost_task_response_is_retried_and_the_run_still_completes(wf, monkeypatch, state):
+    _flag_on(monkeypatch)
+    agent = Agent(PAUSE_PAYLOAD, COMPLETED)
+    monkeypatch.setattr(wf.common, "invoke_agent", agent)
+    token = _start_try(wf)
+    sim = Sim(wf.workflow, wf.sfn, lost={state: 1}).start(token)
+    # The row holds the token of the wait that is open now.
+    assert wf.table.items[token]["task_token"] == sim.waiting[1]
+    if state == "WaitForDecision":
+        assert len([p for p in sim.payloads if p["action"] == "await"]) == 2
+    assert _try_decide(wf, token)["statusCode"] == 202
+    sim.drain()
+    assert sim.retries == [(state, "Lambda.ServiceException")]
+    assert sim.ended == "Completed" and wf.table.items[token]["status"] == "DONE"
+    # The retry never ran the agent again, nor resumed twice.
+    assert len(agent.calls) == 2
+    assert _events(wf, token).count("RunResuming") == 1
+
+
+def test_contention_on_apply_is_retried_by_the_definition_and_the_run_resumes(wf, monkeypatch):
+    _flag_on(monkeypatch)
+    monkeypatch.setattr(wf.common, "invoke_agent", Agent(PAUSE_PAYLOAD, COMPLETED))
+    token = _start_try(wf)
+    sim = Sim(wf.workflow, wf.sfn).start(token)
+    assert _try_decide(wf, token)["statusCode"] == 202
+    retries = sys.modules["approval.uow"].CONTENTION_RETRIES
+    # Two applies in a row run out of contention retries (domain.Busy).
+    wf.table.dynamo.inject = [["TransactionConflict", "None"]] * (2 * (retries + 1))
+    sim.drain()
+    assert sim.retries == [("ApplyDecision", "Busy")] * 2
+    assert sim.trail[-5:] == [
+        "ApplyDecision", "DecisionOutcome", "AgentTurn", "TurnOutcome", "Completed"]
+    assert wf.table.items[token]["status"] == "DONE"
+
+
+def test_contention_past_the_apply_retries_fails_and_the_sweeper_closes_the_row(
+    wf, monkeypatch
+):
+    _flag_on(monkeypatch)
+    monkeypatch.setattr(wf.common, "invoke_agent", Agent(PAUSE_PAYLOAD))
+    token = _start_try(wf)
+    sim = Sim(wf.workflow, wf.sfn).start(token)
+    assert _try_decide(wf, token)["statusCode"] == 202
+    retries = sys.modules["approval.uow"].CONTENTION_RETRIES
+    wf.table.dynamo.inject = [["TransactionConflict", "None"]] * (4 * (retries + 1))
+    sim.drain()
+    assert sim.retries == [("ApplyDecision", "Busy")] * 3
+    assert sim.trail[-3:] == ["ApplyDecision", "RecordFailure", "Failed"]
+    row = wf.table.items[token]
+    assert row["status"] == "PENDING"
+    row["expires_ts"] = int(time.time()) - wf.runner.WORKFLOW_PENDING_GRACE_S - 1
+    wf.runner.sweep(None)
+    assert wf.table.items[token]["status"] == "EXPIRED"
+
+
+# --- a start the server accepted but the client never heard about -----
+
+
+def test_a_start_that_an_execution_already_claimed_answers_202(wf, monkeypatch, capsys):
+    _flag_on(monkeypatch)
+
+    def accepted_but_lost(approval_id):
+        # The execution started and its AgentTurn claimed the run, but
+        # every client attempt timed out.
+        assert wf.workflow.service.claim_run(approval_id, "req-exec") is not None
+        raise ReadTimeoutError(endpoint_url="https://states.invalid")
+
+    monkeypatch.setattr(wf.orchestrator, "start", accepted_but_lost)
+    out = _post_try(wf.api, "198.51.100.9")
+    assert out["statusCode"] == 202, out
+    body = json.loads(out["body"])
+    row = wf.table.items[body["token"]]
+    assert body == {"token": row["approval_id"], "status": "STARTING"}
+    assert row["status"] == "STARTING" and row["claimed_request_id"] == "req-exec"
+    assert '"workflow_start_failed": "ReadTimeoutError"' in capsys.readouterr().out
+
+
+def test_a_failed_start_whose_error_write_loses_is_still_502_when_unclaimed(wf, monkeypatch):
+    _flag_on(monkeypatch)
+    wf.sfn.raise_on["StartExecution"] = "ServiceUnavailable"
+
+    def busy(run, text):
+        raise wf.domain.Busy()
+
+    monkeypatch.setattr(wf.api.service, "record_failure", busy)
+    out = _post_try(wf.api, "198.51.100.9")
+    assert out["statusCode"] == 502
+    [row] = [r for r in wf.table.items.values() if r.get("lane") == "try"]
+    # Nobody owns it: it stays STARTING, unclaimed, for the sweeper.
+    assert row["status"] == "STARTING" and not row.get("claimed_request_id")
+
+
+# --- the stack, B6 review ---------------------------------------------
+
+
+def test_the_workflow_role_trusts_only_this_state_machine():
+    role = ast.unparse(_construct("RunWorkflowRole"))
+    assert "'aws:SourceAccount': self.account" in role
+    assert "'ArnLike': {'aws:SourceArn': [state_machine_arn, workflow_execution_arns]}" in role
+    assert "attr_arn" not in role
+    source = STACK.read_text(encoding="utf-8")
+    assert (
+        'f"arn:aws:states:{self.region}:{self.account}:execution:"\n'
+        '            f"{run_workflow.STATE_MACHINE_NAME}:*"'
+    ) in source
+    # Both literal ARNs are defined before the role (no cycle).
+    role_at = source.index('"RunWorkflowRole"')
+    assert source.index("state_machine_arn = (") < role_at
+    assert source.index("workflow_execution_arns = (") < role_at
+
+
+@pytest.mark.parametrize(
+    ("logical_id", "metric"),
+    [
+        ("RunWorkflowFailedAlarm", "ExecutionsFailed"),
+        ("RunWorkflowAbortedAlarm", "ExecutionsAborted"),
+        ("RunWorkflowTimedOutAlarm", "ExecutionsTimedOut"),
+    ],
+)
+def test_every_unfinished_execution_alarms_on_the_alerts_topic(logical_id, metric):
+    call = _construct(logical_id)
+    assert ast.unparse(call.func) == "cloudwatch.Alarm"
+    kw = {k.arg: ast.unparse(k.value) for k in call.keywords}
+    assert f"metric_name='{metric}'" in kw["metric"]
+    assert "'StateMachineArn': state_machine.attr_arn" in kw["metric"]
+    assert kw["threshold"] == "1"
+    [name] = [
+        node.targets[0].id
+        for node in ast.walk(_tree())
+        if isinstance(node, ast.Assign)
+        and isinstance(node.value, ast.Call)
+        and ast.unparse(node.value) == ast.unparse(call)
+    ]
+    assert f"{name}.add_alarm_action(cw_actions.SnsAction(foundation.alerts_topic))" in (
+        STACK.read_text(encoding="utf-8")
+    )
+
+
+def _ses_helper():
+    [node] = [
+        n for n in _tree().body
+        if isinstance(n, ast.FunctionDef) and n.name == "ses_identity_arns"
+    ]
+    namespace = {}
+    # Our own stack source, parsed offline: CDK is not installed here.
+    exec("import os\nfrom email.utils import parseaddr\n" + ast.unparse(node), namespace)  # noqa: S102
+    return namespace["ses_identity_arns"]
+
+
+def test_ses_grants_name_exact_identities_and_none_without_a_sender(monkeypatch):
+    helper = _ses_helper()
+    monkeypatch.delenv("LACHESIS_SES_FROM", raising=False)
+    monkeypatch.setenv("LACHESIS_SES_TO", "ops@example.org")
+    assert helper("123456789012") == []
+    monkeypatch.setenv("LACHESIS_SES_FROM", "Lachesis <guard@example.com>")
+    assert helper("123456789012") == [
+        "arn:aws:ses:eu-west-1:123456789012:identity/guard@example.com",
+        "arn:aws:ses:eu-west-1:123456789012:identity/example.com",
+        "arn:aws:ses:eu-west-1:123456789012:identity/ops@example.org",
+        "arn:aws:ses:eu-west-1:123456789012:identity/example.org",
+    ]
+    assert "identity/*" not in STACK.read_text(encoding="utf-8")
+    # Each SES statement is added only under `if ses_identities:`.
+    guarded = [
+        ast.unparse(inner.value)
+        for node in ast.walk(_tree())
+        if isinstance(node, ast.If) and ast.unparse(node.test) == "ses_identities"
+        for inner in node.body
+        if isinstance(inner, ast.Expr)
+    ]
+    assert guarded == [
+        f"{target}.add_to_role_policy(iam.PolicyStatement(actions=['ses:SendEmail'], "
+        "resources=ses_identities))"
+        for target in ("runner", "run_task")
+    ]
+    every = [s for t in ("runner", "run_task") for s in _role_statements(t) if "ses:" in s]
+    assert len(every) == 2
