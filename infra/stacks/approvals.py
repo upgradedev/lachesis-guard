@@ -38,6 +38,19 @@ GET /approvals/{id}/events (approvers) answer with one run's rows of
 lachesis-run-events, cut to the whitelist of approvals/lambda/ledger.py.
 The API function gains dynamodb:Query on the event log, nothing else.
 
+The lachesis-run workflow (B6), deployed dark: a Standard state
+machine (definition in stacks/run_workflow.py, task code in
+approvals/lambda/workflow.py) that owns a run from start to end and is
+then its single status writer, with the human pause as a
+lambda:invoke.waitForTaskToken task. Nothing starts it unless the API's
+USE_STEP_FUNCTIONS is "true" (LACHESIS_USE_STEP_FUNCTIONS at synth time,
+"false" by default); with it "false" the API, runner and sweeper behave
+as before B6. Least privilege: the state machine role may invoke the
+task function only; the API may StartExecution and SendTaskSuccess on
+this state machine only; the task function may SendTaskFailure on it
+only. An alarm on failed executions goes to the alerts topic. Not yet
+deployed or run on AWS.
+
 Deploy isolation: the iac workflow deploys this stack with
 --exclusively, so a deploy here never redeploys LachesisFoundation,
 LachesisDecider or LachesisAgent. A change here that needs something
@@ -48,6 +61,7 @@ needs that stack deployed first.
 
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 
@@ -67,7 +81,10 @@ from aws_cdk import aws_lambda_event_sources as event_sources
 from aws_cdk import aws_s3 as s3
 from aws_cdk import aws_s3_deployment as s3deploy
 from aws_cdk import aws_sqs as sqs
+from aws_cdk import aws_stepfunctions as sfn
 from constructs import Construct
+
+from . import run_workflow
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 # What grant_read_write_data gave each function on the foundation CMK
@@ -96,6 +113,11 @@ EVENT_SOURCE = "lachesis.approvals"
 RUN_FAILED_RULE_NAME = "lachesis-run-failed"
 OUTBOX_METRIC_NAMESPACE = "Lachesis/Outbox"
 RUN_FAILED_METRIC = "RunFailedPublished"
+# B6: how a new run starts. "false" (the default everywhere) keeps the
+# async runner path; "true" starts the lachesis-run workflow instead.
+USE_STEP_FUNCTIONS = os.environ.get("LACHESIS_USE_STEP_FUNCTIONS", "false").strip().lower()
+if USE_STEP_FUNCTIONS not in {"true", "false"}:
+    raise ValueError("LACHESIS_USE_STEP_FUNCTIONS must be true or false")
 LAMBDA_ASSET = str(_REPO_ROOT / "approvals" / "lambda")
 CONSOLE_ASSET = str(_REPO_ROOT / "approvals" / "console")
 
@@ -274,6 +296,7 @@ class ApprovalsStack(cdk.Stack):
                 "RUNNER_ARN": runner.function_arn,
                 "TRY_DAILY_CAP": "100",
                 "TRY_IP_DAILY_CAP": "5",
+                "USE_STEP_FUNCTIONS": USE_STEP_FUNCTIONS,
             },
         )
         # Puts new run rows, updates counters and decisions, reads rows
@@ -340,6 +363,108 @@ class ApprovalsStack(cdk.Stack):
             treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
         )
         runner_dlq_sent_alarm.add_alarm_action(cw_actions.SnsAction(foundation.alerts_topic))
+
+        # --- B6: the lachesis-run workflow, deployed dark ---------------
+        # The task function every state invokes. Like the runner it
+        # invokes the agent, so it has the runner's agent and SES grants,
+        # and the item actions the Unit of Work issues (GetItem, and
+        # UpdateItem plus the event PutItem inside TransactWriteItems).
+        # Its SendTaskFailure statement names the state machine by its
+        # literal ARN: a reference to the resource would make the state
+        # machine, which references this function, a dependency cycle.
+        run_task = lambda_.Function(
+            self,
+            "RunTask",
+            function_name="lachesis-run-task",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            handler="workflow.handler",
+            code=code,
+            timeout=cdk.Duration.minutes(15),
+            memory_size=512,
+            environment={
+                **common_env,
+                "AGENT_RUNTIME_ARN": agent.runtime_arn,
+                "SES_FROM": os.environ.get("LACHESIS_SES_FROM", ""),
+                "SES_TO": os.environ.get("LACHESIS_SES_TO", ""),
+            },
+        )
+        grant_store(run_task, ("GetItem", "UpdateItem"))
+        run_task.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["bedrock-agentcore:InvokeAgentRuntime"],
+                resources=[agent.runtime_arn, f"{agent.runtime_arn}/*"],
+            )
+        )
+        run_task.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["ses:SendEmail"],
+                resources=[
+                    f"arn:aws:ses:eu-west-1:{self.account}:identity/*",
+                ],
+            )
+        )
+        state_machine_arn = (
+            f"arn:aws:states:{self.region}:{self.account}:stateMachine:"
+            f"{run_workflow.STATE_MACHINE_NAME}"
+        )
+        run_task.add_to_role_policy(
+            iam.PolicyStatement(actions=["states:SendTaskFailure"], resources=[state_machine_arn])
+        )
+        # The state machine role: invoke the task function, nothing else.
+        # The definition is a string, so CDK adds no grant of its own.
+        workflow_role = iam.Role(
+            self,
+            "RunWorkflowRole",
+            assumed_by=iam.ServicePrincipal(
+                "states.amazonaws.com",
+                conditions={"StringEquals": {"aws:SourceAccount": self.account}},
+            ),
+        )
+        workflow_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["lambda:InvokeFunction"], resources=[run_task.function_arn]
+            )
+        )
+        state_machine = sfn.CfnStateMachine(
+            self,
+            "RunStateMachine",
+            state_machine_name=run_workflow.STATE_MACHINE_NAME,
+            state_machine_type="STANDARD",
+            role_arn=workflow_role.role_arn,
+            definition_string=json.dumps(run_workflow.definition(), indent=2),
+            definition_substitutions={run_workflow.TASK_FUNCTION_KEY: run_task.function_arn},
+        )
+        # The role's policy exists before the first execution can start.
+        state_machine.node.add_dependency(workflow_role)
+        # One notification per failed execution: a run that ended ERROR,
+        # or one whose failure could not be recorded on its row.
+        workflow_failed_alarm = cloudwatch.Alarm(
+            self,
+            "RunWorkflowFailedAlarm",
+            metric=cloudwatch.Metric(
+                namespace="AWS/States",
+                metric_name="ExecutionsFailed",
+                dimensions_map={"StateMachineArn": state_machine.attr_arn},
+                statistic="Sum",
+                period=cdk.Duration.minutes(5),
+            ),
+            threshold=1,
+            evaluation_periods=1,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            alarm_description="A lachesis-run execution failed (B6 workflow)",
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+        workflow_failed_alarm.add_alarm_action(cw_actions.SnsAction(foundation.alerts_topic))
+        # B6: the API starts executions and answers a decision with
+        # SendTaskSuccess, on this state machine only. With the flag
+        # "false" it calls neither.
+        api_fn.add_environment("STATE_MACHINE_ARN", state_machine.attr_arn)
+        api_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["states:StartExecution", "states:SendTaskSuccess"],
+                resources=[state_machine.attr_arn],
+            )
+        )
 
         api = apigw.CfnApi(
             self,
@@ -508,6 +633,7 @@ class ApprovalsStack(cdk.Stack):
             distribution=distribution,
         )
         runner.add_environment("CONSOLE_URL", f"https://{distribution.domain_name}")
+        run_task.add_environment("CONSOLE_URL", f"https://{distribution.domain_name}")
 
         # --- B2: the outbox relay to EventBridge -----------------------
         # The custom bus, with the AWS owned key (no kms_key given).
@@ -663,6 +789,7 @@ class ApprovalsStack(cdk.Stack):
         dlq_alarm.add_alarm_action(cw_actions.SnsAction(foundation.alerts_topic))
 
         self.runner_dlq = runner_dlq
+        self.run_state_machine = state_machine
         self.events_table = events_table
         self.event_bus = bus
         self.publisher_dlq = publisher_dlq

@@ -312,6 +312,13 @@ def _invoke_runner(payload: dict) -> None:
     )
 
 
+def _owned_by_workflow(item: dict) -> bool:
+    """A run the lachesis-run workflow owns (B6): the workflow is its only
+    status writer, so the sweep leaves it alone. Its waits end at the
+    row's expiry through the state machine, not through this sweep."""
+    return item.get("orchestrator") == domain.WORKFLOW
+
+
 def _quietly(command, *args) -> bool:
     """Run one command; False when the run moved first (domain.Conflict)."""
     try:
@@ -332,6 +339,11 @@ def sweep(context=None) -> dict:
     for item in common.list_by_status_oldest("STARTING"):
         if int(time.time()) - int(item.get("created_ts", 0)) < STARTING_TIMEOUT_S:
             continue
+        # A workflow-owned run that no execution ever claimed (its
+        # StartExecution failed, and so did recording that) has no other
+        # writer, so the sweep closes it like any stale start.
+        if _owned_by_workflow(item) and item.get("claimed_request_id"):
+            continue
         run = domain.Run.from_item(item)
         if _quietly(service.record_failure, run, "StartTimeout: the start did not report back"):
             closed_starting += 1
@@ -342,6 +354,8 @@ def sweep(context=None) -> dict:
     # where a person could decide it a second time.
     rescued = 0
     for item in common.list_by_status_oldest("RESUMING"):
+        if _owned_by_workflow(item):
+            continue
         if int(time.time()) - int(item.get("resuming_ts", 0)) < RESUMING_TIMEOUT_S:
             continue
         run = domain.Run.from_item(item)
@@ -355,6 +369,8 @@ def sweep(context=None) -> dict:
     redispatched = 0
     for status in (domain.APPROVED, domain.DECLINED):
         for item in common.list_by_status_oldest(status):
+            if _owned_by_workflow(item):
+                continue
             if int(time.time()) - _decided_ts(item) < REDISPATCH_AFTER_S:
                 continue
             try:
@@ -366,7 +382,7 @@ def sweep(context=None) -> dict:
     expired = [
         item
         for item in common.list_by_status_oldest("PENDING")
-        if int(item.get("expires_ts", 0)) < int(time.time())
+        if int(item.get("expires_ts", 0)) < int(time.time()) and not _owned_by_workflow(item)
     ]
     closed_try = 0
     deferred = 0
