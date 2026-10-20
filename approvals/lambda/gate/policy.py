@@ -9,13 +9,15 @@ The request (POST /gate/pulls) is
 
 and it is refused before any scan when it is larger than MAX_BODY_BYTES
 (413), lists more than MAX_FILES changes (413), or fails validation (400).
-An excerpt longer than MAX_EXCERPT_CHARS is cut here.
+An excerpt longer than MAX_EXCERPT_CHARS, or a path longer than
+MAX_PATH_CHARS, is cut here and flagged, never refused, so a large pull
+request always reaches a person.
 
 Each change is checked by activity.scan, the deterministic scan the
 commit ingest uses, with the excerpt as its added lines. Beside the scan
 rules, the gate adds scan_incomplete whenever part of a change was not
 read: the workflow cut the file list or an excerpt, this module cut an
-excerpt, the commit budget of the scan ran out, or GitHub returned no
+excerpt or a path, the commit budget of the scan ran out, or GitHub returned no
 diff for a file that adds lines. What was not read is never called
 clean.
 
@@ -61,6 +63,7 @@ _SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 FILES_NOT_SENT = "(files not sent)"
 REASON_LIST_CUT = "the workflow sent only part of the file list; the rest was not read"
 REASON_EXCERPT_CUT = "the added lines of this file were cut before the scan; the rest was not read"
+REASON_PATH_CUT = f"the path was longer than {MAX_PATH_CHARS} characters and was cut"
 REASON_NO_DIFF = (
     "GitHub returned no diff for this file although it adds lines (too large); "
     "it was checked by path only"
@@ -85,6 +88,7 @@ class Change:
     excerpt: str
     previous_path: str = ""
     excerpt_truncated: bool = False
+    path_truncated: bool = False
 
 
 @dataclass(frozen=True)
@@ -147,14 +151,19 @@ def _flag(value: Any, name: str) -> bool:
     return value
 
 
-def _path(value: Any, name: str, required: bool) -> str:
+def _path(value: Any, name: str, required: bool) -> tuple[str, bool]:
+    """The path, cut to MAX_PATH_CHARS, and whether it was cut. A cut
+    path is flagged scan_incomplete rather than refused, so a pull
+    request with one long path still reaches a person."""
     if value is None or value == "":
         if required:
             raise Refused(f"{name} is required")
-        return ""
-    if not isinstance(value, str) or len(value) > MAX_PATH_CHARS or "\x00" in value:
-        raise Refused(f"{name} must be a path of at most {MAX_PATH_CHARS} characters")
-    return value
+        return "", False
+    if not isinstance(value, str) or "\x00" in value:
+        raise Refused(f"{name} must be a path")
+    if len(value) > MAX_PATH_CHARS:
+        return value[:MAX_PATH_CHARS], True
+    return value, False
 
 
 def _change(entry: Any) -> Change:
@@ -171,14 +180,17 @@ def _change(entry: Any) -> Change:
     truncated = _flag(entry.get("excerpt_truncated"), "excerpt_truncated")
     if len(excerpt) > MAX_EXCERPT_CHARS:
         excerpt, truncated = excerpt[:MAX_EXCERPT_CHARS], True
+    path, path_cut = _path(entry.get("path"), "change path", True)
+    previous, previous_cut = _path(entry.get("previous_path"), "previous_path", False)
     return Change(
-        path=_path(entry.get("path"), "change path", True),
+        path=path,
         status=status,
         additions=_count(entry.get("additions"), "additions"),
         deletions=_count(entry.get("deletions"), "deletions"),
         excerpt=excerpt,
-        previous_path=_path(entry.get("previous_path"), "previous_path", False),
+        previous_path=previous,
         excerpt_truncated=truncated,
+        path_truncated=path_cut or previous_cut,
     )
 
 
@@ -237,6 +249,8 @@ def scan_pull(pull: PullRequest) -> GateScan:
         found.extend(scan.scan_file(file_change, read_lines=not spent))
         if not spent:
             budget -= size
+        if change.path_truncated:
+            found.append(scan.Finding(scan.SCAN_INCOMPLETE, change.path, REASON_PATH_CUT))
         if change.excerpt_truncated:
             found.append(scan.Finding(scan.SCAN_INCOMPLETE, change.path, REASON_EXCERPT_CUT))
         elif change.additions > 0 and not change.excerpt and change.status != "removed":

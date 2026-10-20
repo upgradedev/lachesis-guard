@@ -28,8 +28,9 @@ SHA = "a" * 40
 GITHUB = "https://token.actions.githubusercontent.com"
 
 
-def _claims(repository=REPO, iss=GITHUB, aud="lachesis-gate"):
-    return {"iss": iss, "aud": aud, "repository": repository,
+def _claims(repository=REPO, iss=GITHUB, aud="lachesis-gate", event="pull_request",
+            ref="refs/pull/7/merge"):
+    return {"iss": iss, "aud": aud, "repository": repository, "event_name": event, "ref": ref,
             "sub": f"repo:{repository}:pull_request"}
 
 
@@ -154,6 +155,34 @@ def test_every_registered_repository_is_accepted_and_an_array_audience_too(gate)
             assert _row(gate, view["gate_id"])["project"] == project["name"]
 
 
+@pytest.mark.parametrize(
+    "claims",
+    [
+        _claims(event="push", ref="refs/heads/main"),
+        _claims(event="workflow_dispatch", ref="refs/pull/7/merge"),
+        _claims(ref="refs/pull/8/merge"),
+        _claims(ref="refs/heads/feature"),
+        {key: value for key, value in _claims().items() if key != "ref"},
+    ],
+)
+def test_only_a_run_of_this_very_pull_request_may_post_its_gate(gate, claims):
+    # Another workflow of the same repository (a push, a dispatch, another
+    # pull request's run) can neither open nor pre-empt this head's run.
+    status, body = _post(gate, _body([]), claims)
+    assert status == 403 and "not from a run of this pull request" in body["error"]
+    assert gate.table.items == {}
+    assert _post(gate, _body([]))[0] == 202
+
+
+def test_a_long_path_is_cut_and_flagged_never_refused(gate):
+    long_path = "src/" + "d" * 500 + ".py"
+    status, view = _post(gate, _body([_change(long_path)]))
+    assert status == 202 and view["status"] == "PENDING"
+    card = json.loads(_row(gate, view["gate_id"])["card"])
+    assert "the path was longer than 400 characters and was cut" in card["reason"]
+    assert long_path not in card["reason"]
+
+
 def test_the_body_must_name_the_tokens_own_repository(gate):
     status, body = _post(gate, _body(repository=OTHER_REPO))
     assert status == 403 and "another repository" in body["error"]
@@ -183,7 +212,7 @@ def test_the_body_and_the_file_list_are_capped_before_any_scan(gate):
         {**_body(), "changes": "nope"},
         _body([{"path": "a", "status": "deleted"}]),
         _body([{"path": "", "status": "added"}]),
-        _body([{"path": "a" * 401, "status": "added"}]),
+        _body([{"path": "a\x00b", "status": "added"}]),
         _body([{"path": "a", "status": "added", "additions": -1}]),
         _body([{"path": "a", "status": "added", "added_lines_excerpt": 5}]),
         _body([{"path": "a", "status": "added", "excerpt_truncated": "yes"}]),
@@ -643,6 +672,18 @@ def test_the_workflow_caps_are_the_gates_caps():
     from gate import policy
 
     env = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]["gate"]["env"]
+    from activity import scan
+
     assert int(env["MAX_FILES"]) == policy.MAX_FILES
     assert int(env["MAX_EXCERPT_CHARS"]) == policy.MAX_EXCERPT_CHARS
+    # The added lines in all fit the scan budget and leave room under the
+    # body cap; the byte backstop sits below the cap the gate refuses at.
+    total = int(env["MAX_TOTAL_EXCERPT_CHARS"])
+    assert total <= scan.SCAN_COMMIT_CHARS and total < policy.MAX_BODY_BYTES * 0.7
+    assert int(env["MAX_BODY_BYTES"]) < policy.MAX_BODY_BYTES
+    job = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]["gate"]
+    steps = "\n".join(step["run"] for step in job["steps"])
+    assert '-gt "$MAX_BODY_BYTES"' in steps
+    assert '.added_lines_excerpt = "" | .excerpt_truncated = true' in steps
+    assert "<= $max_total then $cut else" in steps
 

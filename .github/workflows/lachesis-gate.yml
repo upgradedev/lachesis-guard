@@ -50,6 +50,14 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       MAX_FILES: "300"
       MAX_EXCERPT_CHARS: "8000"
+      # The added lines sent in all, under the gate's 512 KiB body cap and
+      # its scan budget; a file past it is sent without lines and marked
+      # excerpt_truncated, which the gate flags for a person.
+      MAX_TOTAL_EXCERPT_CHARS: "300000"
+      # Backstop under the gate's 524288-byte cap: a body still larger is
+      # resent with no lines at all (every file flagged, a person decides),
+      # so a large pull request is never refused outright.
+      MAX_BODY_BYTES: "500000"
     steps:
       - name: Collect the changed files with the GitHub CLI
         run: |
@@ -58,26 +66,40 @@ jobs:
             --jq '.[]' > files.jsonl
           jq -s \
             --arg repo "$REPOSITORY" --argjson pr "$PR_NUMBER" --arg sha "$HEAD_SHA" \
-            --argjson max_files "$MAX_FILES" --argjson max_chars "$MAX_EXCERPT_CHARS" '
+            --argjson max_files "$MAX_FILES" --argjson max_chars "$MAX_EXCERPT_CHARS" \
+            --argjson max_total "$MAX_TOTAL_EXCERPT_CHARS" '
             def added: (.patch // "") | split("\n")
               | map(select(startswith("+") and (startswith("+++") | not)) | .[1:])
               | join("\n");
             {
               repository: $repo, pr_number: $pr, head_sha: $sha,
               files_truncated: (length > $max_files),
-              changes: (.[0:$max_files] | map(
-                added as $lines
-                | {
-                    path: .filename, status: .status,
-                    additions: .additions, deletions: .deletions,
-                    added_lines_excerpt: $lines[0:$max_chars],
-                    excerpt_truncated: (($lines | length) > $max_chars)
-                  }
-                + (if .previous_filename then {previous_path: .previous_filename} else {} end)
-              ))
+              changes: [foreach (.[0:$max_files][] | {file: ., lines: added}) as $f (
+                {spent: 0, out: null};
+                ($f.lines[0:$max_chars]) as $cut
+                | (if .spent + ($cut | length) <= $max_total then $cut else "" end) as $sent
+                | .spent += ($sent | length)
+                | .out = ({
+                      path: $f.file.filename, status: $f.file.status,
+                      additions: $f.file.additions, deletions: $f.file.deletions,
+                      added_lines_excerpt: $sent,
+                      excerpt_truncated: (($f.lines | length) > ($sent | length))
+                    }
+                    + (if $f.file.previous_filename
+                       then {previous_path: $f.file.previous_filename} else {} end));
+                .out
+              )]
             }' files.jsonl > gate-request.json
+          if [ "$(wc -c < gate-request.json)" -gt "$MAX_BODY_BYTES" ]; then
+            echo "The request is over ${MAX_BODY_BYTES} bytes: sending the file list without lines."
+            jq '.changes |= map(if .added_lines_excerpt != ""
+              then .added_lines_excerpt = "" | .excerpt_truncated = true else . end)' \
+              gate-request.json > gate-request.small.json
+            mv gate-request.small.json gate-request.json
+          fi
           echo "Changed files sent to the gate: $(jq '.changes | length' gate-request.json)"
           echo "File list cut by this job: $(jq '.files_truncated' gate-request.json)"
+          echo "Request size: $(wc -c < gate-request.json) bytes"
 
       - name: Ask the gate and wait for its verdict
         run: |

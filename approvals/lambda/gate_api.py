@@ -10,7 +10,11 @@ committed project registry (activity/registry.py, projects.json). A
 token from any other repository is 403 and nothing is read.
 
 POST /gate/pulls (the body contract and its caps are gate/policy.py's):
-the body's repository must be the token's. The run of a pull-request
+the body's repository must be the token's, and the token must come from
+a pull_request run of that very pull request (claims event_name
+"pull_request" and ref "refs/pull/<pr_number>/merge", GitHub's ref for
+that event), so another workflow of the repository cannot open, or win,
+the run of a pull request it is not running for. The run of a pull-request
 head has a derived id (policy.gate_id), so a re-run of the job finds the
 same run, and its decision, instead of opening a second card; only an
 EXPIRED or ERROR run is retried, under the next round's id. A new run is
@@ -181,6 +185,11 @@ def post_pull(event: dict, repository: str, project: registry.Project) -> dict:
         return _response(exc.http_status, {"error": str(exc)})
     if pull.repository != repository:
         return _response(403, {"error": "the token is for another repository"})
+    claims = _claims(event)
+    if claims.get("event_name") != "pull_request" or claims.get("ref") != (
+        f"refs/pull/{pull.pr_number}/merge"
+    ):
+        return _response(403, {"error": "the token is not from a run of this pull request"})
     work = service.unit_of_work()
     try:
         for round_ in range(policy.MAX_ROUNDS):
