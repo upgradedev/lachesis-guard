@@ -10,7 +10,7 @@ const STATUS = {
   RESUMING: ["Agent resuming", "progress"], DONE: ["Finished", "success"],
   REFUSED_DONE: ["Finished without running the paused call", "stopped"],
   EXPIRED: ["Expired: nobody decided, treated as declined", "stopped"], ERROR: ["Run failed", "error"],
-  GATE_DONE: ["Merge gate passed", "success"], GATE_APPROVED: ["Approved: the merge check passes", "success"], GATE_DECLINED: ["Declined: the merge check fails", "stopped"] };
+  GATE_DONE: ["Merge gate passed", "success"], GATE_APPROVED: ["Approved: the merge check passes", "success"], GATE_DECLINED: ["Declined: the merge check fails", "stopped"], GATE_EXPIRED: ["Expired: nobody decided, the merge check fails", "stopped"] };
 const ICON = { success: "\u2713", warning: "!", error: "\u2715", info: "i", progress: "\u2026", stopped: "\u25A0" };
 const EFFECT = { benign: "Low risk", destructive_write: "Deletes or overwrites data", exfiltration: "Sends data outside", untrusted_to_action: "Acts on untrusted input", confused_deputy: "Uses authority on someone else's behalf" };
 const LAYER = { decider: "Strands Decider 2B", secretscan: "Secret scan (deterministic)", tier0: "Safe read (deterministic)", unavailable: "Fail-closed: Decider did not answer", refusal: "Repeat of a call already declined", mergegate: "Merge gate (deterministic scan)" };
@@ -288,8 +288,8 @@ function decisionCard(view, lane, onDecided) {
   const why = h("div", { class: "s4-why" }, h("h4", { text: "Why it paused" }), h("p", {}, rulePill(card, p)),
     scored(card) ? [meter(card.confidence, thr, false), thr !== null ? h("p", { class: "caption",
       text: "At or above " + thr.toFixed(2) + " Decider's class is trusted; a destructive class still asks a person." }) : null]
-      : h("p", { class: "muted", text: "No Decider score for this call." }),
-    kv([["Risk class", card.risk ? card.risk.replace(/_/g, " ") : "not scored"], ["Grounded", p.grounded === null ? "" : p.grounded ? "yes" : "no"],
+      : h("p", { class: "muted", text: lane === "gate" ? "The pause is the deterministic scan's; any Decider reading is advisory and shown in the card text." : "No Decider score for this call." }),
+    kv([["Risk class", card.risk ? card.risk.replace(/_/g, " ") : lane === "gate" ? "not a Decider verdict" : "not scored"], ["Grounded", p.grounded === null ? "" : p.grounded ? "yes" : "no"],
       ["Paused by", LAYER[card.layer] || card.layer || ""], ["Decided by", view.decided_by_name && view.status !== "PENDING" ? (view.decided_by_name === "try-visitor" ? "a visitor on this page" : view.decided_by_name) : ""],
       ["Latency", card.latency_ms ? Math.round(card.latency_ms) + " ms" : ""], ["Paused at", isFinite(Date.parse(card.created_at)) ? hhmmss(Date.parse(card.created_at)) + " UTC" : ""],
       ["Ref", h("span", {}, h("code", { text: view.approval_id || "" }), " ", copyBtn(view.approval_id || ""))]]));
@@ -315,7 +315,7 @@ function actionBar(view, lane, tool, target, risk, exp, onDecided) {
     bar.querySelectorAll(".btn").forEach(b => { b.disabled = true; });
     msg.className = "act-msg"; msg.textContent = "Recording decision...";
     const out = await api(path, { method: "POST", body: JSON.stringify({ decision }) });
-    if (out.status === 202) { msg.textContent = lane === "gate" ? "Recorded. The pull request check reads it on its next poll." : "Recorded. Agent resuming..."; onDecided(); return; }
+    if (out.status === 202) { msg.textContent = lane === "gate" ? "Recorded. A pull request check still waiting reads it; otherwise re-run the lachesis-gate job." : "Recorded. Agent resuming..."; onDecided(); return; }
     msg.className = "act-msg err";
     const e = String((out.body && out.body.error) || "");
     if (out.status === 409 && /expired/.test(e)) msg.textContent = "This call expired at " + (exp ? hhmm(exp) : "its deadline") + " UTC and was treated as declined.";
@@ -359,7 +359,7 @@ function poll(path, onView, on404) {
 const AFTER = { APPROVED: "Approved. The agent is resuming.", DECLINED: "Declined. The agent is resuming.", RESUMING: "Decided. The agent is resuming.", DONE: "Approved, then it ran.", REFUSED_DONE: "Declined.", EXPIRED: "Nobody decided before the deadline.", ERROR: "The run failed." };
 function outcomeRow(v) {
   if (v.status === "DONE") return h("li", { class: "done" }, h("div", { class: "step-h", text: "Finished" }), v.result_text ? codeView(v.result_text, 40) : null);
-  if (v.status === "REFUSED_DONE" || v.status === "EXPIRED") return h("li", { class: "stopped" }, h("div", { class: "step-h", text: "Agent stood down" }), h("p", { class: "step-d", text: "The paused call did not run." }), v.result_text ? codeView(v.result_text, 40) : null);
+  if (v.status === "REFUSED_DONE" || v.status === "EXPIRED") return v.lane === "gate" ? h("li", { class: "stopped" }, h("div", { class: "step-h", text: "Merge check fails" }), h("p", { class: "step-d", text: "Nobody decided before the deadline; the merge check fails." })) : h("li", { class: "stopped" }, h("div", { class: "step-h", text: "Agent stood down" }), h("p", { class: "step-d", text: "The paused call did not run." }), v.result_text ? codeView(v.result_text, 40) : null);
   if (v.status === "ERROR") return h("li", { class: "stopped" }, h("div", { class: "step-h", text: "Run failed" }), h("p", { class: "step-d", text: String(v.result_text || "").split(":")[0] || "The runner reported an error." }));
   return null;
 }
@@ -408,7 +408,7 @@ function renderLedger(el, events) {
     h("ol", { class: "steps" }, events.map(e => { const t = Date.parse(e.at), facts = ledgerFacts(e);
       return h("li", { class: e.type === "RunFailed" ? "stopped" : e.type === "RunPaused" ? "paused" : "done" },
         h("div", { class: "step-h" }, h("code", { text: "#" + e.seq }), h("span", { text: e.type }), isFinite(t) ? h("span", { class: "muted", text: hhmmss(t) + " UTC" }) : null,
-          e.status ? h("span", { class: "pill", text: (STATUS[e.status] || [e.status])[0] }) : null), facts ? h("p", { class: "step-d", text: facts }) : null); })));
+          e.status ? h("span", { class: "pill", text: (STATUS[(el._gate ? "GATE_" : "") + e.status] || STATUS[e.status] || [e.status])[0] }) : null), facts ? h("p", { class: "step-d", text: facts }) : null); })));
 }
 function loadLedger(path, el, terminal) { // only the latest read per panel renders; a failed read at a terminal status retries once
   const g = gen, n = el._req = (el._req || 0) + 1;
@@ -450,13 +450,13 @@ function viewQueue() {
     const out = await api("/approvals"); if (g !== gen) return;
     if (out.status === 0 || out.status >= 500) netFail(++fails); else { fails = 0; netFail(0); }
     if (out.status !== 200) {
-      $("#queue-msg").textContent = out.status === 403 ? "This account is not in the approvers group." : out.status === 401 ? "" : errText(out);
+      $("#queue-msg").className = "muted"; $("#queue-msg").textContent = out.status === 403 ? "This account is not in the approvers group." : out.status === 401 ? "" : errText(out);
       if (out.status === 401) viewQueue();
       return;
     }
-    $("#queue-msg").textContent = ""; $("#queue-checked").textContent = "Last checked " + hhmmss(Date.now()) + " UTC";
-    const rows = (out.body.approvals || []).slice().sort((a, b) => String(a.project || "Demo").localeCompare(String(b.project || "Demo")) || (a.created_ts || 0) - (b.created_ts || 0));
-    const badge = $("#queue-badge"); if (badge) { badge.hidden = rows.length === 0; badge.textContent = String(rows.length); }
+    $("#queue-checked").textContent = "Last checked " + hhmmss(Date.now()) + " UTC";
+    const rows = (out.body.approvals || []).slice().sort((a, b) => String(a.project || "Demo").localeCompare(String(b.project || "Demo")) || (a.created_ts || 0) - (b.created_ts || 0)), gq = rows.some(v => v.lane === "gate"), qm = $("#queue-msg");
+    qm.className = gq ? "lane-warn" : "muted"; qm.textContent = gq ? "Merge-gate rows can name private repositories and their file paths. Do not record or share this screen." : ""; const badge = $("#queue-badge"); if (badge) { badge.hidden = rows.length === 0; badge.textContent = String(rows.length); }
     $("#queue-empty").hidden = rows.length > 0; $("#queue-table").hidden = rows.length === 0;
     const body = $("#queue-table tbody"); body.textContent = "";
     let grp = null; // B7a: the queue groups runs by project; the demo runs are project Demo
@@ -508,7 +508,7 @@ function viewDetail(id) {
   const ctl = poll("/approvals/" + encodeURIComponent(id), v => {
     const gate = v.lane === "gate"; statusLine(st, gate && STATUS["GATE_" + v.status] ? "GATE_" + v.status : v.status); body.textContent = ""; const card = v.card || {};
     if (card.tool || card.reason) body.append(decisionCard(v, gate ? "gate" : "approval", () => ctl.kick()));
-    const end = outcomeRow(v); if (end) body.append(h("ol", { class: "steps" }, end)); tickClocks();
+    const end = outcomeRow(v); if (end) body.append(h("ol", { class: "steps" }, end)); tickClocks(); led._gate = gate;
     loadLedger("/approvals/" + encodeURIComponent(id) + "/events", led, TERMINAL.includes(v.status));
   }, out => {
     body.textContent = ""; body.append(h("p", { class: "err", role: "alert", text: out && out.status === 403 ? "This account is not in the approvers group." : out ? "" : "No paused call matches this link." }));
