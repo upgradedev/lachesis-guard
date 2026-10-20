@@ -796,7 +796,7 @@ def test_an_unknown_project_before_any_ingest_reads_as_empty(world):
     [summary] = read.projects_view((PROJECT,), store, approver=False)["projects"]
     assert summary["commits"] == 0 and summary["counted_at"] == ""
     assert summary["repos"] == [{"repo": "", "visibility": "unknown"}]
-    assert summary["visibility"] == "private"
+    assert summary["visibility"] == "unknown"
 
 
 # --- the ingest Lambda ----------------------------------------------------------
@@ -946,3 +946,36 @@ def test_the_audit_rule_takes_both_sources():
     assert 'event_pattern={"source": [schema.EVENT_SOURCE, schema.ACTIVITY_SOURCE]}' in audit
     assert audit_schema.ACTIVITY_SOURCE == activity_bus.SOURCE
     assert audit_schema.EVENT_SOURCE == "lachesis.approvals"
+
+
+# --- the console ----------------------------------------------------------------
+
+
+CONSOLE = ROOT / "approvals" / "console"
+
+
+def test_the_console_projects_view_renders_only_backend_numbers():
+    html = (CONSOLE / "index.html").read_text(encoding="utf-8")
+    js = (CONSOLE / "app.js").read_text(encoding="utf-8")
+    assert 'data-nav="projects" href="#/projects"' in html
+    start = html.index('<section data-view="projects"')
+    view = html[start:html.index("\n    </section>", start)]
+    for needle in ('id="projects-body"', 'id="project-activity"', "deterministic scan",
+                   "never from Decider", "shows only its counts until it is public"):
+        assert needle in view, needle
+    block = js[js.index("function viewProjects(key)"):js.index("function viewDetail(id)")]
+    assert "innerHTML" not in block and "insertAdjacentHTML" not in block
+    assert 'lane = auth.token ? "/approvals/projects" : "/projects"' in block
+    assert 'lane + "/" + encodeURIComponent(key) + "/activity"' in block
+    # Counts are the backend's: nothing is counted or scored in the page.
+    assert "length +" not in block and "reduce(" not in block
+    assert "confidence" not in block and "meter(" not in block
+    for field in ("p.flagged_changes", "p.commits", "p.by_actor_kind", "p.by_scan_verdict",
+                  "b.window_days", "b.hidden_repos", "b.scan_label", "c.files_changed",
+                  "c.co_author_agents", "f.reason"):
+        assert field in block, field
+    assert 'p[0] === "projects" ? "projects"' in js
+    assert 'else if (view === "projects") viewProjects(p[1]);' in js
+    # The queue groups by project; a run without one is the demo's.
+    queue = js[js.index("function viewQueue()"):js.index("function viewProjects(key)")]
+    assert '"Project: " + grp' in queue and 'v.project || "Demo"' in queue

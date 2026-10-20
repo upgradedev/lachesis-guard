@@ -86,8 +86,11 @@ def _counts(metas: list[dict[str, Any] | None]) -> dict[str, Any]:
 
 
 def _project_visibility(visibilities: list[str]) -> str:
+    """public, private, mixed, or unknown when no repository was read yet."""
     if all(v == "public" for v in visibilities):
         return "public"
+    if all(v == "unknown" for v in visibilities):
+        return "unknown"
     if all(v != "public" for v in visibilities):
         return "private"
     return "mixed"

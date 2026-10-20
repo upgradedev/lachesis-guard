@@ -1318,7 +1318,7 @@ def test_console_try_start_race_keeps_polling():
     assert "handle = later(tick, 2000)" in js
     assert "on404(out); return;" in js and "on404(); return;" in js
     html = _console("index.html")
-    assert "app.js?v=20261020e" in html
+    assert "app.js?v=20261020f" in html
 
 
 def test_console_hides_previous_approver_on_a_fresh_pause():
@@ -2687,4 +2687,4 @@ def test_console_run_ledger_renders_beside_the_step_timeline():
     assert 'loadLedger("/approvals/" + encodeURIComponent(id) + "/events"' + tail in js
     view = js[js.index("function viewTry(token)"):]
     assert view.index("led.hidden = true;") < view.index("if (!token)")
-    assert 'href="app.css?v=20261020c"' in html
+    assert 'href="app.css?v=20261020d"' in html
