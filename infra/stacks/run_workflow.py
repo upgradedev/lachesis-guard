@@ -36,8 +36,9 @@ reports the row's outcome instead (workflow.py). ApplyDecision and
 RecordFailure never invoke the agent and are idempotent, so they also
 retry a failed invocation of their own (States.TaskFailed, for example a
 DynamoDB throttle): without it one transient error would leave a decided
-run open, since RecordFailure cannot move PENDING, APPROVED or DECLINED
-to ERROR and the sweeper skips workflow-owned runs.
+run open until the sweeper's grace has passed, since RecordFailure
+cannot move PENDING, APPROVED or DECLINED to ERROR and the sweeper closes
+a workflow-owned row only once no execution can still write it.
 """
 
 from __future__ import annotations
@@ -189,7 +190,7 @@ def definition() -> dict[str, Any]:
 
     return {
         "Comment": (
-            "Lachesis run (B6): the single status writer of a workflow-owned run, "
+            "Lachesis run (B6): the status writer of a workflow-owned run, "
             "with the human approval pause as a task token wait."
         ),
         "StartAt": "AgentTurn",

@@ -86,7 +86,8 @@ _TERMINAL_OUTCOME = {
 }
 
 # Pre-send failures of the expiry resume are tried again in this
-# invocation (there is no later sweep for a workflow-owned run).
+# invocation: the sweeper reaches a workflow-owned run only after its
+# grace, so a run left for it waits long past its expiry.
 EXPIRY_BACKOFF_S = (1.0, 2.0)
 _sleep = time.sleep
 
