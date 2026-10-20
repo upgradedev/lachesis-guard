@@ -215,8 +215,10 @@ class FakeTable:
     def __init__(self, dynamo):
         self.dynamo = dynamo
         self.items = dynamo.tables[APPROVALS]
+        self.reads = []
 
-    def get_item(self, Key):  # noqa: N803
+    def get_item(self, Key, ConsistentRead=False):  # noqa: N803
+        self.reads.append(ConsistentRead)
         item = self.items.get(Key["approval_id"])
         return {"Item": copy.deepcopy(item)} if item else {}
 
@@ -1617,6 +1619,10 @@ def test_post_try_commits_counters_row_and_event_in_one_transaction(modules, mon
     row = table.items[token]
     assert row["version"] == 1 and row["event_seq"] == 1 and row["pause_seq"] == 0
     assert row["lane"] == "try" and len(row["session_id"]) >= 33
+    # The poll that follows the 202 reads the row strongly consistently.
+    table.reads.clear()
+    polled = api.handler(_event("GET /try/{token}", {}, None, {"token": token}), None)
+    assert polled["statusCode"] == 200 and table.reads == [True]
     [event] = _events(table, token)
     assert event["event_type"] == "RunRequested" and event["seq"] == 1
     assert event["event_id"] == token + "#1" and event["data"] == {"lane": "try"}
@@ -1777,6 +1783,22 @@ def test_events_carry_only_whitelisted_fields(modules, monkeypatch):
     assert failed["data"] == {"pause_seq": 1, "from_status": "RESUMING", "error_type": "ValueError"}
     # The row still keeps the full text for the owner; public_view cuts it.
     assert table.items["appr-white"]["result_text"].startswith("ValueError: secret detail")
+
+
+def test_non_finite_numbers_never_reach_an_event(modules):
+    domain = _layer("domain")
+    run = domain.Run.request("appr-nan", "s" * 40, "try", time.time(), 1800)
+    _layer("uow").DynamoUnitOfWork().commit(run)
+    run.pause(
+        [{"interruptId": "i1"}],
+        {"tool": "delete_file", "confidence": float("nan"), "latency_ms": float("inf")},
+        time.time(),
+        1800,
+    )
+    _layer("uow").DynamoUnitOfWork().commit(run)
+    _, _, _, table = modules
+    paused = _events(table, "appr-nan")[-1]["data"]
+    assert paused["confidence"] is None and paused["latency_ms"] is None
 
 
 def test_a_stale_version_is_a_conflict_and_writes_nothing(modules, monkeypatch):

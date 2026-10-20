@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import math
 import re
 from dataclasses import dataclass, field, fields
 from typing import Any
@@ -163,9 +164,12 @@ def _text(value: Any) -> str:
 
 
 def _number(value: Any) -> float | None:
+    """A finite number or None: DynamoDB refuses NaN and Infinity, and an
+    event field must never fail the transaction that carries it."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return float(value)
+    number = float(value)
+    return number if math.isfinite(number) else None
 
 
 @dataclass(frozen=True)

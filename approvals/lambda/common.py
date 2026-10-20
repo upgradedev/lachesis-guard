@@ -83,7 +83,9 @@ def new_session_id() -> str:
 
 
 def get(approval_id: str) -> dict | None:
-    response = _table.get_item(Key={"approval_id": approval_id})
+    # Strongly consistent: a token answered with 202 a moment ago must be
+    # readable now (the start transaction has committed by then).
+    response = _table.get_item(Key={"approval_id": approval_id}, ConsistentRead=True)
     return response.get("Item")
 
 
