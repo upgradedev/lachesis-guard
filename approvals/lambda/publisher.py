@@ -8,12 +8,28 @@ new event on the custom EventBridge bus lachesis-events:
 
 - source ``lachesis.approvals``; detail-type the event type
   (RunRequested, RunPaused, RunFailed, ...);
-- a whitelisted detail: event_id, approval_id, seq, type, at, status
-  (when the row carries it), and the triage fields tool, layer, risk,
+- a whitelisted detail: event_id, run_ref, seq, type, at, status (when
+  the row carries it), and the triage fields tool, layer, risk,
   confidence and latency_ms when the event has them (RunPaused). Never
   arguments, prompts, interrupt ids, tokens, addresses, the approver's
   name or sub, or error text, even though some of those are harmless
   today: a field reaches the bus only by being listed here.
+
+The raw approval_id never reaches the bus or this function's logs. For
+a /try run it is the bearer token of POST /try/{token}/decision, and a
+RunPaused is published exactly while that run is decidable, so any
+later rule target, archive or lake would hold live tokens. The detail
+carries run_ref instead: the first 32 hex digits of the SHA-256 of the
+approval_id, for every lane. The id has 192 bits of entropy, so the
+reference cannot be reversed, and it is stable, so a consumer joins it
+back to the run row by hashing approval_id the same way (in Athena,
+substr(lower(to_hex(sha256(to_utf8(approval_id)))), 1, 32)). This
+departs from the design's field list, which named approval_id.
+
+Field types on the bus do not depend on the value: seq is an integer,
+confidence and latency_ms are always JSON floats (1.0 stays 1.0), tool,
+layer and risk are strings, and any of the triage fields may be null. A
+triage value of any other type makes the record unmappable.
 
 Only INSERT records are relayed. The event source mapping filters on
 eventName INSERT already; this code skips anything else as well, so a
@@ -25,21 +41,33 @@ PutEvents did not accept (FailedEntryCount, or the whole call raising),
 and Lambda resumes the shard from the lowest of them. Records after that
 one in the same batch are therefore sent again even when they were
 accepted, and botocore may retry a PutEvents call itself, so every
-consumer must dedupe on ``event_id`` (approval_id#seq, stable across
-every re-send because it is the outbox row's own key). A record that
-still fails after the mapping's retries goes to the on-failure queue
-lachesis-publisher-dlq; that message carries the shard and sequence
-range, not the record, so a redrive re-reads lachesis-run-events.
+consumer must dedupe on ``event_id`` (run_ref#seq, stable across every
+re-send because it is derived from the outbox row's own key). A record
+that still fails after the mapping's retries goes to the on-failure
+queue lachesis-publisher-dlq; that message carries the shard and
+sequence range, not the record, so a redrive re-reads
+lachesis-run-events.
 
-A record that cannot be mapped (unknown event type, missing key) is
+A record that cannot be mapped (unknown event type, missing key, a
+triage value of the wrong type, a detail that does not serialize) is
 reported as failed too, so it ends in the queue and its alarm instead of
-being dropped without a trace.
+being dropped without a trace, and it never holds back the good records
+of its batch.
+
+After the PutEvents calls, the number of accepted RunFailed entries is
+written as one CloudWatch embedded-metric line (namespace
+Lachesis/Outbox, metric RunFailedPublished, dimension Bus). The RunFailed
+alarm watches that metric, so it does not depend on how EventBridge
+publishes rule metrics for a rule without targets. A re-sent RunFailed
+counts again; the alarm only asks whether the count reached one.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import time
 from collections.abc import Iterable
 from decimal import Decimal
 from typing import Any
@@ -54,12 +82,21 @@ REGION = os.environ.get("AWS_REGION", "eu-west-1")
 MAX_ENTRIES = 10
 # The triage fields a domain event may carry into the detail, in order.
 TRIAGE_FIELDS = ("tool", "layer", "risk", "confidence", "latency_ms")
+TEXT_FIELDS = frozenset({"tool", "layer", "risk"})
+NUMBER_FIELDS = frozenset({"confidence", "latency_ms"})
 # Every key the detail can hold. Tests pin it.
-DETAIL_FIELDS = ("event_id", "approval_id", "seq", "type", "at", "status", *TRIAGE_FIELDS)
-EVENT_NAMES = frozenset(cls.__name__ for cls in EVENT_TYPES)
+DETAIL_FIELDS = ("event_id", "run_ref", "seq", "type", "at", "status", *TRIAGE_FIELDS)
+# Hex digits of the SHA-256 kept in run_ref (128 bits).
+RUN_REF_HEX = 32
+# The embedded metric the RunFailed alarm watches. The stack names the
+# same values; a test pins that they match.
+METRIC_NAMESPACE = "Lachesis/Outbox"
+RUN_FAILED_METRIC = "RunFailedPublished"
 
 _deserializer = TypeDeserializer()
 _events_client: Any = None
+
+EVENT_NAMES = frozenset(cls.__name__ for cls in EVENT_TYPES)
 
 
 class Unmappable(ValueError):
@@ -67,7 +104,11 @@ class Unmappable(ValueError):
 
 
 def _events() -> Any:
-    """The EventBridge client, created on first use (a seam for tests)."""
+    """The EventBridge client, created on first use (a seam for tests).
+
+    Worst case per call: 3 attempts, each up to 5 s to connect and 10 s
+    to read, plus backoff, about 48 s. The function timeout (60 s in the
+    stack) leaves room to return batchItemFailures after that."""
     global _events_client
     if _events_client is None:
         import boto3
@@ -85,12 +126,22 @@ def _events() -> Any:
     return _events_client
 
 
-def _plain(value: Any) -> Any:
-    """Decimal from the stream to a JSON number: integral to int, else
-    float (0.31 stays 0.31)."""
-    if isinstance(value, Decimal):
-        return int(value) if value == value.to_integral_value() else float(value)
-    return value
+def run_ref_of(approval_id: str) -> str:
+    """The one-way reference that stands for approval_id on the bus."""
+    return hashlib.sha256(approval_id.encode("utf-8")).hexdigest()[:RUN_REF_HEX]
+
+
+def _triage(name: str, value: Any) -> Any:
+    """One triage value with a type that does not depend on the value:
+    text stays str, a finite number from the stream (Decimal) becomes a
+    float, None stays None. Anything else is Unmappable."""
+    if value is None:
+        return None
+    if name in TEXT_FIELDS and isinstance(value, str):
+        return value
+    if name in NUMBER_FIELDS and isinstance(value, Decimal) and value.is_finite():
+        return float(value)
+    raise Unmappable(f"{name} has an unexpected type")
 
 
 def image_of(record: dict[str, Any]) -> dict[str, Any]:
@@ -112,12 +163,13 @@ def detail_of(image: dict[str, Any]) -> dict[str, Any]:
         raise Unmappable("no seq")
     if event_type not in EVENT_NAMES:
         raise Unmappable("unknown event type")
-    event_id = f"{approval_id}#{int(seq)}"
-    if image.get("event_id", event_id) != event_id:
+    row_event_id = f"{approval_id}#{int(seq)}"
+    if image.get("event_id", row_event_id) != row_event_id:
         raise Unmappable("event_id does not match the key")
+    run_ref = run_ref_of(approval_id)
     detail: dict[str, Any] = {
-        "event_id": event_id,
-        "approval_id": approval_id,
+        "event_id": f"{run_ref}#{int(seq)}",
+        "run_ref": run_ref,
         "seq": int(seq),
         "type": event_type,
         "at": str(image.get("at") or ""),
@@ -129,7 +181,7 @@ def detail_of(image: dict[str, Any]) -> dict[str, Any]:
     if isinstance(data, dict):
         for name in TRIAGE_FIELDS:
             if name in data:
-                detail[name] = _plain(data[name])
+                detail[name] = _triage(name, data[name])
     return detail
 
 
@@ -137,7 +189,7 @@ def entry_of(detail: dict[str, Any]) -> dict[str, Any]:
     return {
         "Source": SOURCE,
         "DetailType": detail["type"],
-        "Detail": json.dumps(detail, sort_keys=True, separators=(",", ":")),
+        "Detail": json.dumps(detail, sort_keys=True, separators=(",", ":"), allow_nan=False),
         "EventBusName": BUS_NAME,
     }
 
@@ -149,6 +201,29 @@ def _chunks(items: list, size: int) -> Iterable[list]:
 
 def _log(message: str, **fields: Any) -> None:
     print(json.dumps({"msg": message, **fields}, sort_keys=True))
+
+
+def _emit_run_failed(count: int) -> None:
+    """One CloudWatch embedded-metric line: accepted RunFailed entries."""
+    print(
+        json.dumps(
+            {
+                "_aws": {
+                    "Timestamp": int(time.time() * 1000),
+                    "CloudWatchMetrics": [
+                        {
+                            "Namespace": METRIC_NAMESPACE,
+                            "Dimensions": [["Bus"]],
+                            "Metrics": [{"Name": RUN_FAILED_METRIC, "Unit": "Count"}],
+                        }
+                    ],
+                },
+                "Bus": BUS_NAME,
+                RUN_FAILED_METRIC: count,
+            },
+            sort_keys=True,
+        )
+    )
 
 
 def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
@@ -163,16 +238,23 @@ def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
         sequence = str((record.get("dynamodb") or {}).get("SequenceNumber") or "")
         try:
             detail = detail_of(image_of(record))
-        except Unmappable as exc:
-            _log("publisher unmappable record", sequence=sequence, reason=str(exc))
+            entry = entry_of(detail)
+        except (TypeError, ValueError) as exc:
+            # Unmappable is a ValueError. A TypeError or ValueError from
+            # the deserializer or json.dumps means the same thing: this
+            # record alone cannot be relayed. Only an Unmappable's own
+            # text is logged, never a message that could quote the row.
+            reason = str(exc) if isinstance(exc, Unmappable) else type(exc).__name__
+            _log("publisher unmappable record", sequence=sequence, reason=reason)
             if sequence:
                 failures.append(sequence)
             else:
                 lost += 1
             continue
-        pending.append((sequence, detail["event_id"], entry_of(detail)))
+        pending.append((sequence, detail["event_id"], entry))
 
     published = 0
+    run_failed = 0
     for chunk in _chunks(pending, MAX_ENTRIES):
         try:
             response = _events().put_events(Entries=[entry for _, _, entry in chunk])
@@ -187,14 +269,16 @@ def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
         # EventId, so a short or missing Entries list re-sends, never drops.
         results = response.get("Entries") or []
         failed_count = int(response.get("FailedEntryCount") or 0)
-        for index, (sequence, event_id, _) in enumerate(chunk):
+        for index, (sequence, event_id, entry) in enumerate(chunk):
             result = results[index] if index < len(results) else {}
             if result.get("EventId") and not result.get("ErrorCode"):
                 published += 1
+                if entry["DetailType"] == "RunFailed":
+                    run_failed += 1
                 continue
             _log(
                 "publisher entry failed",
-                event_id=event_id,
+                event_id=event_id,  # run_ref#seq, never the raw approval_id
                 error_code=str(result.get("ErrorCode") or "missing"),
                 failed_entry_count=failed_count,
             )
@@ -203,6 +287,8 @@ def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
             else:
                 lost += 1
 
+    if run_failed:
+        _emit_run_failed(run_failed)
     _log("publisher batch", published=published, failed=len(failures), skipped=skipped)
     if lost:
         # Nothing to name in batchItemFailures: fail the whole batch so

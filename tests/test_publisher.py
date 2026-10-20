@@ -8,11 +8,13 @@ outbox shape. EventBridge is an in-memory fake that can refuse entries.
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import importlib.util
 import json
 import sys
 import time
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -23,9 +25,15 @@ LAMBDA_DIR = Path(__file__).resolve().parents[1] / "approvals" / "lambda"
 sys.path.insert(0, str(LAMBDA_DIR))
 
 EVENTS_TABLE = "lachesis-run-events"
-BASE_FIELDS = {"event_id", "approval_id", "seq", "type", "at", "status"}
+BASE_FIELDS = {"event_id", "run_ref", "seq", "type", "at", "status"}
 TRIAGE = {"tool", "layer", "risk", "confidence", "latency_ms"}
 SESSION = "s" * 40
+
+
+def _ref(approval_id):
+    """run_ref computed here, not through the publisher: the first 32 hex
+    digits of the SHA-256 of the approval_id."""
+    return hashlib.sha256(approval_id.encode("utf-8")).hexdigest()[:32]
 
 
 class Recorder:
@@ -177,7 +185,8 @@ def test_each_event_maps_to_one_whitelisted_entry(layers):
         assert set(detail) == expected, detail["type"]
         assert set(detail) <= set(publisher.DETAIL_FIELDS)
     assert [d["seq"] for d in details] == [1, 2, 3, 4, 5, 6]
-    assert [d["event_id"] for d in details] == [f"appr-pub-1#{n}" for n in range(1, 7)]
+    assert [d["event_id"] for d in details] == [f"{_ref('appr-pub-1')}#{n}" for n in range(1, 7)]
+    assert {d["run_ref"] for d in details} == {_ref("appr-pub-1")}
     assert [d["status"] for d in details] == [
         "STARTING",
         "STARTING",
@@ -191,7 +200,7 @@ def test_each_event_maps_to_one_whitelisted_entry(layers):
     assert paused["layer"] == "decider"
     # Decimal from the stream back to plain JSON numbers.
     assert paused["confidence"] == 0.31 and isinstance(paused["confidence"], float)
-    assert paused["latency_ms"] == 187.4
+    assert paused["latency_ms"] == 187.4 and isinstance(paused["latency_ms"], float)
     assert all(d["at"] for d in details)
 
 
@@ -203,6 +212,8 @@ def test_nothing_outside_the_whitelist_reaches_the_bus(layers):
     publisher.handler({"Records": _records(rows)}, None)
     dumped = json.dumps(bus.calls)
     for secret in (
+        "appr-pub-1",
+        "approval_id",
         "SECRET",
         "prod_secret.py",
         "arguments",
@@ -296,7 +307,7 @@ def test_redelivery_carries_the_same_event_id(layers):
     for detail in _details(bus):
         seen.setdefault(detail["event_id"], detail)
     assert len(seen) == len(rows)
-    assert sorted(seen) == sorted(f"{row['approval_id']}#{int(row['seq'])}" for row in rows)
+    assert sorted(seen) == sorted(f"{_ref(row['approval_id'])}#{int(row['seq'])}" for row in rows)
 
 
 def test_an_unmappable_record_is_reported_not_dropped(layers):
@@ -348,3 +359,113 @@ def test_stack_names_match_the_publisher(layers):
     assert constants["EVENT_BUS_NAME"] == publisher.BUS_NAME == "lachesis-events"
     assert constants["EVENT_SOURCE"] == publisher.SOURCE == "lachesis.approvals"
     assert "RunFailed" in publisher.EVENT_NAMES
+    # The RunFailed alarm watches the embedded metric the publisher prints.
+    assert constants["OUTBOX_METRIC_NAMESPACE"] == publisher.METRIC_NAMESPACE
+    assert constants["RUN_FAILED_METRIC"] == publisher.RUN_FAILED_METRIC
+
+
+def _paused_row(domain, uow, **data):
+    """The RunPaused outbox row of a full run, with data fields replaced."""
+    row = dict(_full_run(domain, uow)[2])
+    assert row["event_type"] == "RunPaused"
+    row["data"] = dict(row["data"], **data)
+    return row
+
+
+def test_a_non_scalar_triage_value_fails_only_its_record(layers):
+    domain, uow, publisher, bus = layers
+    good = _full_run(domain, uow)[0]
+    bad = _paused_row(domain, uow, tool=["a", Decimal(1)])
+    out = publisher.handler({"Records": [_record(good, 1), _record(bad, 2)]}, None)
+    assert out == {"batchItemFailures": [{"itemIdentifier": "2"}]}
+    assert [d["seq"] for d in _details(bus)] == [1]
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"tool": {"nested": "map"}},
+        {"risk": {"a", "b"}},
+        {"layer": 7},
+        {"confidence": "0.9"},
+        {"latency_ms": True},
+        {"confidence": Decimal("NaN")},
+    ],
+)
+def test_a_triage_value_of_the_wrong_type_is_unmappable(layers, data):
+    domain, uow, publisher, bus = layers
+    row = _paused_row(domain, uow, **data)
+    if isinstance(next(iter(data.values())), Decimal):
+        # A NaN cannot be written through TypeSerializer; put it as the
+        # stream would carry it, as a raw N value.
+        record = _record(_paused_row(domain, uow), 7)
+        name = next(iter(data))
+        record["dynamodb"]["NewImage"]["data"]["M"][name] = {"N": "NaN"}
+    else:
+        record = _record(row, 7)
+    assert publisher.handler({"Records": [record]}, None) == {
+        "batchItemFailures": [{"itemIdentifier": "7"}]
+    }
+    assert bus.calls == []
+
+
+def test_numbers_keep_their_type_whatever_the_value(layers):
+    domain, uow, publisher, bus = layers
+    row = _paused_row(domain, uow, confidence=Decimal("1.0"), latency_ms=Decimal("200"))
+    publisher.handler({"Records": [_record(row, 1)]}, None)
+    [call] = bus.calls
+    raw = call[0]["Detail"]
+    assert '"confidence":1.0' in raw and '"latency_ms":200.0' in raw
+    [detail] = _details(bus)
+    assert isinstance(detail["confidence"], float) and isinstance(detail["latency_ms"], float)
+    assert isinstance(detail["seq"], int)
+
+
+def test_null_triage_values_stay_null(layers):
+    domain, uow, publisher, bus = layers
+    row = _paused_row(domain, uow, tool=None, confidence=None)
+    publisher.handler({"Records": [_record(row, 1)]}, None)
+    [detail] = _details(bus)
+    assert detail["tool"] is None and detail["confidence"] is None
+
+
+def _metric_lines(text):
+    return [json.loads(line) for line in text.splitlines() if '"_aws"' in line]
+
+
+def test_an_accepted_run_failed_writes_one_metric_line(layers, capsys):
+    domain, uow, publisher, bus = layers
+    rows = _full_run(domain, uow)
+    capsys.readouterr()
+    publisher.handler({"Records": _records(rows)}, None)
+    [line] = _metric_lines(capsys.readouterr().out)
+    [directive] = line["_aws"]["CloudWatchMetrics"]
+    assert directive["Namespace"] == "Lachesis/Outbox"
+    assert directive["Dimensions"] == [["Bus"]]
+    assert directive["Metrics"] == [{"Name": "RunFailedPublished", "Unit": "Count"}]
+    assert line["Bus"] == "lachesis-events"
+    assert line["RunFailedPublished"] == 1
+    assert isinstance(line["_aws"]["Timestamp"], int)
+
+
+def test_a_refused_run_failed_writes_no_metric_line(layers, capsys):
+    domain, uow, publisher, bus = layers
+    rows = _full_run(domain, uow)
+    assert rows[5]["event_type"] == "RunFailed"
+    bus.refuse = {5}
+    capsys.readouterr()
+    out = publisher.handler({"Records": _records(rows)}, None)
+    assert out == {"batchItemFailures": [{"itemIdentifier": "105"}]}
+    assert _metric_lines(capsys.readouterr().out) == []
+
+
+def test_logs_never_carry_the_raw_approval_id(layers, capsys):
+    domain, uow, publisher, bus = layers
+    rows = _full_run(domain, uow, "appr-token-xyz")
+    bus.refuse = {0, 1, 2, 3, 4, 5}
+    capsys.readouterr()
+    publisher.handler({"Records": _records(rows)}, None)
+    logged = capsys.readouterr().out
+    assert "publisher entry failed" in logged
+    assert _ref("appr-token-xyz") in logged
+    assert "appr-token-xyz" not in logged
