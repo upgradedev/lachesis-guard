@@ -850,6 +850,11 @@ def test_a_public_repo_that_becomes_unreadable_fails_closed(world):
     assert _run(world, now=NOW + 1800).status == "github_error"
     assert dynamo.meta(PR)["private"] is None
     assert read.activity_view(project, store, approver=False, now=NOW)["recent"] == []
+    # A refused token (401) is hidden too, and it fails the run for the alarm.
+    server.fail["/repos/upgradedev/lachesis-guard"] = (401, {})
+    refused = _run(world, now=NOW + 2000)
+    assert refused.status == "auth_failed" and refused.failed
+    assert dynamo.meta(PR)["private"] is None
     # A transport failure keeps the last flag read.
     del server.fail["/repos/upgradedev/lachesis-guard"]
     _run(world, now=NOW + 2700)

@@ -73,9 +73,10 @@ PUBLISH_FAILED = "publish_failed"
 DEADLINE = "deadline"
 STORE_ERROR = "store_error"
 ERROR = "error"
+AUTH_FAILED = "auth_failed"  # GitHub refused the token (401): revoked or expired
 # A run with one of these, or with a commit not stored, is reported failed
 # by the ingest Lambda, so IngestErrorsAlarm fires.
-FAILED = frozenset({STORE_ERROR, ERROR})
+FAILED = frozenset({STORE_ERROR, ERROR, AUTH_FAILED})
 
 
 @dataclass
@@ -227,8 +228,8 @@ def ingest_repo(
         store.save_meta(project_repo, {**base, "status": RATE_LIMITED})
         return result
     except github.GitHubError as exc:
-        result.status = GITHUB_ERROR
-        fields = {**base, "status": GITHUB_ERROR}
+        result.status = AUTH_FAILED if exc.status == 401 else GITHUB_ERROR
+        fields = {**base, "status": result.status}
         if 400 <= exc.status < 500:
             fields["private"] = None  # refused: visibility unknown, so hidden
         store.save_meta(project_repo, fields)
