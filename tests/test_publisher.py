@@ -27,6 +27,15 @@ sys.path.insert(0, str(LAMBDA_DIR))
 EVENTS_TABLE = "lachesis-run-events"
 BASE_FIELDS = {"event_id", "run_ref", "seq", "type", "at", "status"}
 TRIAGE = {"tool", "layer", "risk", "confidence", "latency_ms"}
+# The run fields each event of _full_run carries into the detail (B3).
+RUN_FIELDS_BY_TYPE = {
+    "RunRequested": {"lane"},
+    "RunClaimed": set(),
+    "RunPaused": {"pause_seq"},
+    "DecisionRecorded": {"pause_seq"},
+    "RunResuming": {"pause_seq"},
+    "RunFailed": {"pause_seq"},
+}
 SESSION = "s" * 40
 
 
@@ -181,7 +190,11 @@ def test_each_event_maps_to_one_whitelisted_entry(layers):
         assert entry["EventBusName"] == "lachesis-events"
     details = _details(bus)
     for detail in details:
-        expected = BASE_FIELDS | (TRIAGE if detail["type"] == "RunPaused" else set())
+        expected = (
+            BASE_FIELDS
+            | RUN_FIELDS_BY_TYPE[detail["type"]]
+            | (TRIAGE if detail["type"] == "RunPaused" else set())
+        )
         assert set(detail) == expected, detail["type"]
         assert set(detail) <= set(publisher.DETAIL_FIELDS)
     assert [d["seq"] for d in details] == [1, 2, 3, 4, 5, 6]
@@ -225,7 +238,8 @@ def test_nothing_outside_the_whitelist_reaches_the_bus(layers):
         "secret detail",
         "ValueError",
         SESSION,
-        "pause_seq",
+        # pause_seq is on the bus since B3 (the audit lake pairs a
+        # decision with its pause); expires_ts still is not.
         "expires_ts",
         "run_version",
         "ttl",
@@ -338,7 +352,7 @@ def test_a_row_written_before_status_omits_it(layers):
     legacy = {key: value for key, value in _full_run(domain, uow)[0].items() if key != "status"}
     publisher.handler({"Records": [_record(legacy, 1)]}, None)
     [detail] = _details(bus)
-    assert set(detail) == BASE_FIELDS - {"status"}
+    assert set(detail) == (BASE_FIELDS - {"status"}) | {"lane"}
 
 
 def test_stack_names_match_the_publisher(layers):
@@ -469,3 +483,31 @@ def test_logs_never_carry_the_raw_approval_id(layers, capsys):
     assert "publisher entry failed" in logged
     assert _ref("appr-token-xyz") in logged
     assert "appr-token-xyz" not in logged
+
+
+def test_lane_and_pause_seq_reach_the_detail(layers):
+    """B3: the audit lake keeps the approval lane apart from /try and
+    pairs a decision with the pause it answered."""
+    domain, uow, publisher, bus = layers
+    publisher.handler({"Records": _records(_full_run(domain, uow))}, None)
+    details = _details(bus)
+    assert details[0]["lane"] == "approval"
+    assert [d.get("pause_seq") for d in details] == [None, None, 1, 1, 1, 1]
+    assert all(isinstance(d["pause_seq"], int) for d in details[2:])
+    assert publisher.DETAIL_FIELDS == (
+        "event_id", "run_ref", "seq", "type", "at", "status", "lane", "pause_seq",
+        "tool", "layer", "risk", "confidence", "latency_ms",
+    )
+
+
+@pytest.mark.parametrize(
+    "data",
+    [{"pause_seq": Decimal("1.5")}, {"pause_seq": Decimal("-1")}, {"pause_seq": "1"}, {"lane": 3}],
+)
+def test_a_run_field_of_the_wrong_type_is_unmappable(layers, data):
+    domain, uow, publisher, bus = layers
+    row = _paused_row(domain, uow, **data)
+    assert publisher.handler({"Records": [_record(row, 9)]}, None) == {
+        "batchItemFailures": [{"itemIdentifier": "9"}]
+    }
+    assert bus.calls == []

@@ -9,7 +9,8 @@ new event on the custom EventBridge bus lachesis-events:
 - source ``lachesis.approvals``; detail-type the event type
   (RunRequested, RunPaused, RunFailed, ...);
 - a whitelisted detail: event_id, run_ref, seq, type, at, status (when
-  the row carries it), and the triage fields tool, layer, risk,
+  the row carries it), the run fields lane (RunRequested) and pause_seq
+  (every event that has one), and the triage fields tool, layer, risk,
   confidence and latency_ms when the event has them (RunPaused). Never
   arguments, prompts, interrupt ids, tokens, addresses, the approver's
   name or sub, or error text, even though some of those are harmless
@@ -26,10 +27,17 @@ back to the run row by hashing approval_id the same way (in Athena,
 substr(lower(to_hex(sha256(to_utf8(approval_id)))), 1, 32)). This
 departs from the design's field list, which named approval_id.
 
-Field types on the bus do not depend on the value: seq is an integer,
-confidence and latency_ms are always JSON floats (1.0 stays 1.0), tool,
-layer and risk are strings, and any of the triage fields may be null. A
-triage value of any other type makes the record unmappable.
+Field types on the bus do not depend on the value: seq and pause_seq
+are integers, confidence and latency_ms are always JSON floats (1.0
+stays 1.0), lane, tool, layer and risk are strings, and any of the run
+or triage fields may be null. A value of any other type makes the
+record unmappable.
+
+lane and pause_seq were added in B3 for the audit lake: lane lets an
+Insight query keep the approval lane apart from the public /try lane,
+and pause_seq pairs a DecisionRecorded with the RunPaused it answered.
+Both are already in the outbox row's data (domain.RunRequested and the
+events that carry pause_seq); a row relayed before B3 simply has neither.
 
 Only INSERT records are relayed. The event source mapping filters on
 eventName INSERT already; this code skips anything else as well, so a
@@ -82,10 +90,17 @@ REGION = os.environ.get("AWS_REGION", "eu-west-1")
 MAX_ENTRIES = 10
 # The triage fields a domain event may carry into the detail, in order.
 TRIAGE_FIELDS = ("tool", "layer", "risk", "confidence", "latency_ms")
-TEXT_FIELDS = frozenset({"tool", "layer", "risk"})
+# The run fields a domain event may carry into the detail (B3).
+RUN_FIELDS = ("lane", "pause_seq")
+TEXT_FIELDS = frozenset({"lane", "tool", "layer", "risk"})
 NUMBER_FIELDS = frozenset({"confidence", "latency_ms"})
-# Every key the detail can hold. Tests pin it.
-DETAIL_FIELDS = ("event_id", "run_ref", "seq", "type", "at", "status", *TRIAGE_FIELDS)
+INTEGER_FIELDS = frozenset({"pause_seq"})
+# Every key the detail can hold, in order. Tests pin it, and the Glue
+# table of the audit lake (infra/stacks/audit_schema.py) has exactly
+# these columns.
+DETAIL_FIELDS = (
+    "event_id", "run_ref", "seq", "type", "at", "status", *RUN_FIELDS, *TRIAGE_FIELDS
+)
 # Hex digits of the SHA-256 kept in run_ref (128 bits).
 RUN_REF_HEX = 32
 # The embedded metric the RunFailed alarm watches. The stack names the
@@ -132,15 +147,24 @@ def run_ref_of(approval_id: str) -> str:
 
 
 def _triage(name: str, value: Any) -> Any:
-    """One triage value with a type that does not depend on the value:
-    text stays str, a finite number from the stream (Decimal) becomes a
-    float, None stays None. Anything else is Unmappable."""
+    """One run or triage value with a type that does not depend on the
+    value: text stays str, a finite number from the stream (Decimal)
+    becomes a float, a whole non-negative Decimal in an integer field
+    becomes an int, None stays None. Anything else is Unmappable."""
     if value is None:
         return None
     if name in TEXT_FIELDS and isinstance(value, str):
         return value
     if name in NUMBER_FIELDS and isinstance(value, Decimal) and value.is_finite():
         return float(value)
+    if (
+        name in INTEGER_FIELDS
+        and isinstance(value, Decimal)
+        and value.is_finite()
+        and value == value.to_integral_value()
+        and value >= 0
+    ):
+        return int(value)
     raise Unmappable(f"{name} has an unexpected type")
 
 
@@ -179,7 +203,7 @@ def detail_of(image: dict[str, Any]) -> dict[str, Any]:
         detail["status"] = status
     data = image.get("data")
     if isinstance(data, dict):
-        for name in TRIAGE_FIELDS:
+        for name in (*RUN_FIELDS, *TRIAGE_FIELDS):
             if name in data:
                 detail[name] = _triage(name, data[name])
     return detail
