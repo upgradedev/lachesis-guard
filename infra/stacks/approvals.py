@@ -416,9 +416,21 @@ class ApprovalsStack(cdk.Stack):
         # with a lowercase t, which ApiGatewayV2 rejects ("Unrecognized
         # field", deploy of 2026-10-15); the service wants
         # ThrottlingBurstLimit / ThrottlingRateLimit verbatim.
+        # GET /try/{token}/events (B5) is anonymous and reads the run row
+        # plus up to four event-log pages per call, so it gets a route
+        # throttle too. HTTP API route throttles count every caller
+        # together, so it sits well above the demo's own polling (a few
+        # reads a run) and several judges at once; a 429 only leaves the
+        # ledger panel as it was, the step timeline still renders.
         stage.add_property_override(
             "RouteSettings",
-            {"POST /try": {"ThrottlingRateLimit": 0.2, "ThrottlingBurstLimit": 2}},
+            {
+                "POST /try": {"ThrottlingRateLimit": 0.2, "ThrottlingBurstLimit": 2},
+                "GET /try/{token}/events": {
+                    "ThrottlingRateLimit": 10,
+                    "ThrottlingBurstLimit": 20,
+                },
+            },
         )
         # ApiGateway validates RouteSettings against existing routes at
         # stage creation ("Unable to find Route by key POST /try", deploy

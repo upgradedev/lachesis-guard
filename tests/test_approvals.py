@@ -148,6 +148,7 @@ class FakeDynamo:
         self.transactions = []
         self.inject = []  # reason-code lists to fail the next calls with
         self.queries = []  # every query on the event log (the run ledger)
+        self.returned = []  # every item those queries handed back
 
     @staticmethod
     def _key(table, key):
@@ -209,7 +210,10 @@ class FakeDynamo:
         """lachesis-run-events by partition key, the way ledger.read asks:
         seq ascending, at most Limit rows a page, resuming after
         ExclusiveStartKey, a LastEvaluatedKey whenever a page is full,
-        and only the projected attributes."""
+        and only the projected attributes: a top-level name copies that
+        attribute, a nested path (#d.#f0) copies that one key of the map,
+        and a bare map beside one of its own paths, or an unused name, is
+        rejected, the way DynamoDB rejects them."""
         assert TableName == EVENTS and KeyConditionExpression == "#pk = :id"
         self.queries.append(copy.deepcopy(kwargs))
         names = kwargs["ExpressionAttributeNames"]
@@ -220,8 +224,24 @@ class FakeDynamo:
             rows = [row for row in rows if int(row["seq"]) > int(start["seq"])]
         limit = kwargs.get("Limit")
         page = rows[:limit] if limit is not None else rows
-        kept = [names[part.strip()] for part in kwargs["ProjectionExpression"].split(",")]
-        items = [{key: row[key] for key in kept if key in row} for row in page]
+        parts = [part.strip() for part in kwargs["ProjectionExpression"].split(",")]
+        paths = [tuple(names[name] for name in part.split(".")) for part in parts]
+        tops = {path[0] for path in paths if len(path) == 1}
+        used = {name for part in parts for name in part.split(".")} | {"#pk"}
+        if set(names) - used or any(len(path) > 1 and path[0] in tops for path in paths):
+            raise ClientError({"Error": {"Code": "ValidationException"}}, "Query")
+        items = []
+        for row in page:
+            item = {}
+            for top, *rest in paths:
+                if top not in row:
+                    continue
+                if not rest:
+                    item[top] = row[top]
+                elif isinstance(row[top], dict) and rest[0] in row[top]:
+                    item.setdefault(top, {})[rest[0]] = row[top][rest[0]]
+            items.append(item)
+        self.returned.extend(copy.deepcopy(items))
         response = {"Items": [_as_read(copy.deepcopy(item)) for item in items]}
         if limit is not None and len(page) == limit:
             response["LastEvaluatedKey"] = {"approval_id": approval_id, "seq": page[-1]["seq"]}
@@ -1296,7 +1316,7 @@ def test_console_try_start_race_keeps_polling():
     assert "handle = later(tick, 2000)" in js
     assert "on404(out); return;" in js and "on404(); return;" in js
     html = _console("index.html")
-    assert "app.js?v=20261020d" in html
+    assert "app.js?v=20261020e" in html
 
 
 def test_console_hides_previous_approver_on_a_fresh_pause():
@@ -2378,14 +2398,24 @@ def test_try_ledger_returns_the_whitelisted_events_in_order(modules, monkeypatch
                  "event_id", "run_version", "ttl", "decided_by_name", "request_id",
                  "198.51.100.9", "expires_ts"):
         assert leak not in raw, leak
-    # One consistent query, projected to the five attributes it reads.
+    # One consistent query, projected to the four top-level attributes it
+    # reads and, inside data, to the whitelisted keys only.
     [query] = table.dynamo.queries
     assert query["ConsistentRead"] is True and query["ScanIndexForward"] is True
+    names = query["ExpressionAttributeNames"]
     projected = {
-        query["ExpressionAttributeNames"][part.strip()]
+        ".".join(names[name] for name in part.strip().split("."))
         for part in query["ProjectionExpression"].split(",")
     }
-    assert projected == {"seq", "event_type", "status", "at", "data"}
+    data_keys = LEDGER_FIELDS[4:]
+    assert projected == {"seq", "event_type", "status", "at"} | {
+        f"data.{key}" for key in data_keys
+    }
+    # The rest of data never leaves DynamoDB for this function.
+    assert table.dynamo.returned
+    for item in table.dynamo.returned:
+        assert set(item) <= {"seq", "event_type", "status", "at", "data"}
+        assert set(item.get("data", {})) <= set(data_keys), item
 
 
 def test_approval_ledger_needs_an_approver_and_hides_who_decided(modules, monkeypatch):
@@ -2398,6 +2428,14 @@ def test_approval_ledger_needs_an_approver_and_hides_who_decided(modules, monkey
     assert started["status"] == "interrupt"
     assert _decide(api, APPROVER, "decline", approval_id)["statusCode"] == 202
 
+    seen = []
+    original = api.ledger.public_event
+
+    def spy(row):
+        seen.append(copy.deepcopy(row))
+        return original(row)
+
+    monkeypatch.setattr(api.ledger, "public_event", spy)
     params = {"id": approval_id}
     assert _ledger(api, "GET /approvals/{id}/events", params, PLAIN_USER)[0] == 403
     assert _ledger(api, "GET /approvals/{id}/events", params)[0] == 403
@@ -2410,6 +2448,16 @@ def test_approval_ledger_needs_an_approver_and_hides_who_decided(modules, monkey
         assert set(event) <= LEDGER_KEYS
     for leak in (approval_id, "sub-1", "owner", "req-ledger-a", "decline"):
         assert leak not in raw, leak
+    # The stored DecisionRecorded row does name the approver; the query
+    # never hands that key, or the runner's request id, to this function.
+    stored = [row.get("data", {}) for row in table.dynamo.events_of(approval_id)]
+    assert any("decided_by_name" in data for data in stored)
+    assert any("request_id" in data for data in stored)
+    assert seen and len(seen) == len(events)
+    for row in seen:
+        for key in ("decided_by_name", "request_id", "answer", "cause", "expires_ts"):
+            assert key not in row.get("data", {}), key
+        assert "approval_id" not in row and "event_id" not in row
 
 
 def test_ledger_lanes_are_isolated_and_unknown_runs_are_404(modules, monkeypatch):
@@ -2465,6 +2513,29 @@ def test_a_failed_ledger_read_is_503_without_detail(modules, monkeypatch, capsys
     logged = capsys.readouterr().out
     assert "ClientError" in logged and "appr-ledger-down" not in logged
 
+    # A failed read of the run row is 503 too, on both lanes, and the
+    # event log is never read.
+    _seed_starting("appr-ledger-row", lane="approval")
+    table.dynamo.queries.clear()
+
+    def row_down(**kwargs):
+        raise ClientError(
+            {"Error": {"Code": "ProvisionedThroughputExceededException",
+                       "Message": "appr-ledger-row detail"}},
+            "GetItem",
+        )
+
+    monkeypatch.setattr(table, "get_item", row_down)
+    for route, params, claims in (
+        ("GET /try/{token}/events", {"token": "appr-ledger-down"}, None),
+        ("GET /approvals/{id}/events", {"id": "appr-ledger-row"}, APPROVER),
+    ):
+        status, raw = _ledger(api, route, params, claims)
+        assert status == 503, route
+        assert json.loads(raw) == {"error": "the run ledger could not be read"}
+    logged = capsys.readouterr().out
+    assert logged.count("ClientError") == 2 and "appr-ledger" not in logged
+
 
 def test_ledger_entry_drops_bad_fields_and_unknown_rows(modules):
     _, api, _, _ = modules
@@ -2517,6 +2588,12 @@ def test_stack_routes_and_grants_the_ledger_exactly():
     grants = re.findall(r"events_table\.grant\((\w+), ([^)]*)\)", source)
     assert sorted(grants) == [("api_fn", '"dynamodb:Query"'), ("fn", '"dynamodb:PutItem"')]
     assert "events_table.grant_read" not in source and "grant_full_access" not in source
+    # The anonymous ledger route has its own stage throttle beside POST /try.
+    settings = source[source.index('"RouteSettings",'):source.index("for route_resource in")]
+    assert '"POST /try": {"ThrottlingRateLimit": 0.2, "ThrottlingBurstLimit": 2}' in settings
+    assert '"GET /try/{token}/events": {' in settings
+    assert '"ThrottlingRateLimit": 10,' in settings
+    assert '"ThrottlingBurstLimit": 20,' in settings
 
 
 def _section(html: str, view: str) -> str:
@@ -2540,7 +2617,12 @@ def test_console_architecture_view_is_static_and_numberless():
     ):
         assert service in arch, service
     assert "Planned: behind a flag, not yet live" in arch
-    assert "not a live status page" in arch
+    assert "not a live status page" in arch and "plus one planned part, marked as planned" in arch
+    # A deterministic catch never reads as Decider work, and the runner,
+    # not the API, invokes the agent and records the pause.
+    assert "Runs the deterministic pre-checks first" in arch
+    assert "for every other call it asks Decider two typed questions" in arch
+    assert "runner Lambda, which invokes the agent and records each pause" in arch
     # Every node names its service and its one job.
     nodes = arch.split('<li class="arch-node')[1:]
     assert len(nodes) == 12
@@ -2571,14 +2653,28 @@ def test_console_run_ledger_renders_beside_the_step_timeline():
     assert "innerHTML" not in block and 'el.textContent = ""' in block
     for fact in ('"tool "', '"layer "', '"verdict "', '"confidence "', "re-issued pause"):
         assert fact in block, fact
-    # Empty hides it; a failed or stale read changes nothing.
+    # A score only on a Decider row, through scored(): a fail-closed,
+    # secret-scan or refusal row carries a placeholder confidence (0.0 or
+    # 1.0) that is never a Decider score, and reads "no Decider score".
+    facts = block[:block.index("function renderLedger")]
+    gate, other = facts.index("if (scored(e)) {"), facts.index("} else if (e.layer)")
+    assert gate < facts.index('"confidence "') < other
+    assert gate < facts.index('" ms"') < other
+    assert 'else if (e.layer) facts.push("no Decider score");' in facts
+    assert "typeof e.confidence" not in facts
+    # Empty hides it; a failed, stale or superseded read changes nothing,
+    # and a failed read at a terminal status is retried once.
     assert "el.hidden = !Array.isArray(events) || !events.length;" in block
+    assert "n = el._req = (el._req || 0) + 1;" in block
+    assert "if (g !== gen || n !== el._req) return;" in block
+    assert "if (out.status === 200 && out.body) renderLedger(el, out.body.events);" in block
     assert (
-        "if (g === gen && out.status === 200 && out.body) renderLedger(el, out.body.events);"
-        in block
+        "else if (terminal) later(() => { if (g === gen && n === el._req) "
+        "loadLedger(path, el, false); }, 3000);" in block
     )
-    assert 'loadLedger("/try/" + encodeURIComponent(token) + "/events", led)' in js
-    assert 'loadLedger("/approvals/" + encodeURIComponent(id) + "/events", led)' in js
+    tail = ", led, TERMINAL.includes(v.status))"
+    assert 'loadLedger("/try/" + encodeURIComponent(token) + "/events"' + tail in js
+    assert 'loadLedger("/approvals/" + encodeURIComponent(id) + "/events"' + tail in js
     view = js[js.index("function viewTry(token)"):]
     assert view.index("led.hidden = true;") < view.index("if (!token)")
     assert 'href="app.css?v=20261020c"' in html

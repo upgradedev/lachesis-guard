@@ -163,10 +163,18 @@ def _dispatch_resume(approval_id: str) -> None:
         print(json.dumps({"resume_hand_off_failed": approval_id, "error": type(exc).__name__}))
 
 
-def _ledger(approval_id: str) -> dict:
-    """The run's ledger. A failed read is 503, never an unhandled error;
-    only the exception type name is logged."""
+def _ledger(approval_id: str, lane: str, not_found: str) -> dict:
+    """The run's ledger, after the lane check on the run row: an invalid
+    id, an unknown run or a run of the other lane is 404 and the event log
+    is never read. A failed read, of the run row or of the log, is 503,
+    never an unhandled error; only the exception type name is logged."""
+    if not _valid_id(approval_id):
+        return _response(404, {"error": not_found})
     try:
+        item = common.get(approval_id)
+        # A row without a lane predates /try and is an approval-lane run.
+        if item is None or item.get("lane", "approval") != lane:
+            return _response(404, {"error": not_found})
         events = ledger.read(approval_id)
     except Exception as exc:
         print(json.dumps({"ledger_read_failed": type(exc).__name__}))
@@ -213,13 +221,7 @@ def handler(event, _context):
         return _response(200, common.public_view(item))
 
     if route == "GET /try/{token}/events":
-        token = params.get("token", "")
-        if not _valid_id(token):
-            return _response(404, {"error": "unknown token"})
-        item = common.get(token)
-        if item is None or item.get("lane") != "try":
-            return _response(404, {"error": "unknown token"})
-        return _ledger(token)
+        return _ledger(params.get("token", ""), "try", "unknown token")
 
     if route == "POST /try/{token}/decision":
         token = params.get("token", "")
@@ -265,11 +267,7 @@ def handler(event, _context):
         return _response(200, common.public_view(item))
 
     if route == "GET /approvals/{id}/events":
-        approval_id = params.get("id", "")
-        item = common.get(approval_id) if _valid_id(approval_id) else None
-        if item is None or item.get("lane", "approval") != "approval":
-            return _response(404, {"error": "unknown approval"})
-        return _ledger(approval_id)
+        return _ledger(params.get("id", ""), "approval", "unknown approval")
 
     if route == "POST /approvals/{id}/decision":
         approval_id = params.get("id", "")

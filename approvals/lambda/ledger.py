@@ -18,8 +18,12 @@ whitelist per event:
 Never the approval_id, event_id, run_version, ts or ttl of the row, and
 never the other keys of ``data``: the approver's name, the runner's
 request id, the resume answer and cause, the error type, attempt counts.
-The query projects only the five attributes the whitelist reads, so the
-rest never leaves DynamoDB for this function.
+The query projects the four top-level attributes the entry reads (seq,
+event_type, status, at) and, inside ``data``, a document path for each
+whitelisted key and no other (``data.lane``, ``data.tool`` and so on), so
+DynamoDB returns a ``data`` map holding only those keys and the rest
+never leaves DynamoDB for this function. Read capacity is still charged
+on the full item size; this is least privilege, not a cost saving.
 
 No event carries a verdict: RunPaused records that the run paused, with
 the triage fields of the pausing call, and nothing in the log says which
@@ -39,6 +43,7 @@ import publisher
 MAX_EVENTS = 200
 PAGE_SIZE = 50
 FIELDS = ("seq", "type", "at", "status", *publisher.RUN_FIELDS, *publisher.TRIAGE_FIELDS)
+_DATA_FIELDS = (*publisher.RUN_FIELDS, *publisher.TRIAGE_FIELDS)
 _NAMES = {
     "#pk": "approval_id",
     "#q": "seq",
@@ -46,8 +51,13 @@ _NAMES = {
     "#s": "status",
     "#a": "at",
     "#d": "data",
+    **{f"#f{i}": name for i, name in enumerate(_DATA_FIELDS)},
 }
-_PROJECTION = "#q, #t, #s, #a, #d"
+# Nested paths only: a bare #d beside #d.#f0 would overlap, which DynamoDB
+# rejects, and every name above must be used by the request.
+_PROJECTION = ", ".join(
+    ["#q", "#t", "#s", "#a", *(f"#d.#f{i}" for i in range(len(_DATA_FIELDS)))]
+)
 
 
 def _seq(value: Any) -> int | None:
@@ -75,7 +85,7 @@ def public_event(row: dict[str, Any]) -> dict[str, Any] | None:
         event["status"] = status
     data = row.get("data")
     if isinstance(data, dict):
-        for name in (*publisher.RUN_FIELDS, *publisher.TRIAGE_FIELDS):
+        for name in _DATA_FIELDS:
             if name not in data:
                 continue
             try:
