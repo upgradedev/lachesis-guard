@@ -1,0 +1,274 @@
+"""The ingest application service of the Activity context (B7a).
+
+``ingest_repo`` brings one registered repository up to date:
+
+1. GET the repository for its ``private`` flag. A 404 marks the
+   repository row ``unavailable`` and stops there.
+2. List the commits since the repository's cursor (on the first run,
+   WINDOW_S back, the table's TTL window). ``since`` is inclusive, so the
+   commits at the cursor time come back each run; the ones already seen
+   there (``seen_at_cursor``) are skipped without a GitHub call.
+3. Oldest first, at most ``max_commits`` per run: GET the commit and its
+   files, build the Activity, scan it, PutItem it conditioned on
+   attribute_not_exists. A new row, or an existing row whose event was
+   never accepted, gets one ActivityObserved on the bus and is then
+   marked published. A row already published is left alone, so a
+   commit's event is sent until it is accepted and not after.
+4. Move the cursor. When every listed commit was handled, to the newest
+   commit time seen; when the run stopped early (the per-run cap, the
+   Lambda deadline, a rate limit, a GitHub error, an event the bus did
+   not accept), to the oldest commit time not yet handled, which is
+   never past a commit that was not written and published. Re-listing is
+   harmless: the writes are idempotent.
+5. Recount the window (actor kinds, scan verdicts, findings) from the
+   table and store the counts on the repository row, so GET /projects
+   reads one row per repository.
+
+Known limits: GitHub's ``since`` filters on the committer date, so a
+commit whose committer date is older than the cursor when it reaches the
+default branch (a merge of a long-lived branch keeps its commits' dates)
+is not listed; the merge commit itself is. A listing longer than
+github.MAX_PAGES pages is cut to its newest commits.
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any
+
+from activity import bus as activity_bus
+from activity import domain, github, registry, scan
+from activity import store as activity_store
+
+MAX_COMMITS_PER_RUN = 60
+WINDOW_S = activity_store.WINDOW_S
+
+OK = "ok"
+MORE = "more"
+UNAVAILABLE = "unavailable"
+RATE_LIMITED = "rate_limited"
+GITHUB_ERROR = "github_error"
+PUBLISH_FAILED = "publish_failed"
+DEADLINE = "deadline"
+
+
+@dataclass
+class RepoResult:
+    project_repo: str
+    status: str = OK
+    listed: int = 0
+    written: int = 0
+    published: int = 0
+    skipped: int = 0
+    private: bool | None = None
+    cursor: str = ""
+    errors: list[str] = field(default_factory=list)
+
+    def as_log(self) -> dict[str, Any]:
+        """The run log line: counts and status only."""
+        return {
+            "project_repo": self.project_repo,
+            "status": self.status,
+            "listed": self.listed,
+            "written": self.written,
+            "published": self.published,
+            "skipped": self.skipped,
+        }
+
+
+def _listed_at(summary: dict[str, Any]) -> str:
+    git = summary.get("commit") if isinstance(summary.get("commit"), dict) else {}
+    committer = git.get("committer") if isinstance(git.get("committer"), dict) else {}
+    author = git.get("author") if isinstance(git.get("author"), dict) else {}
+    return domain.iso_utc(committer.get("date") or author.get("date"))
+
+
+def window_counts(store: activity_store.ActivityStore, project_repo: str, now: float) -> dict:
+    """The counts of one repository's commits in the window, from its rows."""
+    rows, truncated = store.window_rows(
+        project_repo, now, ("actor_kind", "scan_verdict", "finding_count")
+    )
+    by_kind = dict.fromkeys(domain.ACTOR_KINDS, 0)
+    by_verdict = dict.fromkeys(scan.VERDICTS, 0)
+    flagged_changes = 0
+    for row in rows:
+        kind = row.get("actor_kind")
+        if kind in by_kind:
+            by_kind[kind] += 1
+        verdict = row.get("scan_verdict")
+        if verdict in by_verdict:
+            by_verdict[verdict] += 1
+        count = row.get("finding_count")
+        flagged_changes += count if isinstance(count, int) and count > 0 else 0
+    return {
+        "commits": len(rows),
+        "by_actor_kind": by_kind,
+        "by_scan_verdict": by_verdict,
+        "flagged_changes": flagged_changes,
+        "counts_truncated": truncated,
+        "counted_at": domain.iso_of(now),
+    }
+
+
+def _handle(
+    project: registry.Project,
+    repo: str,
+    sha: str,
+    private: bool,
+    gh: github.GitHub,
+    store: activity_store.ActivityStore,
+    bus: activity_bus.Bus,
+    now: float,
+    result: RepoResult,
+) -> str:
+    """One listed commit: fetch, build, scan, write, publish. Returns OK
+    when the commit is fully handled, or the status that stops the run."""
+    try:
+        commit, files = gh.commit(repo, sha)
+    except github.RateLimited:
+        return RATE_LIMITED
+    except github.GitHubError:
+        return GITHUB_ERROR
+    try:
+        activity = domain.build(project.key, repo, commit, files)
+    except (TypeError, ValueError):
+        result.errors.append(sha)  # a malformed commit is skipped, not retried
+        return OK
+    outcome = store.put_activity(activity, now)
+    if outcome == activity_store.NEW:
+        result.written += 1
+    if outcome == activity_store.PUBLISHED:
+        return OK
+    if not bus.publish(activity_bus.detail_of(activity, private, now)):
+        return PUBLISH_FAILED
+    store.mark_published(activity)
+    result.published += 1
+    return OK
+
+
+def ingest_repo(
+    project: registry.Project,
+    repo: str,
+    *,
+    gh: github.GitHub,
+    store: activity_store.ActivityStore,
+    bus: activity_bus.Bus,
+    now: float,
+    max_commits: int = MAX_COMMITS_PER_RUN,
+    out_of_time: Callable[[], bool] = lambda: False,
+) -> RepoResult:
+    project_repo = project.project_repo(repo)
+    result = RepoResult(project_repo)
+    meta = store.get_meta(project_repo) or {}
+    base = {"project": project.key, "repo": repo, "checked_at": domain.iso_of(now)}
+    try:
+        info = gh.repo(repo)
+    except github.NotAccessible:
+        result.status = UNAVAILABLE
+        store.save_meta(project_repo, {**base, "status": UNAVAILABLE})
+        return result
+    except github.RateLimited:
+        result.status = RATE_LIMITED
+        store.save_meta(project_repo, {**base, "status": RATE_LIMITED})
+        return result
+    except github.GitHubError:
+        result.status = GITHUB_ERROR
+        store.save_meta(project_repo, {**base, "status": GITHUB_ERROR})
+        return result
+    # Only an explicit false is public: a missing flag is treated as private.
+    private = info.get("private") is not False
+    result.private = private
+
+    since = str(meta.get("cursor") or domain.iso_of(now - WINDOW_S))
+    seen = set(meta.get("seen_at_cursor") or [])
+    last_activity = str(meta.get("last_activity_at") or "")
+    handled: list[tuple[str, str]] = []  # (committed_at, sha), oldest first
+    remaining: list[str] = []  # listed commit times not handled
+    try:
+        listed = gh.commits_since(repo, since)
+    except github.RateLimited:
+        listed, result.status = [], RATE_LIMITED
+    except github.GitHubError:
+        listed, result.status = [], GITHUB_ERROR
+    result.listed = len(listed)
+
+    queue: list[tuple[str, str]] = []
+    for summary in reversed(listed):  # GitHub lists newest first
+        sha = str(summary.get("sha") or "")
+        try:
+            when = _listed_at(summary)
+        except (TypeError, ValueError):
+            continue
+        if when == since and sha in seen:
+            result.skipped += 1
+            continue
+        queue.append((when, sha))
+    queue.sort()
+
+    for index, (when, sha) in enumerate(queue):
+        if result.status == OK and index >= max_commits:
+            result.status = MORE
+        if result.status == OK and out_of_time():
+            result.status = DEADLINE
+        if result.status == OK:
+            result.status = _handle(project, repo, sha, private, gh, store, bus, now, result)
+        if result.status != OK:
+            remaining = [item[0] for item in queue[index:]]
+            break
+        handled.append((when, sha))
+
+    # Never past a listed commit that was not handled; otherwise the newest.
+    cursor = min(remaining) if remaining else max([since, *(when for when, _ in handled)])
+    for when, _ in handled:
+        last_activity = max(last_activity, when)
+    new_seen = {sha for when, sha in handled if when == cursor}
+    if cursor == since:
+        new_seen |= seen
+    result.cursor = cursor
+    store.save_meta(
+        project_repo,
+        {
+            **base,
+            "status": result.status,
+            "private": private,
+            "cursor": cursor,
+            "seen_at_cursor": sorted(new_seen),
+            "last_activity_at": last_activity,
+            **window_counts(store, project_repo, now),
+        },
+    )
+    return result
+
+
+def ingest_all(
+    projects: tuple[registry.Project, ...],
+    *,
+    gh: github.GitHub,
+    store: activity_store.ActivityStore,
+    bus: activity_bus.Bus,
+    now: float,
+    out_of_time: Callable[[], bool] = lambda: False,
+) -> list[RepoResult]:
+    """Every registered repository, in registry order. A repository whose
+    ingest raised is logged by type and does not stop the others; a rate
+    limit stops the run (the budget is shared)."""
+    results = []
+    for project in projects:
+        for repo in project.repos:
+            if out_of_time():
+                return results
+            try:
+                result = ingest_repo(
+                    project, repo, gh=gh, store=store, bus=bus, now=now, out_of_time=out_of_time
+                )
+            except Exception as exc:
+                print(json.dumps({"msg": "ingest repo failed", "project": project.key,
+                                  "error": type(exc).__name__}))
+                continue
+            print(json.dumps({"msg": "ingest repo", **result.as_log()}, sort_keys=True))
+            results.append(result)
+            if result.status == RATE_LIMITED:
+                return results
+    return results

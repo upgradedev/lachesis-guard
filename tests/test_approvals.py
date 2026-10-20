@@ -1247,8 +1247,10 @@ def test_public_view_is_a_whitelist(modules):
     view = common.public_view(row)
     assert set(view) == {
         "approval_id", "status", "lane", "card", "decided_by_name",
-        "decisions", "result_text", "created_ts",
+        "decisions", "result_text", "created_ts", "project",
     }
+    # B7a: the queue groups by project; a run without one is the demo's.
+    assert view["project"] == "Demo"
     assert view["result_text"] == "ClientError"
     dumped = json.dumps(view)
     for leaked in ("cognito-sub-secret", "lachesis-session-secret", "123456789012", "AccessDenied"):
@@ -2580,7 +2582,15 @@ def test_stack_routes_and_grants_the_ledger_exactly():
     assert routes is not None
     assert ("GET /try/{token}/events", "NONE") in routes
     assert ("GET /approvals/{id}/events", "JWT") in routes
-    assert len(routes) == len(set(routes)) == 9
+    assert len(routes) == len(set(routes)) == 13
+    # B7a: each project read has an anonymous and an approver route.
+    for route in (
+        ("GET /projects", "NONE"),
+        ("GET /projects/{key}/activity", "NONE"),
+        ("GET /approvals/projects", "JWT"),
+        ("GET /approvals/projects/{key}/activity", "JWT"),
+    ):
+        assert route in routes, route
     # The handler serves exactly the routes the API declares.
     api_source = (LAMBDA_DIR / "api.py").read_text(encoding="utf-8")
     for route_key, _ in routes:

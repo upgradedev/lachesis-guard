@@ -2,7 +2,8 @@
 
 Audit keeps every event the outbox publisher puts on lachesis-events:
 
-- the rule audit-all on that bus (source lachesis.approvals) sends each
+- the rule audit-all on that bus (sources lachesis.approvals and, from
+  B7a, lachesis.activity, the ingest's ActivityObserved) sends each
   event's ``detail`` to the Amazon Data Firehose stream lachesis-audit,
   with retries and the dead-letter queue lachesis-audit-dlq (SSE-SQS,
   sendable only by this rule);
@@ -283,8 +284,8 @@ class AuditStack(cdk.Stack):
             "AuditAllRule",
             name=schema.RULE_NAME,
             event_bus_name=schema.EVENT_BUS_NAME,
-            description="Every Lachesis approvals event, to the audit lake",
-            event_pattern={"source": [schema.EVENT_SOURCE]},
+            description="Every Lachesis approvals and activity event, to the audit lake",
+            event_pattern={"source": [schema.EVENT_SOURCE, schema.ACTIVITY_SOURCE]},
             state="ENABLED",
             targets=[
                 events.CfnRule.TargetProperty(

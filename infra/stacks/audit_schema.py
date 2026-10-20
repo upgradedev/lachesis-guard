@@ -69,6 +69,10 @@ from __future__ import annotations
 
 EVENT_BUS_NAME = "lachesis-events"
 EVENT_SOURCE = "lachesis.approvals"
+# B7a: the activity ingest's ActivityObserved events reach the lake too.
+# Their lines carry event_id, type and at like every line; their other
+# fields are not Glue columns yet, so no query reads them.
+ACTIVITY_SOURCE = "lachesis.activity"
 RULE_NAME = "audit-all"
 DELIVERY_STREAM_NAME = "lachesis-audit"
 DLQ_NAME = "lachesis-audit-dlq"
