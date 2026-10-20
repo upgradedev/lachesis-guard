@@ -8,6 +8,12 @@ the runner with retries disabled, so a duplicate event resumes once.
 Paused calls appear in the console queue for the approver; an SES card is
 optional and is sent only when the runner's SES addresses are set (the
 hosted demo leaves them unset). GET never approves.
+
+Each approval command is one DynamoDB TransactWriteItems (approvals/
+lambda/approval/uow.py): the run row on lachesis-approvals plus its
+domain events on lachesis-run-events. TransactWriteItems has no IAM
+action of its own; each item is authorized as its PutItem or UpdateItem,
+so each function is granted only the item actions its code issues.
 """
 
 from __future__ import annotations
@@ -30,6 +36,21 @@ from aws_cdk import aws_s3_deployment as s3deploy
 from constructs import Construct
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+# What grant_read_write_data gave each function on the foundation CMK
+# before B1, kept as is: the tables are encrypted with that key.
+_KEY_ACTIONS = (
+    "kms:Decrypt",
+    "kms:DescribeKey",
+    "kms:Encrypt",
+    "kms:ReEncrypt*",
+    "kms:GenerateDataKey*",
+)
+# The longest an async runner event may wait in the Lambda queue before
+# it is dropped. runner.STARTING_TIMEOUT_S (1260 s) assumes this plus the
+# 900 s Lambda limit: a start claimed later than this could be closed by
+# the sweeper while it still runs. A dropped resume event is re-dispatched
+# by the sweeper (runner.REDISPATCH_AFTER_S).
+RUNNER_MAX_EVENT_AGE_S = 300
 LAMBDA_ASSET = str(_REPO_ROOT / "approvals" / "lambda")
 CONSOLE_ASSET = str(_REPO_ROOT / "approvals" / "console")
 
@@ -64,6 +85,34 @@ class ApprovalsStack(cdk.Stack):
             projection_type=dynamodb.ProjectionType.ALL,
         )
 
+        # The append-only event log of each run (B1): pk approval_id, sk
+        # the per-run seq, event_id = approval_id#seq. The stream is for a
+        # later consumer; nothing reads it yet.
+        events_table = dynamodb.Table(
+            self,
+            "RunEventsTable",
+            table_name="lachesis-run-events",
+            partition_key=dynamodb.Attribute(
+                name="approval_id", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(name="seq", type=dynamodb.AttributeType.NUMBER),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            encryption=dynamodb.TableEncryption.CUSTOMER_MANAGED,
+            encryption_key=foundation.key,
+            time_to_live_attribute="ttl",
+            stream=dynamodb.StreamViewType.NEW_IMAGE,
+            removal_policy=cdk.RemovalPolicy.DESTROY,
+        )
+
+        def grant_store(fn, approvals_actions):
+            """Exactly the item actions a function issues: on the run
+            table (Table.grant also covers its status-index) and PutItem
+            on the event log, plus the CMK both tables are encrypted with
+            (Table.grant does not grant the key)."""
+            table.grant(fn, *(f"dynamodb:{action}" for action in approvals_actions))
+            events_table.grant(fn, "dynamodb:PutItem")
+            foundation.key.grant(fn, *_KEY_ACTIONS)
+
         pool = cognito.UserPool(
             self,
             "ApproversPool",
@@ -91,7 +140,10 @@ class ApprovalsStack(cdk.Stack):
         )
 
         code = lambda_.Code.from_asset(LAMBDA_ASSET)
-        common_env = {"APPROVALS_TABLE": table.table_name}
+        common_env = {
+            "APPROVALS_TABLE": table.table_name,
+            "RUN_EVENTS_TABLE": events_table.table_name,
+        }
 
         runner = lambda_.Function(
             self,
@@ -109,7 +161,13 @@ class ApprovalsStack(cdk.Stack):
                 "SES_TO": os.environ.get("LACHESIS_SES_TO", ""),
             },
         )
-        table.grant_read_write_data(runner)
+        # Claim, pause and outcome updates. PutItem is no longer issued by
+        # this code (the API writes the STARTING row now); it stays for one
+        # release so a runner still on the earlier code, which wrote the
+        # row itself, does not fail with AccessDenied while CloudFormation
+        # moves the role policy ahead of the function code. Drop it in the
+        # release after this one. No Query: the sweep runs in the sweeper.
+        grant_store(runner, ("GetItem", "PutItem", "UpdateItem"))
         runner.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["bedrock-agentcore:InvokeAgentRuntime"],
@@ -134,9 +192,16 @@ class ApprovalsStack(cdk.Stack):
             code=code,
             timeout=cdk.Duration.minutes(5),
             memory_size=256,
-            environment={**common_env, "AGENT_RUNTIME_ARN": agent.runtime_arn},
+            environment={
+                **common_env,
+                "AGENT_RUNTIME_ARN": agent.runtime_arn,
+                "RUNNER_ARN": runner.function_arn,
+            },
         )
-        table.grant_read_write_data(sweeper)
+        # Reads the status-index, then updates the rows it closes.
+        grant_store(sweeper, ("Query", "UpdateItem"))
+        # Re-dispatches the resume of a decided run whose hand-off was lost.
+        runner.grant_invoke(sweeper)
         sweeper.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["bedrock-agentcore:InvokeAgentRuntime"],
@@ -166,7 +231,9 @@ class ApprovalsStack(cdk.Stack):
                 "TRY_IP_DAILY_CAP": "5",
             },
         )
-        table.grant_read_write_data(api_fn)
+        # Puts new run rows, updates counters and decisions, reads rows
+        # and the approver queue.
+        grant_store(api_fn, ("GetItem", "PutItem", "UpdateItem", "Query"))
         runner.grant_invoke(api_fn)
         lambda_.CfnEventInvokeConfig(
             self,
@@ -174,6 +241,7 @@ class ApprovalsStack(cdk.Stack):
             function_name=runner.function_name,
             qualifier="$LATEST",
             maximum_retry_attempts=0,
+            maximum_event_age_in_seconds=RUNNER_MAX_EVENT_AGE_S,
         )
 
         api = apigw.CfnApi(
@@ -329,6 +397,7 @@ class ApprovalsStack(cdk.Stack):
         )
         runner.add_environment("CONSOLE_URL", f"https://{distribution.domain_name}")
 
+        self.events_table = events_table
         self.api_url = api.attr_api_endpoint
         self.console_url = f"https://{distribution.domain_name}"
         self.user_pool = pool

@@ -2,9 +2,11 @@
 
 Two actions:
 
-- ``start``: invoke the agent with a prompt. If the agent completes,
-  the final text is returned. If Lachesis pauses it (interrupt), a
-  PENDING approval row is written and the paused call appears in the
+- ``start``: claim the STARTING run the API already wrote (a duplicate
+  async delivery finds it claimed and does nothing), then invoke the
+  agent with a prompt. If the agent completes, the final text is
+  returned. If Lachesis pauses it (interrupt), the run moves to
+  PENDING and the paused call appears in the
   Approvals console queue, where the approver sees and decides it. An
   SES card is optional and is sent only when LACHESIS_SES_FROM and
   LACHESIS_SES_TO are set; the hosted demo leaves them unset. GET never
@@ -14,8 +16,11 @@ Two actions:
   the agent session with the human's answer, and store the outcome.
   Invoked with MaximumRetryAttempts=0 so retries never double-resume.
 
-Also ``sweep``: expired PENDING rows are resumed with "no" and marked
-EXPIRED, so a forgotten pause ends refused, never open.
+``sweep`` is not an action of this handler: the sweeper Lambda runs it
+in-process under its own role (sweeper.py). It resumes expired PENDING
+rows with "no" and marks them EXPIRED, so a forgotten pause ends
+refused, never open, and it re-dispatches the resume of a decided run
+whose hand-off from the API was lost.
 
 Every agent answer goes through contract.read_result: an agent error
 (which comes back with HTTP 200) is recorded as ERROR, never as DONE.
@@ -24,18 +29,26 @@ only when common.failed_before_send proves the agent was never invoked;
 any other failure may already have run the paused call and ends ERROR.
 A start is retried twice, with a short backoff, only for those pre-send
 failures and for a throttling or quota refusal (START_RETRY_CODES).
+
+Every state write is a command of approval/service.py (one transaction,
+with its domain events). A command that loses a race (the sweeper closed
+the run first, for example) raises domain.Conflict; the runner then
+reports "conflict" and writes nothing.
 """
 
 from __future__ import annotations
 
+import datetime
 import html
 import json
 import os
 import time
+import uuid
 
 import boto3
 import common
 import contract
+from approval import domain, service
 from botocore.exceptions import ClientError
 
 SES_FROM = os.environ.get("SES_FROM", "")
@@ -172,159 +185,139 @@ def _invoke_start(session_id: str, prompt: str, context) -> dict:
     raise AssertionError("unreachable")  # pragma: no cover
 
 
-def start(prompt: str, lane: str, approval_id: str = "", context=None) -> dict:
-    approval_id = approval_id or common.new_approval_id()
-    session_id = common.new_session_id()
-    common.create_row(approval_id, session_id, lane)
+def _request_id(context) -> str:
+    """The Lambda request id that claims a run; a fresh id without one."""
+    return str(getattr(context, "aws_request_id", "") or "local-" + uuid.uuid4().hex)
+
+
+def _pause(run: domain.Run, result: contract.AgentResult) -> domain.Run:
+    updated = service.record_pause(run, result.interrupts, _pending_card(result.as_payload()))
+    if updated.lane == "approval":
+        _send_card(updated.row)
+    return updated
+
+
+def start(prompt: str, approval_id: str, context=None) -> dict:
+    run = service.claim_run(approval_id, _request_id(context))
+    if run is None:
+        return {"status": "noop", "approval_id": approval_id}
     try:
-        raw = _invoke_start(session_id, prompt, context)
-    except Exception as exc:
-        common.transition(approval_id, "STARTING", "ERROR", result_text=common.error_text(exc))
-        return {"status": "error", "approval_id": approval_id}
-    result = contract.read_result(raw)
-    if result.is_error:
-        common.transition(approval_id, "STARTING", "ERROR", result_text=result.error)
-        return {"status": "error", "approval_id": approval_id}
-    if result.kind == contract.COMPLETED:
-        common.transition(approval_id, "STARTING", "DONE", result_text=result.text)
-        return {"status": "completed", "approval_id": approval_id}
-    card = _pending_card(result.as_payload())
-    item = common.transition(
-        approval_id,
-        "STARTING",
-        "PENDING",
-        interrupts=json.dumps(result.interrupts),
-        card=json.dumps(card),
-    )
-    if lane == "approval" and item is not None:
-        _send_card(item)
-    return {"status": "interrupt", "approval_id": approval_id}
+        try:
+            raw = _invoke_start(run.session_id, prompt, context)
+        except Exception as exc:
+            service.record_failure(run, common.error_text(exc))
+            return {"status": "error", "approval_id": approval_id}
+        result = contract.read_result(raw)
+        if result.is_error:
+            service.record_failure(run, result.error)
+            return {"status": "error", "approval_id": approval_id}
+        if result.kind == contract.COMPLETED:
+            service.record_completion(run, result.text)
+            return {"status": "completed", "approval_id": approval_id}
+        _pause(run, result)
+        return {"status": "interrupt", "approval_id": approval_id}
+    except domain.Conflict:
+        return {"status": "conflict", "approval_id": approval_id}
 
 
-def _decision_entry(row: dict, status: str, suffix: str = "") -> dict:
-    """One history entry for the decision a resume consumed. The Cognito
-    sub is not copied: the history is public, the sub is not. ``suffix``
-    "_not_sent" marks a decision whose resume failed before the agent was
-    invoked (see _attempt_failed)."""
-    return {
-        "decision": ("approve" if status == "APPROVED" else "decline") + suffix,
-        "decided_by_name": str(row.get("decided_by_name", "")),
-        "at": str(row.get("decided_at") or common.now_iso()),
-    }
+def _answers(run: domain.Run, answer: str) -> list[dict]:
+    return [{"interruptId": item["interruptId"], "response": answer} for item in run.interrupts]
 
 
 def resume(approval_id: str, context=None) -> dict:
-    row = common.get(approval_id)
-    if row is None:
-        return {"status": "missing"}
-    status = row["status"]
-    if status not in {"APPROVED", "DECLINED"}:
-        return {"status": "noop", "current": status}
-    moved = common.transition(approval_id, status, "RESUMING", resuming_ts=int(time.time()))
-    if moved is None:
-        return {"status": "noop", "current": "moved-by-another"}
-    answer = "y" if status == "APPROVED" else "no"
-    interrupts = json.loads(row.get("interrupts") or "[]")
     try:
-        raw = common.invoke_agent(
-            row["session_id"],
-            {
-                "session_id": row["session_id"],
-                "interrupt_responses": [
-                    {"interruptId": item["interruptId"], "response": answer}
-                    for item in interrupts
-                ],
-            },
-            read_timeout=_read_timeout(context),
-        )
-    except Exception as exc:  # never strand a row in RESUMING
-        if common.failed_before_send(exc):
-            # The agent was never invoked: the decision can be taken again.
-            return {"status": "error-resumable", "current": _attempt_failed(row, status)}
-        # The request may have reached the agent, so the paused call may
-        # already have run: nobody may be asked to decide it a second time.
-        common.transition(approval_id, "RESUMING", "ERROR", result_text=common.error_text(exc))
-        return {"status": "ERROR", "error": type(exc).__name__}
-    result = contract.read_result(raw)
-    if result.kind == contract.INTERRUPT:
-        # The resumed run paused again: fold the new pause into a fresh
-        # pending state on the same approval id, with a renewed expiry
-        # window. The decision just consumed is appended to the history,
-        # and decided_by / decided_by_name are kept, so a re-pause never
-        # erases who decided first. The next decision overwrites them;
-        # public_view shows no name while the row is PENDING or EXPIRED.
-        now = int(time.time())
-        history = row.get("decisions") if isinstance(row.get("decisions"), list) else []
-        updated = common.transition(
-            approval_id,
-            "RESUMING",
-            "PENDING",
-            interrupts=json.dumps(result.interrupts),
-            card=json.dumps(_pending_card(result.as_payload())),
-            expires_ts=now + common.TTL_SECONDS,
-            ttl=now + common.TTL_SECONDS + 86400,
-            decisions=[*history, _decision_entry(row, status)],
-        )
-        if row.get("lane", "approval") == "approval" and updated is not None:
-            _send_card(updated)
-        return {"status": "interrupt-again", "approval_id": approval_id}
-    final_status = contract.final_status(result, status)
-    text = result.error if result.is_error else result.text
-    common.transition(approval_id, "RESUMING", final_status, result_text=text)
-    return {"status": final_status, "text": "" if result.is_error else result.text}
+        run, answer = service.resume(approval_id)
+    except domain.NotFound:
+        return {"status": "missing"}
+    except domain.InvalidTransition as exc:
+        return {"status": "noop", "current": exc.current}
+    except domain.Conflict:
+        return {"status": "noop", "current": "moved-by-another"}
+    try:
+        try:
+            raw = common.invoke_agent(
+                run.session_id,
+                {"session_id": run.session_id, "interrupt_responses": _answers(run, answer)},
+                read_timeout=_read_timeout(context),
+            )
+        except Exception as exc:  # never strand a row in RESUMING
+            if common.failed_before_send(exc):
+                # The agent was never invoked: the decision can be taken again.
+                return {"status": "error-resumable", "current": service.resume_not_sent(run)}
+            # The request may have reached the agent, so the paused call may
+            # already have run: nobody may be asked to decide it a second time.
+            service.record_failure(run, common.error_text(exc))
+            return {"status": "ERROR", "error": type(exc).__name__}
+        result = contract.read_result(raw)
+        if result.kind == contract.INTERRUPT:
+            # The resumed run paused again: a fresh pending state on the
+            # same approval id, with a renewed expiry window. The decision
+            # just consumed joins the history (see domain.Run.pause).
+            _pause(run, result)
+            return {"status": "interrupt-again", "approval_id": approval_id}
+        if result.is_error:
+            service.record_failure(run, result.error)
+            return {"status": "ERROR", "text": ""}
+        return {"status": service.record_completion(run, result.text), "text": result.text}
+    except domain.Conflict:
+        return {"status": "conflict", "approval_id": approval_id}
 
 
-MAX_SWEEP_ATTEMPTS = 3
+# A claimed start can sit in STARTING for up to the runner's read
+# timeout (AGENT_READ_TIMEOUT, under the 900 s Lambda limit) after a
+# queue delay. The async queue delay is bounded by the runner's
+# MaximumEventAgeInSeconds (RUNNER_MAX_EVENT_AGE_S in
+# infra/stacks/approvals.py: an older event is dropped, never run), so
+# 300 s of queue plus 900 s of Lambda stays under the 1260 s after which
+# the sweeper closes STARTING (ESTIMATE, from the design review).
+# RESUMING is closed after 1200 s.
+STARTING_TIMEOUT_S = 1260
+RESUMING_TIMEOUT_S = 1200
+# A decided run (APPROVED or DECLINED) whose resume event has not moved
+# it to RESUMING after this long is handed to the runner again: the API's
+# hand-off failed, or the event aged out of the queue. A duplicate resume
+# is a no-op (the APPROVED/DECLINED -> RESUMING move is conditioned on
+# the version), so re-dispatching a run whose event is merely late is
+# safe.
+REDISPATCH_AFTER_S = 120
+RUNNER_ARN = os.environ.get("RUNNER_ARN", "")
 
 
-def _attempt_failed(item: dict, decided: str = "") -> str:
-    """Count a resume attempt that failed before the agent was invoked
-    (common.failed_before_send); the third such failure is terminal.
-    Never call this for a failure that may have reached the agent.
-
-    ``decided`` is the APPROVED or DECLINED status a person set, empty
-    for a sweeper expiry. When the row returns to PENDING, that decision
-    was made but never sent: it is appended to ``decisions`` as
-    "<choice>_not_sent" and the current-decision fields are cleared, so
-    the next decision neither overwrites it nor inherits its name."""
-    attempts = int(item.get("sweep_attempts", 0)) + 1
-    if attempts >= MAX_SWEEP_ATTEMPTS:
-        common.transition(
-            item["approval_id"], "RESUMING", "ERROR", sweep_attempts=attempts
-        )
-        return "ERROR"
-    fields: dict = {"sweep_attempts": attempts}
-    if decided:
-        history = item.get("decisions") if isinstance(item.get("decisions"), list) else []
-        fields.update(
-            decisions=[*history, _decision_entry(item, decided, "_not_sent")],
-            **NOBODY_DECIDED,
-        )
-    common.transition(item["approval_id"], "RESUMING", "PENDING", **fields)
-    return "PENDING"
+def _decided_ts(item: dict) -> int:
+    """When the current decision was recorded; 0 (so: old) when unknown."""
+    try:
+        return int(datetime.datetime.fromisoformat(str(item.get("decided_at", ""))).timestamp())
+    except (TypeError, ValueError):
+        return 0
 
 
-# Clears the current-decision fields when a pause ends with nobody
-# deciding it. A re-pause keeps the previous pause's decider in the row;
-# without this, an expiry would be credited to that person. The earlier
-# decisions stay in ``decisions``.
-NOBODY_DECIDED = {"decided_by": "", "decided_by_name": "", "decided_at": ""}
+def _invoke_runner(payload: dict) -> None:
+    """Async-invoke the runner Lambda (the sweeper's resume re-dispatch)."""
+    boto3.client("lambda", region_name=common.REGION).invoke(
+        FunctionName=RUNNER_ARN,
+        InvocationType="Event",
+        Payload=json.dumps(payload).encode(),
+    )
+
+
+def _quietly(command, *args) -> bool:
+    """Run one command; False when the run moved first (domain.Conflict)."""
+    try:
+        command(*args)
+    except domain.Conflict:
+        return False
+    return True
 
 
 def sweep(context=None) -> dict:
-    # Rows whose start invoke failed after create_row sit in STARTING;
-    # anything older than ten minutes there is terminal.
+    # Rows whose start never reported back sit in STARTING; anything
+    # older than STARTING_TIMEOUT_S there is terminal.
     closed_starting = 0
     for item in common.list_by_status("STARTING", limit=50):
-        if int(time.time()) - int(item.get("created_ts", 0)) < 600:
+        if int(time.time()) - int(item.get("created_ts", 0)) < STARTING_TIMEOUT_S:
             continue
-        closed = common.transition(
-            item["approval_id"],
-            "STARTING",
-            "ERROR",
-            result_text="StartTimeout: the start did not report back",
-        )
-        if closed is not None:
+        run = domain.Run.from_item(item)
+        if _quietly(service.record_failure, run, "StartTimeout: the start did not report back"):
             closed_starting += 1
 
     # A resume whose Lambda died mid-invoke leaves RESUMING behind. Nothing
@@ -333,16 +326,26 @@ def sweep(context=None) -> dict:
     # where a person could decide it a second time.
     rescued = 0
     for item in common.list_by_status("RESUMING", limit=50):
-        if int(time.time()) - int(item.get("resuming_ts", 0)) < 1200:
+        if int(time.time()) - int(item.get("resuming_ts", 0)) < RESUMING_TIMEOUT_S:
             continue
-        moved = common.transition(
-            item["approval_id"],
-            "RESUMING",
-            "ERROR",
-            result_text="ResumeOutcomeUnknown: the resume did not report back",
-        )
-        if moved is not None:
+        run = domain.Run.from_item(item)
+        if _quietly(
+            service.record_failure, run, "ResumeOutcomeUnknown: the resume did not report back"
+        ):
             rescued += 1
+
+    # A decision whose resume never reached the runner leaves the run
+    # APPROVED or DECLINED, which nothing else moves: hand it over again.
+    redispatched = 0
+    for status in (domain.APPROVED, domain.DECLINED):
+        for item in common.list_by_status(status, limit=50):
+            if int(time.time()) - _decided_ts(item) < REDISPATCH_AFTER_S:
+                continue
+            try:
+                _invoke_runner({"action": "resume", "approval_id": str(item["approval_id"])})
+            except Exception:  # never crash the sweep; the next one tries again
+                continue
+            redispatched += 1
 
     expired = [
         item
@@ -352,16 +355,14 @@ def sweep(context=None) -> dict:
     closed_try = 0
     deferred = 0
     for item in expired:
-        if item.get("lane") == "try":
+        run = domain.Run.from_item(item)
+        if run.lane == "try":
             # A public /try pause that nobody decided simply ends. It
             # must not resume the agent: resuming re-invokes the runtime
             # and wakes the Decider GPU a second time for a run nobody
             # is watching (measured 2026-10-15: expiries at 21:54 and
             # 22:09 UTC each re-woke it).
-            if (
-                common.transition(item["approval_id"], "PENDING", "EXPIRED", **NOBODY_DECIDED)
-                is not None
-            ):
+            if _quietly(service.expire, run):
                 closed_try += 1
             continue
         remaining = _remaining_s(context)
@@ -370,47 +371,34 @@ def sweep(context=None) -> dict:
             # PENDING and the next sweep resumes it.
             deferred += 1
             continue
-        moved = common.transition(
-            item["approval_id"],
-            "PENDING",
-            "RESUMING",
-            resuming_ts=int(time.time()),
-            **NOBODY_DECIDED,
-        )
-        if moved is None:
+        try:
+            answer = service.expiry_resume(run)
+        except domain.Conflict:
             continue
-        interrupts = json.loads(item.get("interrupts") or "[]")
         try:
             raw = common.invoke_agent(
-                item["session_id"],
-                {
-                    "session_id": item["session_id"],
-                    "interrupt_responses": [
-                        {"interruptId": entry["interruptId"], "response": "no"}
-                        for entry in interrupts
-                    ],
-                },
+                run.session_id,
+                {"session_id": run.session_id, "interrupt_responses": _answers(run, answer)},
                 read_timeout=_read_timeout(context),
             )
         except Exception as exc:  # never crash the sweep
             if common.failed_before_send(exc):
-                _attempt_failed(item)  # never sent: retried on the next sweep
+                _quietly(service.resume_not_sent, run)  # never sent: retried next sweep
             else:
-                common.transition(
-                    item["approval_id"], "RESUMING", "ERROR", result_text=common.error_text(exc)
-                )
+                _quietly(service.record_failure, run, common.error_text(exc))
             continue
         outcome = contract.read_result(raw)
         if outcome.is_error:
-            common.transition(item["approval_id"], "RESUMING", "ERROR", result_text=outcome.error)
+            _quietly(service.record_failure, run, outcome.error)
             continue
-        common.transition(item["approval_id"], "RESUMING", "EXPIRED")
+        _quietly(service.expire, run)
     return {
         "expired": len(expired),
         "rescued": rescued,
         "closed_starting": closed_starting,
         "closed_try": closed_try,
         "deferred": deferred,
+        "redispatched": redispatched,
     }
 
 
@@ -419,12 +407,9 @@ def handler(event, context):
     if action == "start":
         return start(
             str(event.get("prompt", "")),
-            str(event.get("lane", "approval")),
             str(event.get("approval_id", "")),
             context=context,
         )
     if action == "resume":
         return resume(str(event.get("approval_id", "")), context=context)
-    if action == "sweep":
-        return sweep(context)
     return {"status": "error", "error": f"unknown action {action!r}"}

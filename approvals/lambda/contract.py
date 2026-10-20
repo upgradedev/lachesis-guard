@@ -111,20 +111,3 @@ def read_result(payload: Any) -> AgentResult:
         return AgentResult(ERROR, error=f"AgentError: {detail}", triage=triage)
     return AgentResult(ERROR, error=f"UnknownStatus: {status!r}", triage=triage)
 
-
-def final_status(result: AgentResult, decision_status: str) -> str:
-    """Terminal row status after a resume.
-
-    ``decision_status`` is the row status the resume consumed (APPROVED
-    or DECLINED). An error result is ERROR whatever the decision was; a
-    completed result is DONE after an approval and REFUSED_DONE after a
-    decline. Any other decision value is ERROR: the runner cannot say
-    what ran.
-    """
-    if result.kind != COMPLETED:
-        return "ERROR"
-    if decision_status == "APPROVED":
-        return "DONE"
-    if decision_status == "DECLINED":
-        return "REFUSED_DONE"
-    return "ERROR"
