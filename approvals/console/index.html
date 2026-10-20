@@ -161,18 +161,18 @@
     </section>
 
     <section data-view="architecture" class="page" aria-labelledby="arch-h" hidden>
-      <div class="cockpit-bar"><div><p class="eyebrow">Decision Fabric · Design View</p><h1 id="arch-h" tabindex="-1">How one tool call travels</h1><p class="subline">The design as the code in this repository defines it. This is a diagram, not a live status page.</p></div></div>
+      <div class="cockpit-bar"><div><p class="eyebrow">Decision Fabric · Design View</p><h1 id="arch-h" tabindex="-1">How one tool call travels</h1><p class="subline">The design as the code in this repository defines it, plus one planned part, marked as planned. This is a diagram, not a live status page.</p></div></div>
       <div class="arch">
         <div class="arch-lane"><h2>Before the tool runs: the synchronous decision</h2>
           <ol class="arch-row">
             <li class="arch-node"><strong>Agent</strong><span class="arch-svc">Amazon Bedrock AgentCore Runtime</span><span>Runs the Strands agent and proposes each tool call.</span></li>
-            <li class="arch-node"><strong>Lachesis intervention</strong><span class="arch-svc">Strands InterventionHandler</span><span>Asks Decider two typed questions, then plain Python rules return Proceed, Guide, Confirm or Deny.</span></li>
+            <li class="arch-node"><strong>Lachesis intervention</strong><span class="arch-svc">Strands InterventionHandler</span><span>Runs the deterministic pre-checks first (safe reads, the secret scan, repeats of a refusal); for every other call it asks Decider two typed questions, then plain Python rules return Proceed, Guide, Confirm or Deny.</span></li>
             <li class="arch-node"><strong>Decider</strong><span class="arch-svc">Strands Decider 2B on Amazon SageMaker</span><span>Answers the risk class and the grounding question, each with a confidence.</span></li>
           </ol>
         </div>
         <div class="arch-lane"><h2>A Confirm pauses the run for a person</h2>
           <ol class="arch-row">
-            <li class="arch-node"><strong>Approvals API</strong><span class="arch-svc">Amazon API Gateway HTTP API and AWS Lambda</span><span>Records the decision on a paused call and hands the resume to the runner.</span></li>
+            <li class="arch-node"><strong>Approvals API</strong><span class="arch-svc">Amazon API Gateway HTTP API and AWS Lambda</span><span>Records the decision on a paused call and hands start and resume to the runner Lambda, which invokes the agent and records each pause.</span></li>
             <li class="arch-node"><strong>Unit of Work</strong><span class="arch-svc">Amazon DynamoDB TransactWriteItems</span><span>Writes the run aggregate (lachesis-approvals) and its events (lachesis-run-events) in one transaction.</span></li>
           </ol>
         </div>
@@ -217,6 +217,6 @@
 <noscript><p class="page">This console needs JavaScript.</p></noscript>
 <script src="config.js"></script>
 <script src="data.js?v=20261020"></script>
-<script src="app.js?v=20261020d"></script>
+<script src="app.js?v=20261020e"></script>
 </body>
 </html>

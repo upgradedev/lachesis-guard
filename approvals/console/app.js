@@ -394,8 +394,10 @@ function ledgerFacts(e) {
   if (e.layer) facts.push("layer " + (LAYER[e.layer] || e.layer));
   if (e.risk) facts.push("risk " + String(e.risk).replace(/_/g, " "));
   if (e.verdict) facts.push("verdict " + e.verdict);
-  if (typeof e.confidence === "number" && isFinite(e.confidence)) facts.push("confidence " + e.confidence.toFixed(2));
-  if (typeof e.latency_ms === "number" && isFinite(e.latency_ms)) facts.push(Math.round(e.latency_ms) + " ms");
+  if (scored(e)) { // a score only on a Decider row: fail-closed, secret scan and refusal rows carry placeholders, never a Decider score
+    facts.push("confidence " + e.confidence.toFixed(2));
+    if (typeof e.latency_ms === "number" && isFinite(e.latency_ms)) facts.push(Math.round(e.latency_ms) + " ms");
+  } else if (e.layer) facts.push("no Decider score");
   if (e.cached === true) facts.push("re-issued pause, no new Decider call");
   return facts.join(" · ");
 }
@@ -408,9 +410,13 @@ function renderLedger(el, events) {
         h("div", { class: "step-h" }, h("code", { text: "#" + e.seq }), h("span", { text: e.type }), isFinite(t) ? h("span", { class: "muted", text: hhmmss(t) + " UTC" }) : null,
           e.status ? h("span", { class: "pill", text: (STATUS[e.status] || [e.status])[0] }) : null), facts ? h("p", { class: "step-d", text: facts }) : null); })));
 }
-function loadLedger(path, el) {
-  const g = gen;
-  api(path).then(out => { if (g === gen && out.status === 200 && out.body) renderLedger(el, out.body.events); });
+function loadLedger(path, el, terminal) { // only the latest read per panel renders; a failed read at a terminal status retries once
+  const g = gen, n = el._req = (el._req || 0) + 1;
+  api(path).then(out => {
+    if (g !== gen || n !== el._req) return;
+    if (out.status === 200 && out.body) renderLedger(el, out.body.events);
+    else if (terminal) later(() => { if (g === gen && n === el._req) loadLedger(path, el, false); }, 3000);
+  });
 }
 function viewTry(token) {
   const run = $("#run"), msg = $("#try-msg");
@@ -421,7 +427,7 @@ function viewTry(token) {
   $("[data-copy]").onclick = async e => { try { await navigator.clipboard.writeText(location.href); e.target.textContent = "Copied"; } catch (err) { e.target.textContent = "Copy failed"; } };
   const g = gen;
   later(() => { if (g === gen && !$("#steps").children.length) $("#steps").append(h("li", {}, h("div", { class: "skeleton" }), h("div", { class: "skeleton" }))); }, 200);
-  const ctl = poll("/try/" + encodeURIComponent(token), v => { renderTry(v, ctl); loadLedger("/try/" + encodeURIComponent(token) + "/events", led); }, denied => {
+  const ctl = poll("/try/" + encodeURIComponent(token), v => { renderTry(v, ctl); loadLedger("/try/" + encodeURIComponent(token) + "/events", led, TERMINAL.includes(v.status)); }, denied => {
     const mine = store(s => JSON.parse(s.getItem("lachesis_try_started") || "null")) || {}; // the 202 races the runner's first row write
     if (!denied && mine.token === token && Date.now() - mine.t < 20000) { if (!$("#run-status").textContent) renderTry({ status: "STARTING", card: {} }, ctl); ctl.kick(); return; }
     $("#steps").textContent = ""; $("#run-status").textContent = ""; msg.hidden = false; msg.textContent = "No demo run matches this link. Runs are removed about a day after they end.";
@@ -485,7 +491,7 @@ function viewDetail(id) {
     statusLine(st, v.status); body.textContent = ""; const card = v.card || {};
     if (card.tool || card.reason) body.append(decisionCard(v, "approval", () => ctl.kick()));
     const end = outcomeRow(v); if (end) body.append(h("ol", { class: "steps" }, end)); tickClocks();
-    loadLedger("/approvals/" + encodeURIComponent(id) + "/events", led);
+    loadLedger("/approvals/" + encodeURIComponent(id) + "/events", led, TERMINAL.includes(v.status));
   }, out => {
     body.textContent = ""; body.append(h("p", { class: "err", role: "alert", text: out && out.status === 403 ? "This account is not in the approvers group." : out ? "" : "No paused call matches this link." }));
   });
