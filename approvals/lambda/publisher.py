@@ -11,7 +11,7 @@ new event on the custom EventBridge bus lachesis-events:
 - a whitelisted detail: event_id, run_ref, seq, type, at, status (when
   the row carries it), the run fields lane (RunRequested) and pause_seq
   (every event that has one), and the triage fields tool, layer, risk,
-  confidence and latency_ms when the event has them (RunPaused). Never
+  confidence, latency_ms and cached when the event has them (RunPaused). Never
   arguments, prompts, interrupt ids, tokens, addresses, the approver's
   name or sub, or error text, even though some of those are harmless
   today: a field reaches the bus only by being listed here.
@@ -29,8 +29,8 @@ departs from the design's field list, which named approval_id.
 
 Field types on the bus do not depend on the value: seq and pause_seq
 are integers, confidence and latency_ms are always JSON floats (1.0
-stays 1.0), lane, tool, layer and risk are strings, and any of the run
-or triage fields may be null. A value of any other type makes the
+stays 1.0), lane, tool, layer and risk are strings, cached is a JSON
+boolean, and any of the run or triage fields may be null. A value of any other type makes the
 record unmappable.
 
 lane and pause_seq were added in B3 for the audit lake: lane lets an
@@ -38,6 +38,9 @@ Insight query keep the approval lane apart from the public /try lane,
 and pause_seq pairs a DecisionRecorded with the RunPaused it answered.
 Both are already in the outbox row's data (domain.RunRequested and the
 events that carry pause_seq); a row relayed before B3 simply has neither.
+cached, also B3, lets the lake leave a re-issued Confirm (no new model
+call) out of its counts of Decider verdicts; a RunPaused written before
+it has no cached field.
 
 Only INSERT records are relayed. The event source mapping filters on
 eventName INSERT already; this code skips anything else as well, so a
@@ -89,12 +92,14 @@ REGION = os.environ.get("AWS_REGION", "eu-west-1")
 # PutEvents accepts at most 10 entries per call.
 MAX_ENTRIES = 10
 # The triage fields a domain event may carry into the detail, in order.
-TRIAGE_FIELDS = ("tool", "layer", "risk", "confidence", "latency_ms")
+# cached (B3) marks a RunPaused built from the handler's re-issued Confirm.
+TRIAGE_FIELDS = ("tool", "layer", "risk", "confidence", "latency_ms", "cached")
 # The run fields a domain event may carry into the detail (B3).
 RUN_FIELDS = ("lane", "pause_seq")
 TEXT_FIELDS = frozenset({"lane", "tool", "layer", "risk"})
 NUMBER_FIELDS = frozenset({"confidence", "latency_ms"})
 INTEGER_FIELDS = frozenset({"pause_seq"})
+BOOL_FIELDS = frozenset({"cached"})
 # Every key the detail can hold, in order. Tests pin it, and the Glue
 # table of the audit lake (infra/stacks/audit_schema.py) has exactly
 # these columns.
@@ -150,7 +155,8 @@ def _triage(name: str, value: Any) -> Any:
     """One run or triage value with a type that does not depend on the
     value: text stays str, a finite number from the stream (Decimal)
     becomes a float, a whole non-negative Decimal in an integer field
-    becomes an int, None stays None. Anything else is Unmappable."""
+    becomes an int, a bool in a bool field stays a bool, None stays None.
+    Anything else is Unmappable."""
     if value is None:
         return None
     if name in TEXT_FIELDS and isinstance(value, str):
@@ -165,6 +171,8 @@ def _triage(name: str, value: Any) -> Any:
         and value >= 0
     ):
         return int(value)
+    if name in BOOL_FIELDS and isinstance(value, bool):
+        return value
     raise Unmappable(f"{name} has an unexpected type")
 
 

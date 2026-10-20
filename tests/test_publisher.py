@@ -26,7 +26,7 @@ sys.path.insert(0, str(LAMBDA_DIR))
 
 EVENTS_TABLE = "lachesis-run-events"
 BASE_FIELDS = {"event_id", "run_ref", "seq", "type", "at", "status"}
-TRIAGE = {"tool", "layer", "risk", "confidence", "latency_ms"}
+TRIAGE = {"tool", "layer", "risk", "confidence", "latency_ms", "cached"}
 # The run fields each event of _full_run carries into the detail (B3).
 RUN_FIELDS_BY_TYPE = {
     "RunRequested": {"lane"},
@@ -496,13 +496,20 @@ def test_lane_and_pause_seq_reach_the_detail(layers):
     assert all(isinstance(d["pause_seq"], int) for d in details[2:])
     assert publisher.DETAIL_FIELDS == (
         "event_id", "run_ref", "seq", "type", "at", "status", "lane", "pause_seq",
-        "tool", "layer", "risk", "confidence", "latency_ms",
+        "tool", "layer", "risk", "confidence", "latency_ms", "cached",
     )
 
 
 @pytest.mark.parametrize(
     "data",
-    [{"pause_seq": Decimal("1.5")}, {"pause_seq": Decimal("-1")}, {"pause_seq": "1"}, {"lane": 3}],
+    [
+        {"pause_seq": Decimal("1.5")},
+        {"pause_seq": Decimal("-1")},
+        {"pause_seq": "1"},
+        {"lane": 3},
+        {"cached": Decimal("1")},
+        {"cached": "true"},
+    ],
 )
 def test_a_run_field_of_the_wrong_type_is_unmappable(layers, data):
     domain, uow, publisher, bus = layers
@@ -511,3 +518,18 @@ def test_a_run_field_of_the_wrong_type_is_unmappable(layers, data):
         "batchItemFailures": [{"itemIdentifier": "9"}]
     }
     assert bus.calls == []
+
+
+def test_cached_reaches_the_detail_as_a_json_boolean(layers):
+    """B3: a RunPaused says whether its verdict was re-issued from the
+    handler's cache (no new model call); the stream's BOOL stays a bool."""
+    domain, uow, publisher, bus = layers
+    fresh = _paused_row(domain, uow)
+    reissued = _paused_row(domain, uow, cached=True)
+    out = publisher.handler({"Records": [_record(fresh, 1), _record(reissued, 2)]}, None)
+    assert out == {"batchItemFailures": []}
+    flags = [d["cached"] for d in _details(bus)]
+    assert flags == [False, True]
+    assert all(isinstance(flag, bool) for flag in flags)
+    sent = [entry["Detail"].replace(" ", "") for call in bus.calls for entry in call]
+    assert any('"cached":true' in detail for detail in sent)

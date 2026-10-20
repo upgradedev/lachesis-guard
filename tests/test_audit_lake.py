@@ -49,14 +49,14 @@ SQL_WORDS = {
     "group", "by", "order", "join", "left", "on", "case", "when", "then", "else", "end",
     "interval", "day", "current_date", "date_format", "substr", "count", "min", "max",
     "coalesce", "date_diff", "from_iso8601_timestamp", "approx_percentile", "format",
-    "floor", "Y", "m", "d",
+    "floor", "Y", "m", "d", "row_number", "over", "partition", "desc", "true", "false",
 }
 # Fields an outbox row or a domain event has that the bus must never
 # carry, so no query may name them.
 NEVER_ON_THE_BUS = {
     "approval_id", "session_id", "decision_text", "decided_by", "decided_by_name",
     "arguments", "prompt", "interrupts", "card", "expires_ts", "ttl", "request_id",
-    "verdict", "grounded", "cached", "from_status", "error_type", "answer", "cause",
+    "verdict", "grounded", "from_status", "error_type", "answer", "cause",
 }
 
 
@@ -84,7 +84,8 @@ def test_the_columns_are_exactly_what_the_publisher_emits(publisher):
     kinds = dict(schema.COLUMNS)
     assert kinds["seq"] == kinds["pause_seq"] == "bigint"
     assert kinds["confidence"] == kinds["latency_ms"] == "double"
-    text = set(publisher.DETAIL_FIELDS) - {"seq", "pause_seq", "confidence", "latency_ms"}
+    assert kinds["cached"] == "boolean"
+    text = set(publisher.DETAIL_FIELDS) - {"seq", "pause_seq", "confidence", "latency_ms", "cached"}
     assert {kinds[name] for name in text} == {"string"}
     # dt is the Firehose arrival day, a partition key and never a column.
     assert schema.PARTITION_KEY == ("dt", "string")
@@ -215,10 +216,21 @@ def test_the_stack_wires_what_the_task_names():
         'type="AppendDelimiterToRecord"',
         "enforce_work_group_configuration=True",
         "recursive_delete_option=True",
-        "table.add_dependency(database)",
-        "query.add_dependency(workgroup)",
+        "table.node.add_dependency(database)",
+        "query.node.add_dependency(workgroup, table)",
+        # The rule role's trust names this rule, not only the account.
+        '"ArnEquals": {"aws:SourceArn": rule_arn}',
+        "f\"{schema.EVENT_BUS_NAME}/{schema.RULE_NAME}\"",
+        # Both hops alarm: the DLQ (sent and waiting) and Firehose to S3.
+        "metric_number_of_messages_sent(",
+        "metric_approximate_number_of_messages_visible(",
+        'metric_name="DeliveryToS3.DataFreshness"',
+        "noncurrent_version_expiration=cdk.Duration.days(NONCURRENT_AUDIT_DAYS)",
     ):
         assert needle in source, needle
+    # CfnResource.add_dependency is deprecated; only node.add_dependency.
+    assert re.findall(r"(?<!node)\.add_dependency\(", source) == []
+    assert source.count("cw_actions.SnsAction(alerts)") == 3
     # The Firehose role writes only under the two prefixes it owns.
     assert 'actions=["s3:PutObject", "s3:AbortMultipartUpload"]' in source
     assert "s3:GetObject" not in source and "s3:DeleteObject" not in source
@@ -227,10 +239,31 @@ def test_the_stack_wires_what_the_task_names():
 
 def test_the_stack_is_wired_into_the_app_outside_the_import_guard():
     app = (ROOT / "infra" / "app.py").read_text(encoding="utf-8")
-    assert 'AuditStack(app, "LachesisAudit", env=env)' in app
-    guard = app[app.index("try:") : app.index("except ImportError")]
-    assert "AuditStack" not in guard
-    assert "from stacks.audit import AuditStack" in app
+    tree = ast.parse(app)
+    # The import and the instantiation are both top-level statements:
+    # neither inside the try nor inside `if HAVE_ALL_STACKS:`, so an
+    # ImportError in another stack cannot drop LachesisAudit.
+    imports = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom) and node.module == "stacks.audit"
+    ]
+    assert [alias.name for node in imports for alias in node.names] == ["AuditStack"]
+    calls = [
+        node.value
+        for node in tree.body
+        if isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Call)
+        and getattr(node.value.func, "id", "") == "AuditStack"
+    ]
+    assert len(calls) == 1
+    assert ast.literal_eval(calls[0].args[1]) == "LachesisAudit"
+    every = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "AuditStack"
+    ]
+    assert every == calls
 
 
 def test_the_iac_workflow_deploys_audit_after_the_gate():
@@ -243,6 +276,11 @@ def test_the_iac_workflow_deploys_audit_after_the_gate():
     assert gate < workflow.index(step)
     # Destroyed first: its rule sits on the LachesisApprovals bus.
     assert "for stack in LachesisAudit LachesisApprovals" in workflow
+    # The redeploy of the judged approvals stack this needs is written
+    # where it lasts, beside the step and in the stack docstring.
+    before_step = workflow[workflow.index(step) - 400 : workflow.index(step)]
+    assert "Run deploy-approvals first" in before_step
+    assert "Deploy order: run deploy-approvals first" in _stack_source()
 
 
 @pytest.mark.parametrize(
@@ -254,6 +292,11 @@ def test_the_iac_workflow_deploys_audit_after_the_gate():
         ".github/workflows/iac.yml",
         "infra/app.py",
         "approvals/lambda/publisher.py",
+        "approvals/lambda/runner.py",
+        "approvals/lambda/approval/domain.py",
+        "infra/check_templates.py",
+        "tests/test_check_templates.py",
+        "tests/test_publisher.py",
     ],
 )
 def test_no_em_or_en_dashes(path):
@@ -313,8 +356,15 @@ def lake_rows(monkeypatch):
         clock["now"] = float(T0 + offset)
         work.commit(run)
 
-    def card(layer, risk, confidence):
-        return {"tool": "write_file", "risk": risk, "confidence": confidence, "layer": layer}
+    def card(layer, risk, confidence, latency_ms=150.0, cached=False):
+        return {
+            "tool": "write_file",
+            "risk": risk,
+            "confidence": confidence,
+            "layer": layer,
+            "latency_ms": latency_ms,
+            "cached": cached,
+        }
 
     interrupt = [{"interruptId": "i", "name": "lachesis-confirm", "reason": "r"}]
     # An approval-lane run, paused twice: approved after 42 s, then the
@@ -348,8 +398,43 @@ def lake_rows(monkeypatch):
     at(0, c)
     c.claim("req-c")
     at(1, c)
-    c.pause(interrupt, card("unavailable", "", None), T0 + 3, 1800)
+    c.pause(interrupt, card("unavailable", "", None, None), T0 + 3, 1800)
     at(3, c)
+    # An approval-lane run whose approval was never sent: approved after
+    # 5 s, the resume failed before the agent was invoked, the run went
+    # back to PENDING with the same pause_seq, and a person declined it
+    # at 30 s. Only the decline reached the agent.
+    d = domain.Run.request("appr-d", "v" * 40, "approval", T0, 1800)
+    at(0, d)
+    d.claim("req-d")
+    at(1, d)
+    d.pause(interrupt, card("decider", "untrusted_to_action", 0.55), T0 + 4, 1800)
+    at(4, d)
+    d.decide("approve", "sub", "owner", T0 + 9)
+    at(9, d)
+    d.begin_resume(T0 + 10)
+    at(10, d)
+    assert d.resume_not_sent(T0 + 11) == "PENDING"
+    at(11, d)
+    d.decide("decline", "sub", "owner", T0 + 30)
+    at(30, d)
+    # An approval-lane run re-paused on the handler's cached Confirm (no
+    # model call, no latency): the second pause is a real wait for a
+    # person but not a second Decider verdict.
+    e = domain.Run.request("appr-e", "w" * 40, "approval", T0, 1800)
+    at(0, e)
+    e.claim("req-e")
+    at(1, e)
+    e.pause(interrupt, card("decider", "destructive_write", 0.62), T0 + 6, 1800)
+    at(6, e)
+    e.decide("approve", "sub", "owner", T0 + 16)
+    at(16, e)
+    e.begin_resume(T0 + 17)
+    at(17, e)
+    e.pause(interrupt, card("decider", "destructive_write", 0.62, None, True), T0 + 18, 1800)
+    at(18, e)
+    e.decide("approve", "sub", "owner", T0 + 28)
+    at(28, e)
 
     serializer = TypeSerializer()
     details = []
@@ -405,39 +490,55 @@ def _run(details, sql):
     return rows
 
 
-def test_the_lake_rows_carry_lane_and_pause_seq(lake_rows):
+def test_the_lake_rows_carry_lane_pause_seq_and_cached(lake_rows):
     assert {d["lane"] for d in lake_rows if d["type"] == "RunRequested"} == {"approval", "try"}
     assert all("approval_id" not in d for d in lake_rows)
+    paused = [d for d in lake_rows if d["type"] == "RunPaused"]
+    assert [d["cached"] for d in paused] == [False, False, False, False, False, False, True]
+    assert all(isinstance(d["cached"], bool) for d in paused)
+    # Run d: two decisions on one pause, the first never sent.
+    d_ref = paused[4]["run_ref"]
+    decided = [d for d in lake_rows if d["type"] == "DecisionRecorded" and d["run_ref"] == d_ref]
+    assert [(x["pause_seq"], x["status"]) for x in decided] == [(1, "APPROVED"), (1, "DECLINED")]
 
 
-def test_pause_mix_counts_each_pause_once(lake_rows):
+def test_pause_mix_counts_each_fresh_pause_once(lake_rows):
     _, sql = schema.QUERIES["lachesis-pause-mix-by-layer-per-day"]
+    # destructive_write: a twice, e once (its re-issued second pause is
+    # left out).
     assert _run(lake_rows, sql) == [
-        (DAY, "decider", "destructive_write", 2),
+        (DAY, "decider", "destructive_write", 3),
         (DAY, "decider", "exfiltration", 1),
+        (DAY, "decider", "untrusted_to_action", 1),
         (DAY, "unavailable", "", 1),
     ]
 
 
 def test_fail_closed_counts(lake_rows):
     _, sql = schema.QUERIES["lachesis-fail-closed-per-day"]
-    assert _run(lake_rows, sql) == [(DAY, 4, 1)]
+    assert _run(lake_rows, sql) == [(DAY, 6, 1)]
 
 
-def test_time_to_decision_pairs_each_decision_with_its_pause(lake_rows):
+def test_time_to_decision_pairs_each_pause_with_its_latest_decision(lake_rows):
     _, sql = schema.QUERIES["lachesis-time-to-decision"]
-    # approval: 47 - 5 = 42 s and 70 - 60 = 10 s; try: 12 - 2 = 10 s.
+    # approval: a 42 and 10 s, d 26 s (pause to the decline that was
+    # sent, never the 5 s approval that was not), e 10 and 10 s (the
+    # re-issued pause is still a wait); try: 10 s.
     assert _run(lake_rows, sql) == [
-        (DAY, "approval", 2, 10, 10, 42),
+        (DAY, "approval", 5, 10, 10, 42),
         (DAY, "try", 1, 10, 10, 10),
     ]
 
 
 def test_confidence_beside_decision_is_approval_lane_only(lake_rows):
     _, sql = schema.QUERIES["lachesis-approval-pause-confidence-by-decision"]
+    # d appears once, with the decision the agent received; e's
+    # re-issued pause is left out.
     assert _run(lake_rows, sql) == [
         (DAY, "decider", "destructive_write", "0.3", "APPROVED", 1),
+        (DAY, "decider", "destructive_write", "0.6", "APPROVED", 1),
         (DAY, "decider", "destructive_write", "0.8", "DECLINED", 1),
+        (DAY, "decider", "untrusted_to_action", "0.5", "DECLINED", 1),
     ]
 
 
@@ -445,3 +546,58 @@ def test_a_run_relayed_before_lane_existed_is_left_out(lake_rows):
     legacy = [{k: v for k, v in d.items() if k not in {"lane", "pause_seq"}} for d in lake_rows]
     _, sql = schema.QUERIES["lachesis-approval-pause-confidence-by-decision"]
     assert _run(legacy, sql) == []
+
+
+def test_a_copy_without_lane_never_fans_a_run_out(lake_rows):
+    """A RunRequested relayed once by the B2 publisher (no lane) and
+    again by B3 (lane) differs, so SELECT DISTINCT keeps both copies;
+    the requested CTE must still give one lane per run."""
+    old_copies = [
+        {k: v for k, v in d.items() if k != "lane"}
+        for d in lake_rows
+        if d["type"] == "RunRequested"
+    ]
+    rows = lake_rows + old_copies
+    for name in ("lachesis-time-to-decision", "lachesis-approval-pause-confidence-by-decision"):
+        _, sql = schema.QUERIES[name]
+        assert _run(rows, sql) == _run(lake_rows, sql), name
+
+
+def test_rows_relayed_before_cached_fall_back_to_the_latency_heuristic(lake_rows):
+    """Without the cached field, a decider pause with no latency_ms reads
+    as a re-issue, and the counts match the flagged rows."""
+    legacy = [{k: v for k, v in d.items() if k != "cached"} for d in lake_rows]
+    for name in (
+        "lachesis-pause-mix-by-layer-per-day",
+        "lachesis-fail-closed-per-day",
+        "lachesis-approval-pause-confidence-by-decision",
+    ):
+        _, sql = schema.QUERIES[name]
+        assert _run(legacy, sql) == _run(lake_rows, sql), name
+
+
+def test_the_cached_flag_wins_over_the_heuristic(lake_rows):
+    """A fresh decider pause whose server sent no latency stays counted
+    when the flag says it is fresh."""
+    no_latency = [
+        dict(d, latency_ms=None) if d["type"] == "RunPaused" and not d["cached"] else d
+        for d in lake_rows
+    ]
+    _, sql = schema.QUERIES["lachesis-fail-closed-per-day"]
+    assert _run(no_latency, sql) == [(DAY, 6, 1)]
+
+
+def test_the_queries_name_the_fresh_pause_filter():
+    for name in (
+        "lachesis-pause-mix-by-layer-per-day",
+        "lachesis-fail-closed-per-day",
+        "lachesis-approval-pause-confidence-by-decision",
+    ):
+        assert schema.FRESH_PAUSE in schema.QUERIES[name][1], name
+    # A person waited on a re-issued pause too.
+    assert schema.FRESH_PAUSE not in schema.QUERIES["lachesis-time-to-decision"][1]
+    for name in ("lachesis-time-to-decision", "lachesis-approval-pause-confidence-by-decision"):
+        sql = schema.QUERIES[name][1]
+        assert "PARTITION BY run_ref, pause_seq ORDER BY seq DESC" in sql
+        assert "WHERE rn = 1" in sql
+        assert "\"type\" = 'RunRequested' AND lane IS NOT NULL" in sql

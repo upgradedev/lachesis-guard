@@ -12,7 +12,19 @@ Audit keeps every event the outbox publisher puts on lachesis-events:
 - the bucket blocks all public access, enforces TLS, encrypts with SSE-S3
   (no new CMK, and no dependency on the Foundation key), is versioned,
   and expires events/ and errors/ after 90 days and athena-results/
-  after 7.
+  after 7. An overwritten or deleted audit object stays recoverable as
+  a noncurrent version for 30 days under events/ and errors/ (1 day for
+  athena-results/);
+- two alarms watch each hop to the alerts topic: the dead-letter queue
+  (a message sent, and a message waiting) for EventBridge to Firehose,
+  and DeliveryToS3.DataFreshness for Firehose to S3, whose own retries
+  end in discarded records after 24 h.
+
+Retention is an owner choice and is recorded here: like every Lachesis
+stack the bucket has RemovalPolicy.DESTROY with auto_delete_objects, so
+the iac destroy action erases the whole trail, every version included.
+The lake is an operations record for this build, not a retained audit
+archive; making it one means RETAIN and no auto-delete.
 
 Insight reads it: the Glue database lachesis_audit with the table events
 (OpenX JSON SerDe, partition projection on dt, no crawler), the Athena
@@ -25,6 +37,11 @@ The stack depends on no other stack: it names the bus by its fixed name
 and builds the ARNs it needs from its own account and region, so there
 is no cross-stack export. The bus belongs to LachesisApprovals, so this
 stack deploys after it and is destroyed before it (iac.yml).
+
+Deploy order: run deploy-approvals first, so the publisher relays lane,
+pause_seq and cached and the runner and domain put cached on RunPaused.
+Rows relayed earlier have none of them, so lachesis-time-to-decision and
+lachesis-approval-pause-confidence-by-decision return nothing for them.
 
 None of this has run on AWS yet. In particular the AppendDelimiterToRecord
 processor (the console's "New line delimiter" option for an S3
@@ -57,6 +74,12 @@ TARGET_MAX_EVENT_AGE_S = 3600
 TARGET_MAX_RETRIES = 20
 DELIVERY_LOG_GROUP = f"/aws/kinesisfirehose/{schema.DELIVERY_STREAM_NAME}"
 DELIVERY_LOG_STREAM = "S3Delivery"
+# How long an overwritten or deleted object under events/ or errors/
+# stays recoverable as a noncurrent version.
+NONCURRENT_AUDIT_DAYS = 30
+# Firehose DataFreshness above this (seconds) means records are waiting
+# on S3 delivery far past the 60 s buffer.
+FRESHNESS_ALARM_S = 900
 
 _FH = firehose.CfnDeliveryStream
 
@@ -85,14 +108,14 @@ class AuditStack(cdk.Stack):
                     id="events",
                     prefix=schema.EVENTS_PREFIX,
                     expiration=cdk.Duration.days(schema.EVENTS_EXPIRY_DAYS),
-                    noncurrent_version_expiration=cdk.Duration.days(1),
+                    noncurrent_version_expiration=cdk.Duration.days(NONCURRENT_AUDIT_DAYS),
                     abort_incomplete_multipart_upload_after=cdk.Duration.days(1),
                 ),
                 s3.LifecycleRule(
                     id="errors",
                     prefix=schema.ERRORS_PREFIX,
                     expiration=cdk.Duration.days(schema.ERRORS_EXPIRY_DAYS),
-                    noncurrent_version_expiration=cdk.Duration.days(1),
+                    noncurrent_version_expiration=cdk.Duration.days(NONCURRENT_AUDIT_DAYS),
                     abort_incomplete_multipart_upload_after=cdk.Duration.days(1),
                 ),
                 s3.LifecycleRule(
@@ -229,12 +252,23 @@ class AuditStack(cdk.Stack):
             retention_period=cdk.Duration.days(14),
             removal_policy=cdk.RemovalPolicy.DESTROY,
         )
+        # The rule ARN from the fixed names, not rule.attr_arn: the role
+        # and the rule would otherwise reference each other in a circle.
+        # With aws:SourceArn, no other rule in the account can use this
+        # role to write into the audit stream (confused deputy).
+        rule_arn = (
+            f"arn:{self.partition}:events:{self.region}:{self.account}:rule/"
+            f"{schema.EVENT_BUS_NAME}/{schema.RULE_NAME}"
+        )
         target_role = iam.Role(
             self,
             "AuditTargetRole",
             assumed_by=iam.ServicePrincipal(
                 "events.amazonaws.com",
-                conditions={"StringEquals": {"aws:SourceAccount": self.account}},
+                conditions={
+                    "StringEquals": {"aws:SourceAccount": self.account},
+                    "ArnEquals": {"aws:SourceArn": rule_arn},
+                },
             ),
             description="EventBridge rule audit-all: put records on lachesis-audit only",
         )
@@ -297,6 +331,42 @@ class AuditStack(cdk.Stack):
             treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
         )
         dlq_alarm.add_alarm_action(cw_actions.SnsAction(alerts))
+        # The backlog: SQS metrics of a long-idle queue can arrive late,
+        # so the first dead-lettered event may miss the sent alarm's one
+        # window. This one stays in ALARM while anything waits.
+        dlq_depth_alarm = cloudwatch.Alarm(
+            self,
+            "AuditDlqDepthAlarm",
+            metric=dlq.metric_approximate_number_of_messages_visible(
+                period=cdk.Duration.minutes(5), statistic="Maximum"
+            ),
+            threshold=1,
+            evaluation_periods=1,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            alarm_description="The audit DLQ holds events that never reached Firehose",
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+        dlq_depth_alarm.add_alarm_action(cw_actions.SnsAction(alerts))
+        # The second hop: Firehose to S3. A failed delivery is retried for
+        # up to 24 h and then discarded, which shows only in the delivery
+        # log, so the age of the oldest undelivered record is watched.
+        freshness_alarm = cloudwatch.Alarm(
+            self,
+            "AuditDeliveryFreshnessAlarm",
+            metric=cloudwatch.Metric(
+                namespace="AWS/Firehose",
+                metric_name="DeliveryToS3.DataFreshness",
+                dimensions_map={"DeliveryStreamName": schema.DELIVERY_STREAM_NAME},
+                period=cdk.Duration.minutes(5),
+                statistic="Maximum",
+            ),
+            threshold=FRESHNESS_ALARM_S,
+            evaluation_periods=1,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+            alarm_description="Audit records wait on S3 delivery (Firehose lachesis-audit)",
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+        freshness_alarm.add_alarm_action(cw_actions.SnsAction(alerts))
 
         # --- Insight: Glue and Athena ----------------------------------
         database = glue.CfnDatabase(
@@ -337,7 +407,8 @@ class AuditStack(cdk.Stack):
                 ),
             ),
         )
-        table.add_dependency(database)
+        # node.add_dependency: CfnResource.add_dependency is deprecated.
+        table.node.add_dependency(database)
 
         workgroup = athena.CfnWorkGroup(
             self,
@@ -369,5 +440,4 @@ class AuditStack(cdk.Stack):
                 query_string=sql,
                 work_group=workgroup.name,
             )
-            query.add_dependency(workgroup)
-            query.add_dependency(table)
+            query.node.add_dependency(workgroup, table)

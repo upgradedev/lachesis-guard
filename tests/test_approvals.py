@@ -2143,3 +2143,28 @@ def test_real_ids_have_the_checked_shape(modules):
         approval_id = common.new_approval_id()
         assert re.fullmatch(r"appr-[A-Za-z0-9_-]{32}", approval_id)
         assert api._valid_id(approval_id)
+
+
+def test_the_card_carries_the_cached_flag_and_the_event_relays_it(modules):
+    """B3: a re-pause built from the handler's re-issued Confirm (cached,
+    no latency) is marked, so the audit lake can leave it out of its
+    counts of Decider verdicts. The console never sees the flag."""
+    common, _, runner, _ = modules
+    interrupts = [{"interruptId": "i1", "reason": "r"}]
+    fresh = {"tool": "t", "verdict": "confirm", "layer": "decider", "latency_ms": 120.0}
+    reissued = {"tool": "t", "verdict": "confirm", "layer": "decider", "latency_ms": None,
+                "cached": True}
+    assert runner._pending_card({"interrupts": interrupts, "triage": [fresh]})["cached"] is False
+    card = runner._pending_card({"interrupts": interrupts, "triage": [reissued]})
+    assert card["cached"] is True
+    odd = runner._pending_card({"interrupts": interrupts, "triage": [dict(fresh, cached="yes")]})
+    assert odd["cached"] is False
+    assert "cached" not in common.CARD_KEYS
+    domain = _layer("domain")
+    run = domain.Run.request("appr-cached", "s" * 40, "approval", time.time(), 1800)
+    run.pause(interrupts, card, time.time(), 1800)
+    paused = [event for _, event in run.events if event.name == "RunPaused"]
+    assert [event.cached for event in paused] == [True]
+    run2 = domain.Run.request("appr-fresh", "s" * 40, "approval", time.time(), 1800)
+    run2.pause(interrupts, {"cached": "yes"}, time.time(), 1800)
+    assert [e.cached for _, e in run2.events if e.name == "RunPaused"] == [False]

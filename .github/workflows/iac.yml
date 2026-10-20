@@ -99,6 +99,9 @@ jobs:
         if: inputs.action == 'deploy-observability'
         working-directory: infra
         run: cdk deploy LachesisObservability --require-approval never
+      # Run deploy-approvals first: the publisher relays lane, pause_seq
+      # and cached only from that deploy on, and the time-to-decision and
+      # confidence queries return nothing for rows relayed earlier.
       - name: Deploy audit
         if: inputs.action == 'deploy-audit'
         working-directory: infra
