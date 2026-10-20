@@ -15,6 +15,7 @@ from __future__ import annotations
 import datetime
 import time
 from collections.abc import Iterable
+from typing import Any
 
 import common
 
@@ -84,6 +85,31 @@ def start_try(
     )
 
 
+def record_gate(
+    approval_id: str,
+    project: str,
+    gate: dict[str, Any],
+    card: dict[str, Any] | None,
+    now: float | None = None,
+) -> domain.Run:
+    """B7b: write a merge-gate run in one transaction, already decided by
+    the gate: PENDING with ``card`` when a person must decide, otherwise
+    DONE (the gate passed). The row, RunRequested and RunPaused or
+    RunCompleted are one commit, so the run is never seen in STARTING.
+    ``approval_id`` is the caller's (gate_api derives it from the pull
+    request head); a run already at that id raises domain.Conflict and
+    writes nothing."""
+    moment = _now(now)
+    run = domain.Run.request_gate(
+        approval_id, common.new_session_id(), project, gate, moment, common.TTL_SECONDS
+    )
+    if card is None:
+        run.pass_gate()
+    else:
+        run.hold_gate(card, moment, common.TTL_SECONDS)
+    return unit_of_work().commit(run)
+
+
 def claim_run(approval_id: str, request_id: str) -> domain.Run | None:
     """The runner takes a STARTING run before it invokes the agent.
 
@@ -127,7 +153,7 @@ def record_failure(run: domain.Run, text: str) -> domain.Run:
 
 def record_decision(
     approval_id: str,
-    lane: str,
+    lane: str | Iterable[str],
     decision: str,
     decided_by: str,
     decided_by_name: str,
@@ -137,7 +163,9 @@ def record_decision(
 ) -> domain.Run:
     """PENDING -> APPROVED or DECLINED, with DecisionRecorded.
 
-    Raises NotFound when there is no such run on ``lane``, Expired,
+    ``lane`` is one lane or several (B7b: the approver route decides the
+    approval and the gate lane alike). Raises NotFound when there is no
+    such run on ``lane``, Expired,
     NotResumable (a fail-closed pause on the public lane), or Conflict
     when the run is not PENDING or moved before the commit.
 
@@ -146,9 +174,10 @@ def record_decision(
     the used task token). Anyone else gets domain.WorkflowOwned, after
     every refusal above was checked on a copy and nothing was written, so
     the API can hand the decision to the workflow instead."""
+    lanes = {lane} if isinstance(lane, str) else set(lane)
     work = unit_of_work()
     run = work.get(approval_id)
-    if run is None or run.lane != lane:
+    if run is None or run.lane not in lanes:
         raise domain.NotFound()
     if run.workflow_owned and not by_workflow:
         moment = _now(now)

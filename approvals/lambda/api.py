@@ -19,6 +19,14 @@ Routes (HTTP API, see infra/stacks/approvals.py):
                              repository in full
 - GET  /approvals/projects/{key}/activity  approvers group only
 
+B7b, the merge gate: POST /gate/pulls and GET /gate/{id} are served by
+gate_api.py behind the GitHub Actions OIDC authorizer, not here. A gate
+run is decided here, on the approver routes: GET /approvals lists its
+PENDING rows beside the approval lane's, GET /approvals/{id} and its
+/events read it, and POST /approvals/{id}/decision records the decision
+and dispatches no resume, because a gate run has no agent behind it.
+The /try routes never read a gate run (their lane check is "try").
+
 A route with no authorizer never carries JWT claims, so each project
 read has two routes: the anonymous one redacts private repositories
 (activity/read.py), the approver one is behind the JWT authorizer. A
@@ -263,7 +271,11 @@ def _dispatch_resume(approval_id: str) -> None:
         print(json.dumps({"resume_hand_off_failed": approval_id, "error": type(exc).__name__}))
 
 
-def _ledger(approval_id: str, lane: str, not_found: str) -> dict:
+# The lanes the approver routes read and decide (B7b adds the gate).
+APPROVER_LANES = ("approval", domain.GATE)
+
+
+def _ledger(approval_id: str, lane: str | tuple[str, ...], not_found: str) -> dict:
     """The run's ledger, after the lane check on the run row: an invalid
     id, an unknown run or a run of the other lane is 404 and the event log
     is never read. A failed read, of the run row or of the log, is 503,
@@ -273,7 +285,8 @@ def _ledger(approval_id: str, lane: str, not_found: str) -> dict:
     try:
         item = common.get(approval_id)
         # A row without a lane predates /try and is an approval-lane run.
-        if item is None or item.get("lane", "approval") != lane:
+        lanes = (lane,) if isinstance(lane, str) else lane
+        if item is None or item.get("lane", "approval") not in lanes:
             return _response(404, {"error": not_found})
         events = ledger.read(approval_id)
     except Exception as exc:
@@ -408,7 +421,7 @@ def handler(event, _context):
         rows = [
             row
             for row in common.list_by_status("PENDING", limit=50)
-            if row.get("lane", "approval") == "approval"
+            if row.get("lane", "approval") in APPROVER_LANES
         ]
         return _response(200, {"approvals": [common.public_view(row) for row in rows]})
 
@@ -421,12 +434,12 @@ def handler(event, _context):
     if route == "GET /approvals/{id}":
         approval_id = params.get("id", "")
         item = common.get(approval_id) if _valid_id(approval_id) else None
-        if item is None or item.get("lane", "approval") != "approval":
+        if item is None or item.get("lane", "approval") not in APPROVER_LANES:
             return _response(404, {"error": "unknown approval"})
         return _response(200, common.public_view(item))
 
     if route == "GET /approvals/{id}/events":
-        return _ledger(params.get("id", ""), "approval", "unknown approval")
+        return _ledger(params.get("id", ""), APPROVER_LANES, "unknown approval")
 
     if route == "POST /approvals/{id}/decision":
         approval_id = params.get("id", "")
@@ -440,7 +453,7 @@ def handler(event, _context):
         decided_by_name = claims.get("username", claims.get("cognito:username", ""))
         try:
             run = service.record_decision(
-                approval_id, "approval", decision, decided_by, decided_by_name
+                approval_id, APPROVER_LANES, decision, decided_by, decided_by_name
             )
         except domain.WorkflowOwned as owned:
             return _decide_through_workflow(
@@ -448,7 +461,9 @@ def handler(event, _context):
             )
         except domain.DomainError as exc:
             return _error(exc, "unknown approval")
-        _dispatch_resume(approval_id)
+        # A gate run's decision is its end: there is no agent to resume.
+        if not run.is_gate:
+            _dispatch_resume(approval_id)
         return _response(202, {"approval_id": approval_id, "status": run.status})
 
     return _response(404, {"error": "unknown route"})

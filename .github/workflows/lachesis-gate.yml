@@ -1,0 +1,152 @@
+name: lachesis-gate
+
+# The Lachesis merge gate (B7b). On every pull request this job sends the
+# changed files to the gate (POST /gate/pulls) with a GitHub OIDC token
+# whose audience is lachesis-gate, then polls GET /gate/{id} every 15 s for
+# at most 10 minutes. It succeeds on PASSED or APPROVED and fails on
+# DECLINED or EXPIRED. Nothing is configured on a developer's machine.
+#
+# NOT YET A REQUIRED CHECK. Until the owner makes this job a required status
+# check, it must never block other work, so it runs with
+# continue-on-error: true: a failed or timed-out gate shows on the pull
+# request and blocks nothing. Turning the gate on means making the check
+# required and removing continue-on-error.
+#
+# The job is skipped while the repository variable LACHESIS_GATE_URL (the
+# API base URL, not a secret) is unset, and for pull requests from forks,
+# which GitHub gives no OIDC token. A pull_request run uses the workflow
+# file of the pull request itself, so until the gate lists the files on
+# its own, a change to this file can change what the gate is sent.
+#
+# The OIDC token is masked and requested afresh for every call; no token
+# is printed or stored. The added lines are sent to the gate and scanned
+# there; the gate stores no line and shows paths only to approvers.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: lachesis-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    if: vars.LACHESIS_GATE_URL != '' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Not a required check yet: a failure here must not block other work.
+    continue-on-error: true
+    env:
+      GATE_URL: ${{ vars.LACHESIS_GATE_URL }}
+      REPOSITORY: ${{ github.repository }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      GH_TOKEN: ${{ github.token }}
+      MAX_FILES: "300"
+      MAX_EXCERPT_CHARS: "8000"
+    steps:
+      - name: Collect the changed files with the GitHub CLI
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/${REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" \
+            --jq '.[]' > files.jsonl
+          jq -s \
+            --arg repo "$REPOSITORY" --argjson pr "$PR_NUMBER" --arg sha "$HEAD_SHA" \
+            --argjson max_files "$MAX_FILES" --argjson max_chars "$MAX_EXCERPT_CHARS" '
+            def added: (.patch // "") | split("\n")
+              | map(select(startswith("+") and (startswith("+++") | not)) | .[1:])
+              | join("\n");
+            {
+              repository: $repo, pr_number: $pr, head_sha: $sha,
+              files_truncated: (length > $max_files),
+              changes: (.[0:$max_files] | map(
+                added as $lines
+                | {
+                    path: .filename, status: .status,
+                    additions: .additions, deletions: .deletions,
+                    added_lines_excerpt: $lines[0:$max_chars],
+                    excerpt_truncated: (($lines | length) > $max_chars)
+                  }
+                + (if .previous_filename then {previous_path: .previous_filename} else {} end)
+              ))
+            }' files.jsonl > gate-request.json
+          echo "Changed files sent to the gate: $(jq '.changes | length' gate-request.json)"
+          echo "File list cut by this job: $(jq '.files_truncated' gate-request.json)"
+
+      - name: Ask the gate and wait for its verdict
+        run: |
+          set -euo pipefail
+          base="${GATE_URL%/}"
+          fresh_token() {
+            # In this shell, never in a command substitution, so the mask
+            # command reaches the runner before the token is used.
+            TOKEN="$(curl -sSf \
+              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=lachesis-gate" | jq -r '.value')"
+            echo "::add-mask::${TOKEN}"
+          }
+          call() {
+            # call METHOD PATH [BODY_FILE]: the body lands in gate-response.json,
+            # the HTTP code in CODE.
+            fresh_token
+            if [ "$#" -ge 3 ]; then
+              curl -sS -o gate-response.json -w '%{http_code}' -X "$1" \
+                -H "Authorization: Bearer ${TOKEN}" -H "content-type: application/json" \
+                --data-binary "@$3" "${base}$2" > gate-code.txt
+            else
+              curl -sS -o gate-response.json -w '%{http_code}' -X "$1" \
+                -H "Authorization: Bearer ${TOKEN}" "${base}$2" > gate-code.txt
+            fi
+            CODE="$(cat gate-code.txt)"
+          }
+          report() {
+            echo "Gate status: $1"
+            jq -c '.summary // {}' gate-response.json || true
+            {
+              echo "### Lachesis merge gate: $1"
+              echo ""
+              echo "Verdict summary (counts only, from the deterministic scan):"
+              echo '```json'
+              jq '.summary // {}' gate-response.json || true
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          }
+          finish() {
+            case "$1" in
+              PASSED|APPROVED) report "$1"; exit 0 ;;
+              DECLINED|EXPIRED|ERROR) report "$1"; exit 1 ;;
+            esac
+          }
+
+          call POST /gate/pulls gate-request.json
+          if [ "$CODE" != "200" ] && [ "$CODE" != "202" ]; then
+            echo "The gate refused the request: HTTP ${CODE} $(jq -r '.error // ""' gate-response.json 2>/dev/null || true)"
+            exit 1
+          fi
+          gate_id="$(jq -r '.gate_id' gate-response.json)"
+          status="$(jq -r '.status' gate-response.json)"
+          echo "Gate run ${gate_id}: ${status}"
+          finish "$status"
+
+          deadline=$(( $(date +%s) + 600 ))
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            sleep 15
+            call GET "/gate/${gate_id}" || CODE="000"
+            if [ "$CODE" != "200" ]; then
+              echo "Poll answered HTTP ${CODE}; trying again."
+              continue
+            fi
+            status="$(jq -r '.status' gate-response.json)"
+            echo "$(date -u +%H:%M:%S) UTC: ${status}"
+            finish "$status"
+          done
+          report "${status} after 10 minutes"
+          echo "Still waiting for a person after 10 minutes. Re-run this job once an approver"
+          echo "has decided: the re-run finds the same gate run and reads its decision."
+          exit 1
