@@ -20,18 +20,26 @@ case-insensitive: Claude is Claude; Codex or OpenAI is Codex; Gemini or
 Antigravity is Gemini. Nothing else counts, so "Claudette" is no agent,
 and a person whose first name is Claude would be counted as the agent
 (a known limit of name-based attribution). The address part of a trailer
-is never kept.
+is never kept. The attribution reads only the account and the trailers:
+a commit an agent wrote without a Co-Authored-By trailer counts as
+``human``.
 
 Privacy: the commit author's address is never read, and the message is
 cut to its subject line with anything address-shaped replaced, so no
-address reaches the table, the bus or the API.
+address reaches the table, the bus or the API. A subject that holds
+secret-shaped text (scan.secret_in_text) is replaced by SECRET_SUBJECT.
+
+Size: a stored row stays far below DynamoDB's 400 KB item limit, which
+counts UTF-8 bytes. At most MAX_FILES files and MAX_FINDINGS findings are
+kept, each path cut to PATH_BYTES bytes of UTF-8 (about 110 KB at most in
+all); finding_count and finding_rules always cover every finding.
 """
 
 from __future__ import annotations
 
 import datetime
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -53,8 +61,13 @@ AGENTS: dict[str, str] = {
 AGENT_NAMES = ("Claude", "Codex", "Gemini")
 
 SUBJECT_CHARS = 200
+SUBJECT_SCAN_CHARS = 1000
 NAME_CHARS = 100
 MAX_FILES = 300
+MAX_FINDINGS = 100
+PATH_BYTES = 200
+SECRET_SUBJECT = "[secret-shaped text removed]"
+FILES_UNREAD_REASON = "GitHub listed more files than the ingest read; the rest were not scanned"
 
 _TRAILER = re.compile(r"^\s*co-authored-by\s*:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
 _ADDRESS = re.compile(r"\S+@\S+")
@@ -67,9 +80,21 @@ def scrub(text: str, limit: int) -> str:
     return _ADDRESS.sub("[address]", line)[:limit]
 
 
+def cut_bytes(text: str, limit: int) -> str:
+    """The longest prefix of text whose UTF-8 encoding is at most limit
+    bytes (a character is never split)."""
+    return str(text).encode("utf-8")[:limit].decode("utf-8", "ignore")
+
+
 def subject_of(message: str) -> str:
-    first = str(message or "").split("\n", 1)[0]
-    return scrub(first, SUBJECT_CHARS)
+    """The subject line, scrubbed and capped; SECRET_SUBJECT when it holds
+    secret-shaped text. The check reads SUBJECT_SCAN_CHARS of the line, past
+    the cap, so a secret that starts inside the kept part is caught whole."""
+    first = str(message or "").split("\n", 1)[0].replace("\r", " ")
+    if scan.secret_in_text(first[:SUBJECT_SCAN_CHARS]) is not None:
+        return SECRET_SUBJECT
+    subject = scrub(first, SUBJECT_CHARS)
+    return SECRET_SUBJECT if scan.secret_in_text(subject) is not None else subject
 
 
 def agent_of(trailer_value: str) -> str | None:
@@ -134,12 +159,19 @@ class Activity:
     co_author_agents: tuple[str, ...]
     subject: str
     files: tuple[scan.FileChange, ...]
-    findings: tuple[scan.Finding, ...]
+    findings: tuple[scan.Finding, ...]  # the kept ones, at most MAX_FINDINGS
     files_changed: int = 0
+    finding_count: int = 0  # every finding, kept or not
+    finding_rules: tuple[str, ...] = ()  # the rules of every finding, sorted
+    files_complete: bool = True  # False when GitHub listed more files than were read
 
     @property
     def scan_verdict(self) -> str:
-        return scan.verdict(self.findings)
+        return scan.FLAGGED if self.finding_count or self.findings else scan.CLEAN
+
+    @property
+    def findings_truncated(self) -> bool:
+        return self.finding_count > len(self.findings)
 
     @property
     def project_repo(self) -> str:
@@ -151,16 +183,26 @@ class Activity:
 
     @property
     def files_truncated(self) -> bool:
-        return self.files_changed > len(self.files)
+        return self.files_changed > len(self.files) or not self.files_complete
 
 
-def build(project: str, repo: str, commit: dict[str, Any], files: list[dict]) -> Activity:
+def build(
+    project: str,
+    repo: str,
+    commit: dict[str, Any],
+    files: list[dict],
+    *,
+    files_complete: bool = True,
+    out_of_time: Callable[[], bool] | None = None,
+) -> Activity:
     """One Activity from GitHub's commit object (GET /repos/{r}/commits/{sha})
     and the files of all its pages. The anti-corruption step: only the
     fields named here are read, and no address field is touched.
 
     committed_at is the committer date, the one GitHub's ``since`` filter
-    and the per-repo cursor use."""
+    and the per-repo cursor use. ``files_complete`` False (GitHub had
+    more file pages than the client read) adds a scan_incomplete finding.
+    ``out_of_time`` is passed to the scan, which raises scan.OutOfTime."""
     sha = str(commit.get("sha") or "")
     if not re.fullmatch(r"[0-9a-f]{40}", sha):
         raise ValueError("commit without a 40-hex sha")
@@ -183,10 +225,20 @@ def build(project: str, repo: str, commit: dict[str, Any], files: list[dict]) ->
                 path=str(entry["filename"]),
                 status=str(entry.get("status") or "modified"),
                 patch=str(entry.get("patch") or ""),
+                previous_path=str(entry.get("previous_filename") or ""),
             )
         )
-    findings = scan.scan(changes)
-    kept = tuple(scan.FileChange(change.path, change.status) for change in changes[:MAX_FILES])
+    findings = scan.scan(changes, out_of_time)
+    if not files_complete:
+        findings.append(scan.Finding(scan.SCAN_INCOMPLETE, "", FILES_UNREAD_REASON))
+    kept = tuple(
+        scan.FileChange(cut_bytes(change.path, PATH_BYTES), change.status)
+        for change in changes[:MAX_FILES]
+    )
+    kept_findings = tuple(
+        scan.Finding(f.rule, cut_bytes(f.path, PATH_BYTES), f.reason)
+        for f in findings[:MAX_FINDINGS]
+    )
     return Activity(
         project=project,
         repo=repo,
@@ -198,6 +250,9 @@ def build(project: str, repo: str, commit: dict[str, Any], files: list[dict]) ->
         co_author_agents=agents,
         subject=subject_of(message),
         files=kept,
-        findings=tuple(findings),
+        findings=kept_findings,
         files_changed=len(changes),
+        finding_count=len(findings),
+        finding_rules=tuple(sorted({f.rule for f in findings})),
+        files_complete=files_complete,
     )

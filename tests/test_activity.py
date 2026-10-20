@@ -463,6 +463,99 @@ def test_the_scan_reads_a_bounded_amount_of_each_patch():
     assert scan.scan([scan.FileChange("big.txt", "modified", patch)]) == []
 
 
+def test_long_key_like_runs_scan_in_bounded_time_and_long_quoted_secrets_are_found():
+    import time
+
+    # Quadratic for the copied key-like pattern before the run cap (16.9 s).
+    for line in ("a-" * 10000, "my-kebab-case-token-name-" * 800, ("a-" * 128 + ".") * 78):
+        started = time.perf_counter()
+        assert scan.secret_in_text(line[: scan.SCAN_CHARS]) is None
+        assert time.perf_counter() - started < 2.0
+    assert scan.bounded("a" * 1000 + " b") == "a" * scan.RUN_CHARS + " b"
+    jwt = "eyJ" + "a" * 400 + "." + "b" * 300 + "." + "c" * 100
+    assert scan.secret_in_text(f'token = "{jwt}"') == "a long secret assigned to a secret-like name"
+    assert scan.secret_in_text("x" * 300 + " ghp_" + "A" * 36) == "a GitHub token"
+    patch = "@@\n+" + "a-" * 5000 + "\n+API_KEY = 'AKIA" + "Q" * 16 + "'"
+    [finding] = scan.scan([scan.FileChange("cfg.py", "modified", patch)])
+    assert finding.rule == "secret_in_added_line"
+
+
+def test_the_commit_budget_and_the_deadline_bound_one_commit():
+    fc = scan.FileChange
+    big = "@@\n" + "\n".join("+" + "x" * 199 for _ in range(100))  # 20000 chars added
+    files = [fc(f"src/f{i}.py", "modified", big) for i in range(25)]
+    files.append(fc(".github/workflows/ci.yml", "modified", big))
+    found = scan.scan(files)
+    first = scan.SCAN_COMMIT_CHARS // len(scan.added_lines(big))
+    assert [f.rule for f in found] == ["scan_incomplete", "workflow_changed"]
+    assert found[0].path == f"src/f{first}.py" and found[0].reason == scan.BUDGET_REASON
+    calls = []
+    with pytest.raises(scan.OutOfTime):
+        scan.scan(files, lambda: calls.append(1) or len(calls) > 2)
+    assert len(calls) == 3
+
+
+def test_a_rename_is_checked_by_the_path_it_had():
+    fc = scan.FileChange
+    moved = fc("docs/ci.yml.bak", "renamed", "", ".github/workflows/ci.yml")
+    assert [(f.rule, f.path) for f in scan.scan([moved])] == [
+        ("workflow_changed", ".github/workflows/ci.yml")
+    ]
+    assert "rename" in scan.scan([moved])[0].reason
+    out_of_infra = fc("app/stack.py", "renamed", "", "infra/stack.py")
+    assert _rules([out_of_infra]) == [("infrastructure_changed", "infra/stack.py")]
+    within = fc("infra/b.py", "renamed", "", "infra/a.py")
+    assert _rules([within]) == [("infrastructure_changed", "infra/b.py")]
+    commit = make_commit(1, "2026-10-19T00:00:00Z", files=[
+        {"filename": "docs/ci.yml.bak", "status": "renamed",
+         "previous_filename": ".github/workflows/ci.yml"}])
+    activity = domain.build("p", REPO, commit, commit["files"])
+    assert [f.rule for f in activity.findings] == ["workflow_changed"]
+
+
+def test_a_secret_in_the_subject_is_never_stored():
+    key = "AKIA" + "Q" * 16
+    assert domain.subject_of(f"Rotate {key} now\n\nbody") == domain.SECRET_SUBJECT
+    assert domain.subject_of("x" * 190 + " ghp_" + "A" * 36) == domain.SECRET_SUBJECT
+    assert domain.subject_of("Fix the token refresh") == "Fix the token refresh"
+    activity = domain.build("p", REPO, make_commit(1, "2026-10-19T00:00:00Z",
+                                                   message=f"Add {key}"), [])
+    assert activity.subject == domain.SECRET_SUBJECT and key not in repr(activity)
+
+
+def _dynamo_size(value) -> int:
+    """DynamoDB's item size: UTF-8 names plus values, 3 bytes per list or
+    map plus 1 per element, numbers about 21 bytes at most."""
+    if isinstance(value, dict):
+        return 3 + sum(len(k.encode()) + _dynamo_size(v) + 1 for k, v in value.items())
+    if isinstance(value, list):
+        return 3 + sum(_dynamo_size(v) + 1 for v in value)
+    if isinstance(value, bool) or value is None:
+        return 1
+    if isinstance(value, int):
+        return 21
+    return len(str(value).encode("utf-8"))
+
+
+def test_a_thousand_file_deletion_stays_far_below_the_item_limit():
+    wide = "\U0001F600" * 300  # 4 bytes per character
+    files = [{"filename": f"infra/{wide}/{i}.ts", "status": "removed"} for i in range(1000)]
+    commit = make_commit(1, "2026-10-19T00:00:00Z", files=files,
+                         name="\U0001F600" * 300, message="\U0001F600" * 900)
+    activity = domain.build("p", REPO, commit, files)
+    assert activity.finding_count == 2000 and len(activity.findings) == domain.MAX_FINDINGS
+    assert activity.findings_truncated and activity.files_truncated
+    assert activity.finding_rules == ("file_deleted", "infrastructure_changed")
+    assert all(len(f.path.encode()) <= domain.PATH_BYTES for f in activity.findings)
+    item = activity_store.item_of(activity, NOW)
+    assert item["finding_count"] == 2000 and item["findings_truncated"] is True
+    assert _dynamo_size(item) < 150_000  # DynamoDB refuses an item over 400 KB
+    detail = activity_bus.detail_of(activity, False, NOW)
+    assert detail["finding_count"] == 2000
+    assert detail["finding_rules"] == ["file_deleted", "infrastructure_changed"]
+    assert domain.cut_bytes("a\U0001F600", 3) == "a"
+
+
 # --- the GitHub client ----------------------------------------------------------
 
 
@@ -511,10 +604,43 @@ def test_the_files_of_a_large_commit_are_paged(world):
     files = [{"filename": f"f{i}.py", "status": "added"} for i in range(7)]
     server.add(REPO, False, [make_commit(1, "2026-10-19T00:00:00Z", files=files)])
     server.files_page_size = 3
-    commit, got = gh.commit(REPO, sha_of(1))
-    assert commit["sha"] == sha_of(1)
+    commit, got, complete = gh.commit(REPO, sha_of(1))
+    assert commit["sha"] == sha_of(1) and complete is True
     assert [f["filename"] for f in got] == [f["filename"] for f in files]
     assert len(server.requests) == 3
+    assert github.MAX_FILE_PAGES == 30  # GitHub's 3000 files of one commit
+
+
+def test_a_commit_with_more_file_pages_than_read_is_not_called_clean(world):
+    server, _, _, _, _, _ = world
+    files = [{"filename": f"f{i}.py", "status": "added"} for i in range(7)]
+    server.add(REPO, False, [make_commit(1, "2026-10-19T00:00:00Z", files=files)])
+    server.files_page_size = 3
+    gh = github.GitHub(TOKEN, opener=server, max_file_pages=2)
+    commit, got, complete = gh.commit(REPO, sha_of(1))
+    assert len(got) == 6 and complete is False and len(server.requests) == 2
+    activity = domain.build("p", REPO, commit, got, files_complete=complete)
+    assert activity.files_truncated is True and activity.scan_verdict == "flagged"
+    assert [f.rule for f in activity.findings] == ["scan_incomplete"]
+    assert activity.findings[0].reason == domain.FILES_UNREAD_REASON
+
+
+def test_a_body_that_fails_while_it_is_read_is_a_github_error():
+    import http.client
+
+    class Cut(FakeResponse):
+        def __init__(self, exc):
+            super().__init__(200, _headers({}), b"")
+            self.exc = exc
+
+        def read(self):
+            raise self.exc
+
+    for exc in (TimeoutError("read timed out"), http.client.IncompleteRead(b"{")):
+        gh = github.GitHub(TOKEN, opener=lambda request, timeout=None, e=exc: Cut(e))
+        with pytest.raises(github.GitHubError) as caught:
+            gh.repo(REPO)
+        assert caught.value.status == 0 and TOKEN not in str(caught.value)
 
 
 def test_rate_limits_stop_without_sending_and_on_403_or_retry_after(world):
@@ -678,6 +804,152 @@ def test_an_inaccessible_repo_is_marked_and_nothing_else_happens(world):
     assert events.entries == []
 
 
+def test_a_future_dated_commit_never_moves_the_cursor(world):
+    server, dynamo, events, _, _, _ = world
+    deploy = [{"filename": ".github/workflows/deploy.yml", "status": "removed"}]
+    commits = [make_commit(9, "2099-01-01T00:00:00Z"), make_commit(1, "2026-10-17T09:00:00Z")]
+    server.add(REPO, False, commits)
+    first = _run(world)
+    assert first.status == "ok" and first.written == 2
+    meta = dynamo.meta(PR)
+    assert meta["cursor"] == "2026-10-17T09:00:00Z"
+    assert meta["future_dated"] == [f"2099-01-01T00:00:00Z#{sha_of(9)}"]
+    assert meta["last_activity_at"] == domain.iso_of(NOW)
+    future_row = next(r for r in dynamo.commit_rows(PR) if r["sha"] == sha_of(9))
+    assert future_row["future_dated"] is True and future_row["ttl"] == NOW + 30 * 86400
+    # Seen at the cursor and remembered as future-dated: no commit request.
+    server.requests.clear()
+    again = _run(world, now=NOW + 900)
+    assert again.skipped == 2 and again.written == 0
+    assert all("/commits/" not in url for url, _ in server.requests)
+    # A real commit after the future-dated one is still listed and scanned.
+    commits.insert(1, make_commit(4, "2026-10-20T11:00:00Z", files=deploy))
+    third = _run(world, now=NOW + 1800)
+    assert third.written == 1 and third.published == 1
+    assert dynamo.meta(PR)["cursor"] == "2026-10-20T11:00:00Z"
+    row = next(r for r in dynamo.commit_rows(PR) if r["sha"] == sha_of(4))
+    assert row["scan_verdict"] == "flagged" and row["future_dated"] is False
+    assert len(events.entries) == 3
+
+
+def test_a_public_repo_that_becomes_unreadable_fails_closed(world):
+    server, dynamo, _, _, store, _ = world
+    project = registry.Project("lachesis", "Lachesis", (REPO,))
+    server.add(REPO, False, _three_commits())
+    _run(world)
+    assert len(read.activity_view(project, store, approver=False, now=NOW)["recent"]) == 3
+    del server.repos[REPO]  # now a 404: private, or gone
+    assert _run(world, now=NOW + 900).status == "unavailable"
+    assert dynamo.meta(PR)["private"] is True
+    view = read.activity_view(project, store, approver=False, now=NOW + 900)
+    assert view["recent"] == [] and view["hidden_repos"] == 1
+    assert view["repos"] == [{"repo": "", "visibility": "private"}]
+    # Any other refusal leaves the visibility unknown, which is hidden too.
+    server.add(REPO, False, _three_commits())
+    server.fail["/repos/upgradedev/lachesis-guard"] = (403, {})
+    assert _run(world, now=NOW + 1800).status == "github_error"
+    assert dynamo.meta(PR)["private"] is None
+    assert read.activity_view(project, store, approver=False, now=NOW)["recent"] == []
+    # A transport failure keeps the last flag read.
+    del server.fail["/repos/upgradedev/lachesis-guard"]
+    _run(world, now=NOW + 2700)
+    server.fail["/repos/upgradedev/lachesis-guard"] = (502, {})
+    _run(world, now=NOW + 3600)
+    assert dynamo.meta(PR)["private"] is False
+
+
+class FailingPuts(FakeDynamo):
+    """A FakeDynamo whose PutItem fails for chosen shas."""
+
+    def __init__(self, code, message="boom"):
+        super().__init__()
+        self.code, self.message, self.shas = code, message, set()
+
+    def put_item(self, TableName, Item, ConditionExpression, ExpressionAttributeNames):  # noqa: N803
+        if Item["sha"] in self.shas:
+            raise ClientError({"Error": {"Code": self.code, "Message": self.message}}, "PutItem")
+        return super().put_item(TableName, Item, ConditionExpression, ExpressionAttributeNames)
+
+
+def _world_with(dynamo):
+    server, events = FakeGitHub(), FakeEvents()
+    return (server, dynamo, events, github.GitHub(TOKEN, opener=server),
+            activity_store.ActivityStore(dynamo=dynamo, table="lachesis-activity"),
+            activity_bus.Bus(events_client=events))
+
+
+def test_a_repo_that_goes_private_and_fails_mid_run_shows_nothing_new_anonymously():
+    dynamo = FailingPuts("ProvisionedThroughputExceededException")
+    world = _world_with(dynamo)
+    server, _, _, gh, store, bus = world
+    project = registry.Project("lachesis", "Lachesis", (REPO,))
+    commits = [make_commit(1, "2026-10-17T09:00:00Z", message="Public change")]
+    server.add(REPO, False, commits)
+    _run(world)
+    server.repos[REPO]["private"] = True
+    commits[:0] = [make_commit(3, "2026-10-19T09:00:00Z", message="PRIVATE plan three"),
+                   make_commit(2, "2026-10-18T09:00:00Z", message="PRIVATE secret roadmap")]
+    dynamo.shas = {sha_of(3)}
+    result = _run(world, now=NOW + 900)
+    assert result.status == "store_error" and result.written == 1 and result.failed
+    meta = dynamo.meta(PR)
+    assert meta["private"] is True and meta["status"] == "store_error"
+    assert meta["cursor"] == "2026-10-19T09:00:00Z"  # commit 3 is still ahead
+    anonymous = json.dumps(read.activity_view(project, store, approver=False, now=NOW + 900))
+    assert "PRIVATE" not in anonymous and "Public change" not in anonymous
+    # An error the service does not expect: the flag was saved first, and
+    # ingest_all marks the row and the result.
+    dynamo.shas = set()
+    server.repos[REPO]["private"] = False
+    _run(world, now=NOW + 1800)
+    server.repos[REPO]["private"] = True
+
+    def broken_query(**kwargs):
+        raise RuntimeError("query failed")
+
+    dynamo.query = broken_query
+    [failed] = service.ingest_all((project,), gh=gh, store=store, bus=bus, now=NOW + 2700)
+    assert failed.status == "error" and failed.failed
+    assert dynamo.meta(PR)["private"] is True and dynamo.meta(PR)["status"] == "error"
+
+
+def test_a_row_too_large_for_dynamodb_is_skipped_and_the_run_reports_it(capsys):
+    dynamo = FailingPuts("ValidationException", "Item size has exceeded the maximum allowed size")
+    world = _world_with(dynamo)
+    server, _, events, gh, store, bus = world
+    server.add(REPO, False, _three_commits())
+    dynamo.shas = {sha_of(2)}
+    result = _run(world)
+    assert result.status == "ok" and result.errors == [sha_of(2)] and result.failed
+    assert result.written == 2 and dynamo.meta(PR)["cursor"] == "2026-10-19T09:00:00Z"
+    assert [d["sha"] for d in events.details()] == [sha_of(1), sha_of(3)]
+    # The Lambda reports the run failed, after its log line, so the alarm fires.
+    ingest = _ingest_module()
+    server.add(REPO, False, _three_commits() + [make_commit(5, "2026-10-19T10:00:00Z")])
+    dynamo.shas = {sha_of(5)}
+    with pytest.raises(ingest.IngestFailed) as caught:
+        ingest.handler({}, None, deps={"github": gh, "store": store, "bus": bus,
+                                        "now": NOW + 900, "projects": (PROJECT,)})
+    assert str(caught.value) == "1 repositories failed their ingest"
+    assert '"failed_repos": 1' in capsys.readouterr().out
+    # Any other write error stops the run with the cursor held.
+    other = _world_with(FailingPuts("InternalServerError"))
+    other[0].add(REPO, False, _three_commits())
+    other[1].shas = {sha_of(2)}
+    held = _run(other)
+    assert held.status == "store_error" and held.errors == []
+    assert other[1].meta(PR)["cursor"] == "2026-10-18T09:00:00Z"
+
+
+def test_the_deadline_inside_a_commit_scan_leaves_it_for_the_next_run(world):
+    server, dynamo, events, _, _, _ = world
+    server.add(REPO, False, [make_commit(1, "2026-10-17T09:00:00Z")])
+    result = _run(world, out_of_time=lambda: any("/commits/" in url for url, _ in server.requests))
+    assert result.status == "deadline" and result.written == 0
+    assert dynamo.commit_rows(PR) == [] and events.entries == []
+    assert _run(world).written == 1
+
+
 def test_ingest_all_goes_on_after_a_failing_repo_and_stops_on_a_rate_limit(world, capsys):
     server, _, events, gh, store, bus = world
     project = registry.Project("elenchos", "Elenchos", ("upgradedev/a", "upgradedev/b"))
@@ -790,8 +1062,34 @@ def test_the_approver_lane_shows_every_repository(mixed):
     assert newest["findings"] == [
         {"rule": "file_deleted", "path": "secret/plan.md", "reason": "the commit deletes this file"}
     ]
-    assert newest["files"] == [{"path": "secret/plan.md", "status": "removed"}]
+    assert newest["finding_count"] == 1 and newest["findings_truncated"] is False
+    # The file list is never read back for a page: files_changed is the count.
+    assert "files" not in newest and newest["files_changed"] == 1
+    assert newest["future_dated"] is False
     assert "@" not in json.dumps(activity)
+
+
+def test_the_anonymous_lane_never_points_at_a_secret_and_caps_the_findings(world):
+    server, _, _, _, store, _ = world
+    project = registry.Project("lachesis", "Lachesis", (REPO,))
+    leak = [{"filename": "deploy/keys.env", "status": "added",
+             "patch": "@@\n+AWS = 'AKIA" + "Q" * 16 + "'"}]
+    many = [{"filename": f"old/{i}.txt", "status": "removed"} for i in range(30)]
+    server.add(REPO, False, [make_commit(2, "2026-10-19T00:00:00Z", files=many),
+                             make_commit(1, "2026-10-18T00:00:00Z", files=leak)])
+    _run(world)
+    public = read.activity_view(project, store, approver=False, now=NOW)
+    by_sha = {c["sha"]: c for c in public["recent"]}
+    assert by_sha[sha_of(1)]["findings"] == [
+        {"rule": "secret_in_added_line", "path": "", "reason": read.SECRET_REASON_PUBLIC}
+    ]
+    assert "keys.env" not in json.dumps(public) and "access key" not in json.dumps(public)
+    assert len(by_sha[sha_of(2)]["findings"]) == read.FINDINGS_SHOWN
+    assert by_sha[sha_of(2)]["finding_count"] == 30
+    assert by_sha[sha_of(2)]["findings_truncated"] is True
+    approver = read.activity_view(project, store, approver=True, now=NOW)
+    [secret] = next(c for c in approver["recent"] if c["sha"] == sha_of(1))["findings"]
+    assert secret["path"] == "deploy/keys.env" and "AWS access key id" in secret["reason"]
 
 
 def test_a_repo_with_no_stored_flag_is_private_and_a_repo_that_goes_public_shows(mixed, world):
@@ -934,9 +1232,14 @@ def test_the_stack_grants_exactly_what_the_ingest_and_the_api_issue():
     }
     assert "activity_table.grant_" not in source
     assert (
-        'f"arn:aws:secretsmanager:eu-west-1:{self.account}:secret:{GITHUB_SECRET_NAME}-*"'
+        'f"arn:aws:secretsmanager:eu-west-1:{self.account}:secret:{GITHUB_SECRET_NAME}-??????"'
         in source
     )
+    # No async retry of a failed run: the next scheduled run is the retry,
+    # so a timed-out run never overlaps the next one.
+    ingest = source[source.index('"Ingest",'):source.index('"IngestSchedule"')]
+    assert "retry_attempts=0," in ingest
+    assert "never overlap" not in ingest
     assert 'actions=["secretsmanager:GetSecretValue"], resources=[github_secret_arn]' in source
     assert source.count("secretsmanager:GetSecretValue") == 1
     assert '{"StringEquals": {"events:source": [ACTIVITY_SOURCE]}}' in source
@@ -976,18 +1279,32 @@ def test_the_console_projects_view_renders_only_backend_numbers():
     start = html.index('<section data-view="projects"')
     view = html[start:html.index("\n    </section>", start)]
     for needle in ('id="projects-body"', 'id="project-activity"', "deterministic scan",
-                   "never from Decider", "shows only its counts until it is public"):
+                   "never from Decider", "shows only its counts until it is public",
+                   "a commit without one counts as human, even when an agent wrote it",
+                   'id="projects-private"', "do not record or share it"):
         assert needle in view, needle
+    assert "by a person, a person with a coding agent" not in view
     block = js[js.index("function viewProjects(key)"):js.index("function viewDetail(id)")]
     assert "innerHTML" not in block and "insertAdjacentHTML" not in block
-    assert 'lane = auth.token ? "/approvals/projects" : "/projects"' in block
-    assert 'lane + "/" + encodeURIComponent(key) + "/activity"' in block
+    # The anonymous lane is the default, also when signed in; the approver
+    # lane is an explicit choice and falls back on a 401 or a 403.
+    assert "want = !!auth.token && projPriv" in block
+    assert 'api((want ? "/approvals/projects" : "/projects") + path)' in block
+    assert '(out.status === 401 || out.status === 403) ? api("/projects" + path)' in block
+    assert 'get("/" + encodeURIComponent(key) + "/activity")' in block
+    assert "Do not record or share this screen." in block
+    assert 'let projPriv = false;' in js and "projPriv = e.target.checked; route();" in js
+    # The tile number and the commit mix are named apart.
+    assert 'p.flagged_changes + " flagged changes"' in block
+    assert '"Commits by deterministic scan: "' in block and '"Actors (by trailer): "' in block
+    # A secret finding on the anonymous lane has no path.
+    assert '(f.path ? f.path + ": " : "") + f.reason' in block
     # Counts are the backend's: nothing is counted or scored in the page.
     assert "length +" not in block and "reduce(" not in block
     assert "confidence" not in block and "meter(" not in block
     for field in ("p.flagged_changes", "p.commits", "p.by_actor_kind", "p.by_scan_verdict",
                   "b.window_days", "b.hidden_repos", "b.scan_label", "c.files_changed",
-                  "c.co_author_agents", "f.reason"):
+                  "c.co_author_agents", "f.reason", "c.finding_count", "c.future_dated"):
         assert field in block, field
     assert 'p[0] === "projects" ? "projects"' in js
     assert 'else if (view === "projects") viewProjects(p[1]);' in js

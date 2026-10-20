@@ -7,14 +7,22 @@ hides them). A repository with no stored flag yet counts as private.
 
 - The anonymous lane (GET /projects, GET /projects/{key}/activity): a
   public repository shows its name, last activity time, counts and
-  commits in full. A private repository shows only that it exists and
-  is private, and adds its counts and verdict mix to its project's: no
-  repository name, no last activity time, no commit, sha, path, login,
-  git name, subject line or finding reason.
+  commits. A private repository, or one whose flag is not known (never
+  read, or GitHub refused the last read), shows only that it exists and
+  its visibility, and adds its counts and verdict mix to its project's:
+  no repository name, no last activity time, no commit, sha, path,
+  login, git name, subject line or finding reason. Even for a public
+  repository, a secret_in_added_line finding shows its rule and a fixed
+  reason, not its path or the kind of secret, so the page is no index of
+  leaked credentials; the approver lane shows both.
 - The approver lane (GET /approvals/projects, GET
   /approvals/projects/{key}/activity, JWT): every repository in full.
 
-No lane ever shows an address: none is stored. Scan findings are the
+A commit lists at most FINDINGS_SHOWN findings, with finding_count and
+findings_truncated for the rest, and never its file list (files_changed
+is the count): each row read is projected to COMMIT_FIELDS, so a page of
+large commits stays small. No lane ever shows an address: none is
+stored. Scan findings are the
 deterministic scan's (scan_label says so); nothing here is a Decider
 score. Every count is read from the repository row, where the ingest
 stored it at ``counted_at``; this module adds counts up and never
@@ -30,15 +38,16 @@ from activity import store as activity_store
 
 RECENT_PER_REPO = 50
 RECENT_TOTAL = 50
+FINDINGS_SHOWN = 20
 WINDOW_DAYS = activity_store.TTL_DAYS
 
 COMMIT_FIELDS = (
     "repo", "sha", "committed_at", "actor_login", "actor_name", "actor_kind",
-    "co_author_agents", "subject", "files", "files_changed", "files_truncated",
-    "findings", "scan_verdict",
+    "co_author_agents", "subject", "files_changed", "files_truncated",
+    "findings", "finding_count", "scan_verdict", "future_dated",
 )
-FILE_FIELDS = ("path", "status")
 FINDING_FIELDS = ("rule", "path", "reason")
+SECRET_REASON_PUBLIC = "an added line holds secret-shaped text (approvers see where)"
 
 
 def visibility_of(meta: dict[str, Any] | None) -> str:
@@ -132,18 +141,20 @@ def projects_view(
     }
 
 
-def _commit(row: dict[str, Any]) -> dict[str, Any]:
+def _finding(entry: dict[str, Any], approver: bool) -> dict[str, str]:
+    finding = {key: str(entry.get(key, "")) for key in FINDING_FIELDS}
+    if not approver and finding["rule"] == scan.SECRET_IN_ADDED_LINE:
+        finding.update(path="", reason=SECRET_REASON_PUBLIC)
+    return finding
+
+
+def _commit(row: dict[str, Any], approver: bool) -> dict[str, Any]:
     view = {key: row[key] for key in COMMIT_FIELDS if key in row}
-    view["files"] = [
-        {key: str(entry.get(key, "")) for key in FILE_FIELDS}
-        for entry in row.get("files") or []
-        if isinstance(entry, dict)
-    ]
-    view["findings"] = [
-        {key: str(entry.get(key, "")) for key in FINDING_FIELDS}
-        for entry in row.get("findings") or []
-        if isinstance(entry, dict)
-    ]
+    findings = [entry for entry in row.get("findings") or [] if isinstance(entry, dict)]
+    view["findings"] = [_finding(entry, approver) for entry in findings[:FINDINGS_SHOWN]]
+    view["finding_count"] = max(_int(row.get("finding_count")), len(findings))
+    view["findings_truncated"] = view["finding_count"] > len(view["findings"])
+    view["future_dated"] = row.get("future_dated") is True
     view["co_author_agents"] = [
         str(name) for name in row.get("co_author_agents") or [] if name in domain.AGENT_NAMES
     ]
@@ -164,7 +175,8 @@ def activity_view(
         if not _shown(store.get_meta(project_repo), approver):
             hidden += 1
             continue
-        commits.extend(_commit(row) for row in store.recent(project_repo, now, RECENT_PER_REPO))
+        rows = store.recent(project_repo, now, RECENT_PER_REPO, COMMIT_FIELDS)
+        commits.extend(_commit(row, approver) for row in rows)
     commits.sort(key=lambda c: (str(c.get("committed_at", "")), str(c.get("sha", ""))),
                  reverse=True)
     return {

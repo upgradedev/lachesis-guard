@@ -2,32 +2,48 @@
 
 ``ingest_repo`` brings one registered repository up to date:
 
-1. GET the repository for its ``private`` flag. A 404 marks the
-   repository row ``unavailable`` and stops there.
+1. GET the repository for its ``private`` flag and store the flag on the
+   repository row at once, before any commit row is written: a
+   repository that just became private never shows a new row on the
+   anonymous lane, even when the run fails half way. It fails closed: a
+   404 (GitHub's answer for a private repository the token cannot read)
+   stores private true and stops there, and any other refusal (4xx)
+   stores no known flag, which the read model hides too. A rate limit or
+   a transport failure keeps the flag of the last read.
 2. List the commits since the repository's cursor (on the first run,
    WINDOW_S back, the table's TTL window). ``since`` is inclusive, so the
    commits at the cursor time come back each run; the ones already seen
-   there (``seen_at_cursor``) are skipped without a GitHub call.
+   there (``seen_at_cursor``) are skipped without a GitHub call, and so
+   are the future-dated ones already handled (``future_dated``).
 3. Oldest first, at most ``max_commits`` per run: GET the commit and its
    files, build the Activity, scan it, PutItem it conditioned on
    attribute_not_exists. A new row, or an existing row whose event was
    never accepted, gets one ActivityObserved on the bus and is then
    marked published. A row already published is left alone, so a
-   commit's event is sent until it is accepted and not after.
+   commit's event is sent until it is accepted and not after. A store
+   failure stops the run (``store_error``); a row DynamoDB refuses as too
+   large is skipped and named in ``errors``, so one commit can never
+   freeze its repository.
 4. Move the cursor. When every listed commit was handled, to the newest
    commit time seen; when the run stopped early (the per-run cap, the
    Lambda deadline, a rate limit, a GitHub error, an event the bus did
-   not accept), to the oldest commit time not yet handled, which is
-   never past a commit that was not written and published. Re-listing is
-   harmless: the writes are idempotent.
+   not accept, a store failure), to the oldest commit time not yet
+   handled, which is never past a commit that was not written and
+   published. A commit dated more than store.SKEW_S past the ingest's
+   clock never moves the cursor: a committer date is whatever the
+   committer set, and a cursor in the future would hide every later
+   commit. Re-listing is harmless: the writes are idempotent.
 5. Recount the window (actor kinds, scan verdicts, findings) from the
    table and store the counts on the repository row, so GET /projects
    reads one row per repository.
 
 Known limits: GitHub's ``since`` filters on the committer date, so a
 commit whose committer date is older than the cursor when it reaches the
-default branch (a merge of a long-lived branch keeps its commits' dates)
-is not listed; the merge commit itself is. A listing longer than
+default branch is not listed; the merge commit itself is. That covers a
+merge of a long-lived branch, which keeps its commits' dates, and also a
+deliberately back-dated committer date, which anyone who can push can
+set: it is an evasion path this date-based cursor does not close (a
+sha-based walk of the branch would). A listing longer than
 github.MAX_PAGES pages is cut to its newest commits.
 """
 
@@ -44,6 +60,9 @@ from activity import store as activity_store
 
 MAX_COMMITS_PER_RUN = 60
 WINDOW_S = activity_store.WINDOW_S
+# The most future-dated commits one repository row remembers; more are
+# fetched again each run (idempotent, it only costs requests).
+MAX_FUTURE = 200
 
 OK = "ok"
 MORE = "more"
@@ -52,6 +71,11 @@ RATE_LIMITED = "rate_limited"
 GITHUB_ERROR = "github_error"
 PUBLISH_FAILED = "publish_failed"
 DEADLINE = "deadline"
+STORE_ERROR = "store_error"
+ERROR = "error"
+# A run with one of these, or with a commit not stored, is reported failed
+# by the ingest Lambda, so IngestErrorsAlarm fires.
+FAILED = frozenset({STORE_ERROR, ERROR})
 
 
 @dataclass
@@ -66,6 +90,10 @@ class RepoResult:
     cursor: str = ""
     errors: list[str] = field(default_factory=list)
 
+    @property
+    def failed(self) -> bool:
+        return self.status in FAILED or bool(self.errors)
+
     def as_log(self) -> dict[str, Any]:
         """The run log line: counts and status only."""
         return {
@@ -75,6 +103,7 @@ class RepoResult:
             "written": self.written,
             "published": self.published,
             "skipped": self.skipped,
+            "commits_not_stored": len(self.errors),
         }
 
 
@@ -112,6 +141,13 @@ def window_counts(store: activity_store.ActivityStore, project_repo: str, now: f
     }
 
 
+def _store_failed(step: str, exc: Exception) -> str:
+    code = ((getattr(exc, "response", None) or {}).get("Error") or {}).get("Code")
+    print(json.dumps({"msg": "activity store failed", "step": step,
+                      "error": type(exc).__name__, "code": str(code or "")}))
+    return STORE_ERROR
+
+
 def _handle(
     project: registry.Project,
     repo: str,
@@ -122,28 +158,43 @@ def _handle(
     bus: activity_bus.Bus,
     now: float,
     result: RepoResult,
+    out_of_time: Callable[[], bool],
 ) -> str:
     """One listed commit: fetch, build, scan, write, publish. Returns OK
-    when the commit is fully handled, or the status that stops the run."""
+    when the commit is handled (or skipped for good and named in
+    result.errors), or the status that stops the run."""
     try:
-        commit, files = gh.commit(repo, sha)
+        commit, files, complete = gh.commit(repo, sha)
     except github.RateLimited:
         return RATE_LIMITED
     except github.GitHubError:
         return GITHUB_ERROR
     try:
-        activity = domain.build(project.key, repo, commit, files)
+        activity = domain.build(
+            project.key, repo, commit, files, files_complete=complete, out_of_time=out_of_time
+        )
+    except scan.OutOfTime:
+        return DEADLINE
     except (TypeError, ValueError):
         result.errors.append(sha)  # a malformed commit is skipped, not retried
         return OK
-    outcome = store.put_activity(activity, now)
+    try:
+        outcome = store.put_activity(activity, now)
+    except Exception as exc:
+        if activity_store.item_too_large(exc):
+            result.errors.append(sha)  # skipped for good, and the run reports it
+            return OK
+        return _store_failed("put", exc)
     if outcome == activity_store.NEW:
         result.written += 1
     if outcome == activity_store.PUBLISHED:
         return OK
     if not bus.publish(activity_bus.detail_of(activity, private, now)):
         return PUBLISH_FAILED
-    store.mark_published(activity)
+    try:
+        store.mark_published(activity)
+    except Exception as exc:
+        return _store_failed("mark_published", exc)  # the next run sends it again
     result.published += 1
     return OK
 
@@ -166,23 +217,35 @@ def ingest_repo(
     try:
         info = gh.repo(repo)
     except github.NotAccessible:
+        # GitHub answers 404 for a private repository the token cannot
+        # read: fail closed, the anonymous lane then shows counts only.
         result.status = UNAVAILABLE
-        store.save_meta(project_repo, {**base, "status": UNAVAILABLE})
+        store.save_meta(project_repo, {**base, "status": UNAVAILABLE, "private": True})
         return result
     except github.RateLimited:
         result.status = RATE_LIMITED
         store.save_meta(project_repo, {**base, "status": RATE_LIMITED})
         return result
-    except github.GitHubError:
+    except github.GitHubError as exc:
         result.status = GITHUB_ERROR
-        store.save_meta(project_repo, {**base, "status": GITHUB_ERROR})
+        fields = {**base, "status": GITHUB_ERROR}
+        if 400 <= exc.status < 500:
+            fields["private"] = None  # refused: visibility unknown, so hidden
+        store.save_meta(project_repo, fields)
         return result
     # Only an explicit false is public: a missing flag is treated as private.
     private = info.get("private") is not False
     result.private = private
+    # Stored before any commit row is written (see step 1).
+    store.save_meta(project_repo, {**base, "private": private})
 
-    since = str(meta.get("cursor") or domain.iso_of(now - WINDOW_S))
+    since = str(meta.get("cursor") or "")
+    if not since or activity_store.is_future(since, now):
+        since = domain.iso_of(now - WINDOW_S)
     seen = set(meta.get("seen_at_cursor") or [])
+    future = {str(entry) for entry in meta.get("future_dated") or []}  # "<when>#<sha>"
+    future_shas = {entry.rsplit("#", 1)[-1] for entry in future}
+    now_iso = domain.iso_of(now)
     last_activity = str(meta.get("last_activity_at") or "")
     handled: list[tuple[str, str]] = []  # (committed_at, sha), oldest first
     remaining: list[str] = []  # listed commit times not handled
@@ -201,7 +264,7 @@ def ingest_repo(
             when = _listed_at(summary)
         except (TypeError, ValueError):
             continue
-        if when == since and sha in seen:
+        if (when == since and sha in seen) or sha in future_shas:
             result.skipped += 1
             continue
         queue.append((when, sha))
@@ -213,19 +276,30 @@ def ingest_repo(
         if result.status == OK and out_of_time():
             result.status = DEADLINE
         if result.status == OK:
-            result.status = _handle(project, repo, sha, private, gh, store, bus, now, result)
+            result.status = _handle(
+                project, repo, sha, private, gh, store, bus, now, result, out_of_time
+            )
         if result.status != OK:
             remaining = [item[0] for item in queue[index:]]
             break
         handled.append((when, sha))
 
+    def dated_now(when: str) -> bool:
+        return not activity_store.is_future(when, now)
+
     # Never past a listed commit that was not handled; otherwise the newest.
-    cursor = min(remaining) if remaining else max([since, *(when for when, _ in handled)])
+    # A future-dated commit never moves it (see step 4).
+    waiting = [when for when in remaining if dated_now(when)]
+    real = [when for when, _ in handled if dated_now(when)]
+    cursor = min(waiting) if waiting else max([since, *real])
     for when, _ in handled:
-        last_activity = max(last_activity, when)
+        last_activity = max(last_activity, min(when, now_iso))
     new_seen = {sha for when, sha in handled if when == cursor}
     if cursor == since:
         new_seen |= seen
+    # A future-dated commit stays remembered while a listing can return it.
+    future = {entry for entry in future if entry.rsplit("#", 1)[0] >= cursor}
+    future |= {f"{when}#{sha}" for when, sha in handled if not dated_now(when)}
     result.cursor = cursor
     store.save_meta(
         project_repo,
@@ -235,6 +309,7 @@ def ingest_repo(
             "private": private,
             "cursor": cursor,
             "seen_at_cursor": sorted(new_seen),
+            "future_dated": sorted(future)[:MAX_FUTURE],
             "last_activity_at": last_activity,
             **window_counts(store, project_repo, now),
         },
@@ -252,8 +327,9 @@ def ingest_all(
     out_of_time: Callable[[], bool] = lambda: False,
 ) -> list[RepoResult]:
     """Every registered repository, in registry order. A repository whose
-    ingest raised is logged by type and does not stop the others; a rate
-    limit stops the run (the budget is shared)."""
+    ingest raised is logged by type, gets status ``error`` on its row and
+    in the results (so the run is reported failed), and does not stop the
+    others; a rate limit stops the run (the budget is shared)."""
     results = []
     for project in projects:
         for repo in project.repos:
@@ -266,7 +342,16 @@ def ingest_all(
             except Exception as exc:
                 print(json.dumps({"msg": "ingest repo failed", "project": project.key,
                                   "error": type(exc).__name__}))
-                continue
+                result = RepoResult(project.project_repo(repo), status=ERROR)
+                try:
+                    store.save_meta(result.project_repo, {
+                        "project": project.key, "repo": repo,
+                        "checked_at": domain.iso_of(now), "status": ERROR,
+                    })
+                except Exception as save_exc:
+                    print(json.dumps({"msg": "ingest repo status not saved",
+                                      "project": project.key,
+                                      "error": type(save_exc).__name__}))
             print(json.dumps({"msg": "ingest repo", **result.as_log()}, sort_keys=True))
             results.append(result)
             if result.status == RATE_LIMITED:

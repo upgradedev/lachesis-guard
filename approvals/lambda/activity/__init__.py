@@ -19,5 +19,6 @@ repository, as the read-only GitHub ingest saw it. The layers:
 
 Privacy: no commit author address is read into an Activity. A trailer is
 mapped to an agent name and dropped; only a commit's subject line is
-kept, with anything address-shaped removed.
+kept, with anything address-shaped removed, and a subject holding
+secret-shaped text is replaced by a fixed marker.
 """

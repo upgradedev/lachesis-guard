@@ -7,7 +7,8 @@ One event per new commit row, source ``lachesis.activity``, detail-type
   dedupes in the audit lake), type, at (when the ingest saw it), project,
   repo, visibility, sha, committed_at, actor_kind, co_author_agents,
   files_changed, scan_verdict, scan_label ("deterministic scan"),
-  finding_count and finding_rules (the rule names, no paths);
+  finding_count and finding_rules (every finding of the commit, also
+  the ones past the row's cap; the rule names, no paths);
 - only for a public repository: actor_login.
 
 Never the message text (for any repository), a file path, a git name, or
@@ -54,8 +55,8 @@ def detail_of(activity: domain.Activity, private: bool, now: float) -> dict[str,
         "files_changed": activity.files_changed,
         "scan_verdict": activity.scan_verdict,
         "scan_label": scan.LABEL,
-        "finding_count": len(activity.findings),
-        "finding_rules": sorted({finding.rule for finding in activity.findings}),
+        "finding_count": activity.finding_count,
+        "finding_rules": list(activity.finding_rules),
     }
     if not private:
         detail["actor_login"] = activity.actor_login

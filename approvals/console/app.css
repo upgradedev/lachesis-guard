@@ -33,7 +33,7 @@ p { margin: 0 0 10px; } code { font-family: var(--mono); font-size: 12.5px; over
 .mark .mark-fill { fill: var(--accent); stroke: none; } .mark .mark-tick { stroke: var(--text); stroke-width: 2; }
 .topnav { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; font-size: 13.5px; }
 .topnav a { color: var(--text); text-decoration: none; } .topnav a:hover { color: var(--accent); }
-a.tile { color: var(--text); text-decoration: none; } a.tile[aria-current] { border-color: var(--accent); } .grp th { color: var(--text); background: var(--surface-2); }
+a.tile { color: var(--text); text-decoration: none; } a.tile[aria-current] { border-color: var(--accent); } .grp th { color: var(--text); background: var(--surface-2); } .lane-warn { color: var(--warn); font-weight: 600; }
 .app-shell { flex: 1; display: grid; grid-template-columns: 230px minmax(0, 1fr); position: relative; }
 .sidebar { background: var(--surface); border-right: 1px solid var(--border); padding: 16px 12px; display: flex; flex-direction: column; justify-content: space-between; gap: 16px; }
 .sidenav { display: flex; flex-direction: column; gap: 4px; }

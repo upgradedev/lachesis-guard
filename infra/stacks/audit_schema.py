@@ -5,11 +5,17 @@ pin it against the publisher (approvals/lambda/publisher.py) without a
 synth. infra/stacks/audit.py builds the Glue table and the Athena named
 queries from these values.
 
-The lake holds one JSON line per event the publisher put on
-lachesis-events: the rule target sends only ``$.detail``, so a line is
-exactly the publisher's whitelisted detail, and the Glue columns are
-exactly publisher.DETAIL_FIELDS. The partition dt is the day Firehose
-received the record (UTC), not a field of the event.
+The lake holds one JSON line per event the audit rule takes from
+lachesis-events: the rule target sends only ``$.detail``. Most lines are
+the approvals publisher's events (source EVENT_SOURCE), exactly its
+whitelisted detail, and the Glue columns are exactly
+publisher.DETAIL_FIELDS. Since B7a the rule also takes the activity
+ingest's ActivityObserved lines (source ACTIVITY_SOURCE,
+approvals/lambda/activity/bus.py), whose fields are not the publisher's:
+of them only event_id, type and at are Glue columns, so every query
+filters on type and none reads an ActivityObserved line as an approval
+event. The partition dt is the day Firehose received the record (UTC),
+not a field of the event.
 
 Delivery is at least once (the publisher re-sends, EventBridge and
 Firehose retry), so the same event can sit in the lake more than once,

@@ -6,7 +6,9 @@ Keys: pk ``project_repo`` ("<project key>#<owner>/<name>"), sk ``sk``.
   YYYY-MM-DDTHH:MM:SSZ), so a repository's rows sort by commit time. It
   is written once, with a PutItem conditioned on attribute_not_exists,
   so a re-listed commit is never written twice. Its ``ttl`` is the
-  commit time plus TTL_DAYS.
+  commit time plus TTL_DAYS, or the ingest time plus TTL_DAYS for a
+  commit dated after the ingest (``future_dated``: a committer date
+  anyone can set), so such a row never outlives the window.
 - The repository row has sk "#meta": the GitHub ``private`` flag, the
   ingest cursor, the last activity time and the window counts. "#" sorts
   before every digit, so every commit-row read is a Query with
@@ -14,9 +16,11 @@ Keys: pk ``project_repo`` ("<project key>#<owner>/<name>"), sk ``sk``.
 
 Stored per commit: the project, repository, sha, commit time, actor login
 and git name, actor kind, co-author agents, subject line, the changed
-files (path and status, at most domain.MAX_FILES), the scan findings,
-and ``published`` (whether its ActivityObserved event was accepted). No
-patch, no message body, no address.
+files (path and status, at most domain.MAX_FILES), the scan findings
+(at most domain.MAX_FINDINGS, with finding_count, finding_rules and
+findings_truncated covering all of them), and ``published`` (whether its
+ActivityObserved event was accepted). No patch, no message body, no
+address. domain.build keeps a row far below DynamoDB's 400 KB limit.
 
 The client is the DynamoDB resource's client, which serializes plain
 Python values (no floats are written here). It is created on first use.
@@ -38,6 +42,8 @@ TTL_DAYS = 30
 WINDOW_S = TTL_DAYS * 86400
 # The most rows one window read returns per repository.
 MAX_WINDOW_ROWS = 5000
+# A commit dated more than this past the ingest's clock is future_dated.
+SKEW_S = 300
 
 NEW = "new"
 UNPUBLISHED = "unpublished"
@@ -88,12 +94,28 @@ def item_of(activity: domain.Activity, now: float) -> dict[str, Any]:
         "files_changed": activity.files_changed,
         "files_truncated": activity.files_truncated,
         "findings": [finding.as_dict() for finding in activity.findings],
-        "finding_count": len(activity.findings),
+        "finding_count": activity.finding_count,
+        "finding_rules": list(activity.finding_rules),
+        "findings_truncated": activity.findings_truncated,
         "scan_verdict": activity.scan_verdict,
+        "future_dated": is_future(activity.committed_at, now),
         "published": False,
         "ingested_at": domain.iso_of(now),
-        "ttl": domain.epoch_of(activity.committed_at) + WINDOW_S,
+        "ttl": min(domain.epoch_of(activity.committed_at), int(now)) + WINDOW_S,
     }
+
+
+def is_future(iso: str, now: float) -> bool:
+    """True for a time more than SKEW_S past the ingest's clock."""
+    return iso > domain.iso_of(now + SKEW_S)
+
+
+def item_too_large(exc: Exception) -> bool:
+    """DynamoDB's refusal of an item over its 400 KB limit."""
+    error = (getattr(exc, "response", None) or {}).get("Error") or {}
+    return error.get("Code") == "ValidationException" and "size" in str(
+        error.get("Message") or ""
+    ).lower()
 
 
 def _conditional_failed(exc: Exception) -> bool:
@@ -216,6 +238,16 @@ class ActivityStore:
             attributes=tuple(attributes),
         )
 
-    def recent(self, project_repo: str, now: float, limit: int) -> list[dict[str, Any]]:
-        rows, _ = self._query(project_repo, window_floor(now), newest_first=True, limit=limit)
+    def recent(
+        self, project_repo: str, now: float, limit: int, attributes: Iterable[str]
+    ) -> list[dict[str, Any]]:
+        """The newest rows, only the named attributes (never the file list,
+        so a page of large commits stays small)."""
+        rows, _ = self._query(
+            project_repo,
+            window_floor(now),
+            newest_first=True,
+            limit=limit,
+            attributes=tuple(attributes),
+        )
         return rows

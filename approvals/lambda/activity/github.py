@@ -11,7 +11,12 @@ Three reads, all GET, all on https://api.github.com:
 Pagination follows the ``Link`` header's rel="next", and only to a URL
 on https://api.github.com/; an HTTP redirect is followed only to that
 host too (_ApiOnlyRedirect), so the token is never sent to another host.
-At most MAX_PAGES pages per listing are read.
+At most MAX_PAGES pages of a commit listing are read, and at most
+MAX_FILE_PAGES pages of a commit's files (GitHub's own limit of 3000
+files); ``commit`` says whether a files page was left unread.
+
+Every transport failure, including a timeout or a cut connection while
+the body is read, is a GitHubError with status 0.
 
 Rate limits: every response's X-RateLimit-Remaining and X-RateLimit-Reset
 are kept. Before each request, a remaining count at or below RATE_FLOOR
@@ -27,6 +32,7 @@ the HTTP status and the API path only.
 
 from __future__ import annotations
 
+import http.client
 import json
 import re
 import urllib.error
@@ -41,6 +47,8 @@ USER_AGENT = "lachesis-activity-ingest"
 API_VERSION = "2022-11-28"
 PER_PAGE = 100
 MAX_PAGES = 10
+# GitHub serves at most 3000 files of one commit: 30 pages of 100.
+MAX_FILE_PAGES = 30
 RATE_FLOOR = 50
 TIMEOUT_S = 10
 
@@ -119,11 +127,13 @@ class GitHub:
         *,
         rate_floor: int = RATE_FLOOR,
         max_pages: int = MAX_PAGES,
+        max_file_pages: int = MAX_FILE_PAGES,
     ) -> None:
         self._token = token
         self._open = opener or default_opener()
         self.rate_floor = rate_floor
         self.max_pages = max_pages
+        self.max_file_pages = max_file_pages
         self.remaining: int | None = None
         self.reset_at: int | None = None
         self.requests = 0
@@ -160,7 +170,13 @@ class GitHub:
             raise RateLimited(path, self.reset_at, None)
         self.requests += 1
         try:
-            response = self._open(self._request(url), timeout=TIMEOUT_S)
+            # The body is read inside the try: a timeout or a cut connection
+            # while reading is a transport failure like any other.
+            with self._open(self._request(url), timeout=TIMEOUT_S) as response:
+                self._note_limits(response.headers)
+                status = getattr(response, "status", None) or response.getcode()
+                body = response.read()
+                link = response.headers.get("Link") if response.headers else None
         except urllib.error.HTTPError as exc:
             headers = exc.headers
             self._note_limits(headers)
@@ -170,13 +186,8 @@ class GitHub:
             if exc.code == 404:
                 raise NotAccessible(404, path) from None
             raise GitHubError(exc.code, path) from None
-        except (urllib.error.URLError, OSError, ValueError):
+        except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException):
             raise GitHubError(0, path) from None
-        with response:
-            self._note_limits(response.headers)
-            status = getattr(response, "status", None) or response.getcode()
-            body = response.read()
-            link = response.headers.get("Link") if response.headers else None
         if status == 204 or not body:
             return None, next_link(link)
         try:
@@ -184,14 +195,15 @@ class GitHub:
         except ValueError:
             raise GitHubError(status, path) from None
 
-    def _pages(self, url: str) -> list[Any]:
-        pages = []
-        for _ in range(self.max_pages):
-            body, url = self.get(url)
+    def _pages(self, url: str, max_pages: int) -> tuple[list[Any], bool]:
+        """Every page up to ``max_pages``; the second value is True when a
+        next page was left unread."""
+        pages: list[Any] = []
+        next_url: str | None = url
+        while next_url and len(pages) < max_pages:
+            body, next_url = self.get(next_url)
             pages.append(body)
-            if not url:
-                break
-        return pages
+        return pages, bool(next_url)
 
     @staticmethod
     def _repo_path(repo: str) -> str:
@@ -207,7 +219,7 @@ class GitHub:
         An empty repository (409) has none."""
         query = urllib.parse.urlencode({"since": since, "per_page": PER_PAGE})
         try:
-            pages = self._pages(f"{API}{self._repo_path(repo)}/commits?{query}")
+            pages, _ = self._pages(f"{API}{self._repo_path(repo)}/commits?{query}", self.max_pages)
         except GitHubError as exc:
             if exc.status == 409:
                 return []
@@ -215,11 +227,14 @@ class GitHub:
         return [item for page in pages if isinstance(page, list) for item in page
                 if isinstance(item, dict)]
 
-    def commit(self, repo: str, sha: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        """The commit object of the first page and the files of every page."""
+    def commit(self, repo: str, sha: str) -> tuple[dict[str, Any], list[dict[str, Any]], bool]:
+        """The commit object of the first page, the files of every page (at
+        most self.max_file_pages pages), and whether every page was read."""
         if not re.fullmatch(r"[0-9a-f]{40}", sha or ""):
             raise GitHubError(0, "a malformed sha")
-        pages = self._pages(f"{API}{self._repo_path(repo)}/commits/{sha}?per_page={PER_PAGE}")
+        pages, more = self._pages(
+            f"{API}{self._repo_path(repo)}/commits/{sha}?per_page={PER_PAGE}", self.max_file_pages
+        )
         first = pages[0] if pages and isinstance(pages[0], dict) else {}
         files = [
             entry
@@ -228,4 +243,4 @@ class GitHub:
             for entry in (page.get("files") or [])
             if isinstance(entry, dict)
         ]
-        return first, files
+        return first, files, not more

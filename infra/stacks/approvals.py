@@ -913,9 +913,12 @@ class ApprovalsStack(cdk.Stack):
             runtime=lambda_.Runtime.PYTHON_3_12,
             handler="ingest.handler",
             code=code,
-            # Shorter than the schedule, so two runs never overlap; the
-            # handler stops itself 90 s before the end.
+            # The handler stops itself 90 s before the end. The schedule
+            # invokes it asynchronously, and a failed run is not retried
+            # (retry_attempts 0): a retry could start after a timed-out
+            # run and overlap the next tick. The next run is the retry.
             timeout=cdk.Duration.minutes(10),
+            retry_attempts=0,
             memory_size=256,
             environment={
                 "ACTIVITY_TABLE": activity_table.table_name,
@@ -934,10 +937,11 @@ class ApprovalsStack(cdk.Stack):
             "dynamodb:Query",
         )
         foundation.key.grant(ingest, *_KEY_ACTIONS)
-        # The one secret, by its ARN; Secrets Manager appends six random
-        # characters to a secret's name in its ARN.
+        # The one secret, by its ARN; Secrets Manager appends a hyphen and
+        # six random characters to a secret's name in its ARN, so exactly
+        # six ? match it and no longer name (github-readonly-admin) does.
         github_secret_arn = (
-            f"arn:aws:secretsmanager:eu-west-1:{self.account}:secret:{GITHUB_SECRET_NAME}-*"
+            f"arn:aws:secretsmanager:eu-west-1:{self.account}:secret:{GITHUB_SECRET_NAME}-??????"
         )
         ingest.add_to_role_policy(
             iam.PolicyStatement(

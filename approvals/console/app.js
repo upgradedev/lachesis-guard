@@ -481,21 +481,21 @@ $("#queue-start").addEventListener("click", async () => {
   btn.disabled = false; $("#queue-msg").textContent = out.status === 202 ? "Started run " + out.body.approval_id + ". Paused calls appear in the queue." : errText(out);
 });
 
-// ---- B7a: Projects, from GET /projects (anonymous) or /approvals/projects (approver lane). Every count is the backend's; a flag is the deterministic scan's, never a Decider score. ----
-const mix = o => Object.entries(o || {}).map(([k, n]) => n + " " + k).join(" · "), utc = s => s ? String(s).replace("T", " ").replace("Z", " UTC") : "";
+// ---- B7a: Projects. The anonymous lane (GET /projects) is the default, also when signed in; the approver lane (/approvals/projects) is an explicit choice and falls back to the anonymous one on a 401 or 403. Every count is the backend's; a flag is the deterministic scan's, never a Decider score. ----
+const mix = o => Object.entries(o || {}).map(([k, n]) => n + " " + k).join(" · "), utc = s => s ? String(s).replace("T", " ").replace("Z", " UTC") : ""; let projPriv = false;
 function viewProjects(key) {
-  const g = gen, box = $("#projects-body"), led = $("#project-activity"), msg = $("#projects-msg"), lane = auth.token ? "/approvals/projects" : "/projects";
-  box.textContent = ""; led.hidden = true; led.textContent = ""; msg.textContent = "Loading projects...";
-  api(lane).then(out => { if (g !== gen) return; const b = out.body || {};
-    msg.textContent = out.status !== 200 ? errText(out) : "Commits of the last " + b.window_days + " days. " + (b.lane === "approver" ? "Approver view: every repository." : "Public view: a private repository shows counts only.");
+  const g = gen, box = $("#projects-body"), led = $("#project-activity"), msg = $("#projects-msg"), want = !!auth.token && projPriv, get = path => api((want ? "/approvals/projects" : "/projects") + path).then(out => want && (out.status === 401 || out.status === 403) ? api("/projects" + path).then(o => Object.assign(o, { fell: out.status })) : out);
+  if (!auth.token) projPriv = false; $("#projects-lane").hidden = !auth.token; $("#projects-private").checked = want; box.textContent = ""; led.hidden = true; led.textContent = ""; msg.className = "muted"; msg.textContent = "Loading projects...";
+  get("").then(out => { if (g !== gen) return; const b = out.body || {}; msg.className = b.lane === "approver" ? "lane-warn" : "muted";
+    msg.textContent = out.status !== 200 ? errText(out) : (out.fell ? (out.fell === 403 ? "This account is not in the approvers group" : "The session ended") + ", so this is the public view. " : "") + "Commits of the last " + b.window_days + " days. " + (b.lane === "approver" ? "Approver view: includes private repositories. Do not record or share this screen." : "Public view: a private repository shows counts only.");
     (b.projects || []).forEach(p => box.append(h("a", { class: "tile", href: "#/projects/" + encodeURIComponent(p.key), "aria-current": p.key === key ? "page" : null }, h("span", { class: "tile-k", text: p.name + " · " + p.visibility }),
-      h("strong", { class: "tile-v", text: p.flagged_changes + " flagged" }), h("span", { class: "tile-sub", text: p.repos.map(r => r.repo ? r.repo + " (" + r.visibility + ")" : r.visibility === "unknown" ? "repository not read yet" : "private repository").join(", ") }),
-      h("span", { class: "tile-sub", text: "Last activity: " + (utc(p.last_activity_at) || "none shown") + " · " + p.commits + " commits" }), h("span", { class: "tile-sub", text: "Actors: " + mix(p.by_actor_kind) }), h("span", { class: "tile-sub", text: "Scan: " + mix(p.by_scan_verdict) })))); });
-  if (key) api(lane + "/" + encodeURIComponent(key) + "/activity").then(out => { if (g !== gen) return; led.hidden = false; led.textContent = ""; const b = out.body || {}, rows = b.recent || []; if (out.status !== 200) { led.append(h("p", { class: "err", text: out.status === 404 ? "No project matches this link." : errText(out) })); return; }
+      h("strong", { class: "tile-v", text: p.flagged_changes + " flagged changes" }), h("span", { class: "tile-sub", text: p.repos.map(r => r.repo ? r.repo + " (" + r.visibility + ")" : r.visibility === "unknown" ? "repository visibility not known" : "private repository").join(", ") }),
+      h("span", { class: "tile-sub", text: "Last activity: " + (utc(p.last_activity_at) || "none shown") + " · " + p.commits + " commits" }), h("span", { class: "tile-sub", text: "Actors (by trailer): " + mix(p.by_actor_kind) }), h("span", { class: "tile-sub", text: "Commits by deterministic scan: " + mix(p.by_scan_verdict) })))); });
+  if (key) get("/" + encodeURIComponent(key) + "/activity").then(out => { if (g !== gen) return; led.hidden = false; led.textContent = ""; const b = out.body || {}, rows = b.recent || []; if (out.status !== 200) { led.append(h("p", { class: "err", text: out.status === 404 ? "No project matches this link." : errText(out) })); return; }
     led.append(h("h2", { text: b.name + ": recent commits" }), h("p", { class: "muted small", text: "Flagged changes come from a " + b.scan_label + "." + (b.hidden_repos ? " Private repositories not listed on this lane: " + b.hidden_repos + "." : "") }),
       rows.length ? h("table", { class: "table" }, h("thead", {}, h("tr", {}, ["Time", "Actor", "Co-author agent", "Files changed", "Flagged changes"].map(t => h("th", { scope: "col", text: t })))), h("tbody", {}, rows.map(c => h("tr", {},
-        h("td", { "data-label": "Time", text: utc(c.committed_at) }), h("td", { "data-label": "Actor", text: c.actor_kind + (c.actor_login ? " · " + c.actor_login : "") }), h("td", { "data-label": "Co-author agent", text: (c.co_author_agents || []).join(", ") || "none" }),
-        h("td", { "data-label": "Files changed", text: String(c.files_changed) }), h("td", { "data-label": "Flagged changes" }, (c.findings || []).length ? h("ul", {}, c.findings.map(f => h("li", { text: f.path + ": " + f.reason }))) : h("span", { class: "muted", text: "clean" }))))))
+        h("td", { "data-label": "Time", text: utc(c.committed_at) + (c.future_dated ? " (dated in the future)" : "") }), h("td", { "data-label": "Actor", text: c.actor_kind + (c.actor_login ? " · " + c.actor_login : "") }), h("td", { "data-label": "Co-author agent", text: (c.co_author_agents || []).join(", ") || "none" }),
+        h("td", { "data-label": "Files changed", text: String(c.files_changed) }), h("td", { "data-label": "Flagged changes" }, (c.findings || []).length ? h("ul", {}, c.findings.map(f => h("li", { text: (f.path ? f.path + ": " : "") + f.reason })).concat(c.findings_truncated ? [h("li", { class: "muted", text: c.finding_count + " findings in all; the first are listed." })] : [])) : h("span", { class: "muted", text: "clean" }))))))
         : h("p", { class: "empty", text: "No commits to show for this project on this lane." })); });
 }
 function viewDetail(id) {
@@ -550,7 +550,7 @@ $("#signin-form").addEventListener("submit", async e => {
 $("#si-cancel").addEventListener("click", () => $("#signin").close());
 $("#open-signin").addEventListener("click", openSignin);
 document.querySelectorAll("[data-signin]").forEach(b => b.addEventListener("click", openSignin));
-$("#signout").addEventListener("click", () => { signOut(); route(); });
+$("#signout").addEventListener("click", () => { signOut(); route(); }); $("#projects-private").addEventListener("change", e => { projPriv = e.target.checked; route(); });
 $(".skip").addEventListener("click", e => { e.preventDefault(); $("#main").focus(); });
 
 const caseSearch = $("#case-search"); if (caseSearch) caseSearch.addEventListener("input", () => { explorer.q = caseSearch.value; renderCases(); });

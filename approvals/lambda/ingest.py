@@ -12,7 +12,12 @@ An EventBridge schedule runs it every 15 minutes. One run:
    cursor, their files, the deterministic scan, an idempotent PutItem
    per commit and one ActivityObserved per new commit on lachesis-events;
 3. logs one line per repository with counts and a status, and returns
-   the same counts.
+   the same counts. When a repository's ingest failed (a store failure,
+   an unexpected error, or a commit that could not be stored), it raises
+   IngestFailed after the log line instead, so the Lambda Errors metric
+   and IngestErrorsAlarm see the failed run. The function has no async
+   retry (retry_attempts 0 in the stack): the next scheduled run is the
+   retry.
 
 It stops early, leaving each cursor where the work stopped, when the
 Lambda has less than STOP_BEFORE_END_MS left, when GitHub's rate limit
@@ -41,6 +46,10 @@ STOP_BEFORE_END_MS = 90_000
 
 class NoToken(RuntimeError):
     """The secret holds no usable token. The message never quotes it."""
+
+
+class IngestFailed(RuntimeError):
+    """At least one repository's ingest failed; the message is counts only."""
 
 
 def token_from(secret_string: Any) -> str:
@@ -90,8 +99,11 @@ def handler(event: dict | None = None, context: Any = None, *, deps: dict | None
         "written": sum(result.written for result in results),
         "published": sum(result.published for result in results),
         "statuses": sorted({result.status for result in results}),
+        "failed_repos": sum(1 for result in results if result.failed),
         "github_requests": gh.requests,
         "rate_remaining": gh.remaining,
     }
     print(json.dumps({"msg": "ingest run", **summary}, sort_keys=True))
+    if summary["failed_repos"]:
+        raise IngestFailed(f"{summary['failed_repos']} repositories failed their ingest")
     return summary
