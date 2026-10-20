@@ -10,10 +10,10 @@ const STATUS = {
   RESUMING: ["Agent resuming", "progress"], DONE: ["Finished", "success"],
   REFUSED_DONE: ["Finished without running the paused call", "stopped"],
   EXPIRED: ["Expired: nobody decided, treated as declined", "stopped"], ERROR: ["Run failed", "error"],
-};
+  GATE_DONE: ["Merge gate passed", "success"], GATE_APPROVED: ["Approved: the merge check passes", "success"], GATE_DECLINED: ["Declined: the merge check fails", "stopped"] };
 const ICON = { success: "\u2713", warning: "!", error: "\u2715", info: "i", progress: "\u2026", stopped: "\u25A0" };
 const EFFECT = { benign: "Low risk", destructive_write: "Deletes or overwrites data", exfiltration: "Sends data outside", untrusted_to_action: "Acts on untrusted input", confused_deputy: "Uses authority on someone else's behalf" };
-const LAYER = { decider: "Strands Decider 2B", secretscan: "Secret scan (deterministic)", tier0: "Safe read (deterministic)", unavailable: "Fail-closed: Decider did not answer", refusal: "Repeat of a call already declined" };
+const LAYER = { decider: "Strands Decider 2B", secretscan: "Secret scan (deterministic)", tier0: "Safe read (deterministic)", unavailable: "Fail-closed: Decider did not answer", refusal: "Repeat of a call already declined", mergegate: "Merge gate (deterministic scan)" };
 const CANNED = { write_file: "cleanup_notes.txt", delete_file: "refunds_prod_config.py" };
 
 // Committed benchmark intercepts from evaluation/*.jsonl (no synthetic data).
@@ -297,7 +297,7 @@ function decisionCard(view, lane, onDecided) {
   const entries = p.args && typeof p.args === "object" && !Array.isArray(p.args) ? Object.entries(p.args) : [];
   const multi = entries.filter(([, v]) => typeof v === "string" && v.includes("\n"));
   const argPairs = entries.filter(e => !multi.includes(e)).map(([k, v]) => { const s = typeof v === "string" ? v : JSON.stringify(v); return [k, s.length > 120 ? s.slice(0, 120) + "\u2026" : s]; });
-  const what = h("div", { class: "s4-what" }, h("h4", { text: "What will run" }),
+  const what = h("div", { class: "s4-what" }, h("h4", { text: lane === "gate" ? "What would merge" : "What will run" }),
     kv([["Tool", tool], ["Target", target], ["Effect", card.risk ? (EFFECT[card.risk] || card.risk) + " (derived from class)" : ""]]),
     argPairs.length ? [h("h4", { text: "Arguments" }), kv(argPairs)] : null,
     multi.map(([k, v]) => [h("h4", { text: k }), codeView(v, limit)]),
@@ -315,7 +315,7 @@ function actionBar(view, lane, tool, target, risk, exp, onDecided) {
     bar.querySelectorAll(".btn").forEach(b => { b.disabled = true; });
     msg.className = "act-msg"; msg.textContent = "Recording decision...";
     const out = await api(path, { method: "POST", body: JSON.stringify({ decision }) });
-    if (out.status === 202) { msg.textContent = "Recorded. Agent resuming..."; onDecided(); return; }
+    if (out.status === 202) { msg.textContent = lane === "gate" ? "Recorded. The pull request check reads it on its next poll." : "Recorded. Agent resuming..."; onDecided(); return; }
     msg.className = "act-msg err";
     const e = String((out.body && out.body.error) || "");
     if (out.status === 409 && /expired/.test(e)) msg.textContent = "This call expired at " + (exp ? hhmm(exp) : "its deadline") + " UTC and was treated as declined.";
@@ -325,7 +325,7 @@ function actionBar(view, lane, tool, target, risk, exp, onDecided) {
     if (out.status === 409) onDecided();
   }
   const decline = h("button", { class: "btn btn--danger", type: "button", text: "Decline", onclick: () => send("decline") });
-  const approve = h("button", { class: "btn btn--primary", type: "button", text: "Approve and run", onclick: () => {
+  const approve = h("button", { class: "btn btn--primary", type: "button", text: lane === "gate" ? "Approve the merge" : "Approve and run", onclick: () => {
     if (!CONFIRM_CLASSES.includes(risk)) { send("approve"); return; }
     const yes = h("button", { class: "btn btn--solid-danger", type: "button", text: "Yes, approve and run", onclick: () => { box.remove(); send("approve"); } });
     const box = h("div", { class: "confirm alert alert--warning" }, h("p", { text: "Approve " + tool + (target ? " on " + target : "") + "? The agent runs it immediately." }),
@@ -346,7 +346,7 @@ function poll(path, onView, on404) {
       fails = 0; netFail(0);
       const v = out.body, key = v.status + "|" + ((v.card && v.card.created_at) || "") + "|" + (v.result_text || "").length;
       if (key !== last) { last = key; onView(v); }
-      if (TERMINAL.includes(v.status)) return;
+      if (TERMINAL.includes(v.status) || (v.lane === "gate" && v.status !== "PENDING")) return; // B7b: a decided gate run is final
       if (v.status === "PENDING") wait = 15000;
     } else if (out.status === 404) { on404(); return; }
     else if (out.status === 401 || out.status === 403) { on404(out); return; }
@@ -506,8 +506,8 @@ function viewDetail(id) {
   const g = gen;
   later(() => { if (g === gen && !body.children.length) body.append(h("div", { class: "skeleton" }), h("div", { class: "skeleton" })); }, 200);
   const ctl = poll("/approvals/" + encodeURIComponent(id), v => {
-    statusLine(st, v.status); body.textContent = ""; const card = v.card || {};
-    if (card.tool || card.reason) body.append(decisionCard(v, "approval", () => ctl.kick()));
+    const gate = v.lane === "gate"; statusLine(st, gate && STATUS["GATE_" + v.status] ? "GATE_" + v.status : v.status); body.textContent = ""; const card = v.card || {};
+    if (card.tool || card.reason) body.append(decisionCard(v, gate ? "gate" : "approval", () => ctl.kick()));
     const end = outcomeRow(v); if (end) body.append(h("ol", { class: "steps" }, end)); tickClocks();
     loadLedger("/approvals/" + encodeURIComponent(id) + "/events", led, TERMINAL.includes(v.status));
   }, out => {

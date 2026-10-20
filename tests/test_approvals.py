@@ -1318,7 +1318,27 @@ def test_console_try_start_race_keeps_polling():
     assert "handle = later(tick, 2000)" in js
     assert "on404(out); return;" in js and "on404(); return;" in js
     html = _console("index.html")
-    assert "app.js?v=20261021a" in html
+    assert "app.js?v=20261021b" in html
+
+
+def test_the_console_decides_a_gate_run_without_promising_an_agent():
+    js = _console("app.js")
+    html = _console("index.html")
+    assert "app.js?v=20261021b" in html
+    # The detail view hands the lane on; the decision path for any lane
+    # but try is the approver route.
+    assert 'decisionCard(v, gate ? "gate" : "approval", () => ctl.kick())' in js
+    assert '"/approvals/" + encodeURIComponent(id) + "/decision"' in js
+    assert 'lane === "gate" ? "Recorded. The pull request check reads it on its next poll."' in js
+    assert 'lane === "gate" ? "Approve the merge" : "Approve and run"' in js
+    assert 'GATE_DONE: ["Merge gate passed", "success"]' in js
+    assert 'mergegate: "Merge gate (deterministic scan)"' in js
+    # A decided gate run is final: the poll stops.
+    assert '(v.lane === "gate" && v.status !== "PENDING")) return;' in js
+    # The layer the gate writes is labelled, and the card's layer is it.
+    from gate import policy
+
+    assert f'{policy.LAYER}: "' in js
 
 
 def test_console_hides_previous_approver_on_a_fresh_pause():
