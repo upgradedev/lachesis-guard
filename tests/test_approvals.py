@@ -12,7 +12,13 @@ import sys
 from pathlib import Path
 
 import pytest
-from botocore.exceptions import ClientError
+from botocore.exceptions import (
+    ClientError,
+    ConnectionClosedError,
+    ConnectTimeoutError,
+    EndpointConnectionError,
+    ReadTimeoutError,
+)
 
 LAMBDA_DIR = Path(__file__).resolve().parents[1] / "approvals" / "lambda"
 sys.path.insert(0, str(LAMBDA_DIR))
@@ -146,7 +152,10 @@ def test_resume_only_once(modules, monkeypatch):
     assert len(calls) == 1
 
 
-def test_resume_error_returns_row_to_pending(modules, monkeypatch):
+def test_resume_error_before_send_returns_row_to_pending(modules, monkeypatch):
+    # B0 item 3: only a failure that provably never reached the agent may
+    # go back to PENDING. This test used a RuntimeError before B0, which
+    # proves nothing about the send; it now uses a pre-send error.
     common, _, runner, _ = modules
     common.create_row("appr-4", "s" * 40, "approval")
     interrupts = '[{"interruptId": "i1"}]'
@@ -154,11 +163,13 @@ def test_resume_error_returns_row_to_pending(modules, monkeypatch):
     common.transition("appr-4", "PENDING", "APPROVED", decided_by="sub-1")
 
     def _boom(session_id, payload):
-        raise RuntimeError("runtime 500")
+        raise EndpointConnectionError(endpoint_url="https://agentcore.invalid")
 
     monkeypatch.setattr(common, "invoke_agent", _boom)
     assert runner.resume("appr-4")["status"] == "error-resumable"
-    assert common.get("appr-4")["status"] == "PENDING"
+    row = common.get("appr-4")
+    assert row["status"] == "PENDING"
+    assert row["sweep_attempts"] == 1
 
 
 def test_start_card_carries_decider_fields(modules, monkeypatch):
@@ -246,8 +257,10 @@ def test_resume_repause_card_keeps_decider_fields(modules, monkeypatch):
     assert card["layer"] == "decider"
     assert card["expires_at"]
     assert int(row["expires_ts"]) > 100
-    assert row["decided_by"] == ""
-    assert row["decided_by_name"] == ""
+    # B0 item 4: a re-pause keeps who decided, and logs the decision.
+    assert row["decided_by"] == "sub-1"
+    assert row["decided_by_name"] == "owner"
+    assert [d["decision"] for d in row["decisions"]] == ["approve"]
 
 
 def test_empty_try_token_is_404(modules):
@@ -602,3 +615,396 @@ def test_console_motion_respects_reduced_motion_and_never_animates_numbers():
     assert "animation:" not in stray, "animation outside the motion block"
     js = _console("app.js")
     assert "countUp" not in js and "prefers-reduced-motion" in js
+
+
+# ---------------------------------------------------------------------------
+# Slice B0: correctness on the path judges click. One regression test per
+# defect, plus the contract reader on its own.
+# ---------------------------------------------------------------------------
+
+
+def _load_contract():
+    import contract  # pure module, on sys.path via LAMBDA_DIR
+
+    return contract
+
+
+INTERRUPT_PAYLOAD = {
+    "status": "interrupt",
+    "interrupts": [{"interruptId": "i2", "reason": "second pause"}],
+    "triage": [{"tool": "run_tests", "verdict": "confirm", "layer": "decider"}],
+}
+
+
+def test_contract_reader_classifies_every_shape():
+    contract = _load_contract()
+    done = contract.read_result({"status": "completed", "text": "all good", "triage": "x"})
+    assert done.kind == contract.COMPLETED and done.text == "all good" and done.triage == []
+    paused = contract.read_result(INTERRUPT_PAYLOAD)
+    assert paused.kind == contract.INTERRUPT and paused.interrupts[0]["interruptId"] == "i2"
+    # The agent's own error bodies come back with HTTP 200 (entrypoint.py).
+    for payload, prefix in (
+        ({"status": "error", "error": "session_id must be at least 33 characters"}, "AgentError"),
+        ({"status": "error"}, "AgentError"),
+        ({"status": "weird"}, "UnknownStatus"),
+        ({}, "UnknownStatus"),
+        (["not", "a", "dict"], "MalformedResult"),
+        (None, "MalformedResult"),
+        ({"status": "interrupt", "interrupts": []}, "MalformedResult"),
+        ({"status": "interrupt", "interrupts": [{"reason": "no id"}]}, "MalformedResult"),
+        ({"status": "interrupt", "interrupts": "i1"}, "MalformedResult"),
+    ):
+        result = contract.read_result(payload)
+        assert result.is_error, payload
+        assert result.error.split(":", 1)[0] == prefix, (payload, result.error)
+    assert contract.read_result({"status": "completed", "text": 7}).text == ""
+
+
+def test_contract_final_status_needs_a_completed_result():
+    contract = _load_contract()
+    done = contract.read_result({"status": "completed", "text": ""})
+    failed = contract.read_result({"status": "error", "error": "boom"})
+    assert contract.final_status(done, "APPROVED") == "DONE"
+    assert contract.final_status(done, "DECLINED") == "REFUSED_DONE"
+    assert contract.final_status(done, "PENDING") == "ERROR"
+    assert contract.final_status(failed, "APPROVED") == "ERROR"
+    assert contract.final_status(failed, "DECLINED") == "ERROR"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"status": "error", "error": "prompt or interrupt_responses required"},
+        {"status": "mystery"},
+        {"status": "interrupt", "interrupts": []},
+    ],
+)
+def test_start_records_agent_error_as_error_not_done(modules, monkeypatch, payload):
+    # Regression: runner.start used to record anything but "interrupt" as
+    # DONE, so an agent error body (HTTP 200) showed as "Finished".
+    common, _, runner, _ = modules
+    monkeypatch.setattr(common, "invoke_agent", lambda s, p: payload)
+    out = runner.start("prompt", "try", "appr-agent-err")
+    assert out["status"] == "error"
+    row = common.get("appr-agent-err")
+    assert row["status"] == "ERROR"
+    assert row["result_text"]
+
+
+def _approved_row(common, approval_id, status="APPROVED", lane="approval"):
+    common.create_row(approval_id, "s" * 40, lane)
+    common.transition(
+        approval_id, "STARTING", "PENDING", interrupts='[{"interruptId": "i1"}]', card="{}"
+    )
+    common.transition(
+        approval_id,
+        "PENDING",
+        status,
+        decided_by="sub-1",
+        decided_by_name="owner",
+        decided_at="2026-10-20T10:00:00+00:00",
+    )
+
+
+@pytest.mark.parametrize("decision", ["APPROVED", "DECLINED"])
+def test_resume_records_agent_error_as_error(modules, monkeypatch, decision):
+    # Regression: runner.resume used to map any non-interrupt answer to
+    # DONE or REFUSED_DONE from the decision alone.
+    common, _, runner, _ = modules
+    _approved_row(common, "appr-r-err", decision)
+    monkeypatch.setattr(
+        common, "invoke_agent", lambda s, p: {"status": "error", "error": "agent fell over"}
+    )
+    assert runner.resume("appr-r-err")["status"] == "ERROR"
+    row = common.get("appr-r-err")
+    assert row["status"] == "ERROR"
+    assert row["result_text"] == "AgentError: agent fell over"
+
+
+@pytest.mark.parametrize(
+    ("decision", "final"), [("APPROVED", "DONE"), ("DECLINED", "REFUSED_DONE")]
+)
+def test_resume_completed_follows_the_decision(modules, monkeypatch, decision, final):
+    common, _, runner, _ = modules
+    _approved_row(common, "appr-r-ok", decision)
+    monkeypatch.setattr(common, "invoke_agent", lambda s, p: {"status": "completed", "text": "t"})
+    assert runner.resume("appr-r-ok") == {"status": final, "text": "t"}
+    assert common.get("appr-r-ok")["status"] == final
+
+
+def _client_error(status: int, code: str) -> ClientError:
+    return ClientError(
+        {"Error": {"Code": code}, "ResponseMetadata": {"HTTPStatusCode": status}},
+        "InvokeAgentRuntime",
+    )
+
+
+AFTER_SEND_ERRORS = [
+    RuntimeError("runtime 500"),
+    ReadTimeoutError(endpoint_url="https://agentcore.invalid"),
+    ConnectionClosedError(endpoint_url="https://agentcore.invalid"),
+    _client_error(424, "RuntimeClientError"),
+    _client_error(400, "ValidationException"),
+    _client_error(500, "InternalServerException"),
+    json.JSONDecodeError("Expecting value", "", 0),
+    KeyError("response"),
+]
+
+
+@pytest.mark.parametrize("exc", AFTER_SEND_ERRORS, ids=lambda e: type(e).__name__)
+def test_resume_failure_after_send_ends_in_error_never_pending(modules, monkeypatch, exc):
+    # Regression: any resume exception used to return the row to PENDING,
+    # where a person could decide a call that may already have run.
+    common, _, runner, _ = modules
+    _approved_row(common, "appr-r-sent")
+
+    def _boom(session_id, payload):
+        raise exc
+
+    monkeypatch.setattr(common, "invoke_agent", _boom)
+    out = runner.resume("appr-r-sent")
+    assert out == {"status": "ERROR", "error": type(exc).__name__}
+    row = common.get("appr-r-sent")
+    assert row["status"] == "ERROR"
+    assert row["result_text"].startswith(type(exc).__name__ + ":")
+
+
+def test_failed_before_send_is_exact_class_membership(modules):
+    common = modules[0]
+    assert common.failed_before_send(EndpointConnectionError(endpoint_url="u"))
+    assert common.failed_before_send(ConnectTimeoutError(endpoint_url="u"))
+    for exc in AFTER_SEND_ERRORS:
+        assert not common.failed_before_send(exc), exc
+
+
+def test_pre_send_failures_are_capped(modules, monkeypatch):
+    common, _, runner, _ = modules
+    _approved_row(common, "appr-r-cap")
+
+    def _boom(session_id, payload):
+        raise ConnectTimeoutError(endpoint_url="https://agentcore.invalid")
+
+    monkeypatch.setattr(common, "invoke_agent", _boom)
+    for expected in ("PENDING", "PENDING", "ERROR"):
+        assert runner.resume("appr-r-cap")["current"] == expected
+        if expected == "PENDING":
+            common.transition("appr-r-cap", "PENDING", "APPROVED")
+    assert common.get("appr-r-cap")["status"] == "ERROR"
+
+
+def test_agent_client_makes_exactly_one_attempt(modules, monkeypatch):
+    common = modules[0]
+    seen = {}
+
+    class FakeBody:
+        def read(self):
+            return b'{"status": "completed", "text": "ok"}'
+
+    class FakeAgentCore:
+        def invoke_agent_runtime(self, **kwargs):
+            seen["kwargs"] = kwargs
+            return {"response": FakeBody()}
+
+    def fake_client(service, **kwargs):
+        seen["service"], seen["config"] = service, kwargs.get("config")
+        return FakeAgentCore()
+
+    monkeypatch.setattr(common.boto3, "client", fake_client)
+    assert common.invoke_agent("s" * 40, {"prompt": "p"})["status"] == "completed"
+    assert seen["service"] == "bedrock-agentcore"
+    assert seen["config"].retries["total_max_attempts"] == 1
+    assert json.loads(seen["kwargs"]["payload"]) == {"prompt": "p"}
+
+
+def test_sweeper_rescue_of_stale_resuming_ends_in_error(modules, monkeypatch):
+    # Regression: a RESUMING row older than 20 minutes used to go back to
+    # PENDING, although its resume may already have run the paused call.
+    common, _, runner, _ = modules
+    _approved_row(common, "appr-stuck")
+    common.transition("appr-stuck", "APPROVED", "RESUMING", resuming_ts=1)
+    calls = []
+    monkeypatch.setattr(common, "invoke_agent", lambda s, p: calls.append(p) or {})
+    out = runner.sweep()
+    assert out["rescued"] == 1
+    row = common.get("appr-stuck")
+    assert row["status"] == "ERROR"
+    assert common.public_view(row)["result_text"] == "ResumeOutcomeUnknown"
+    assert calls == []
+
+
+def _expired_pending(common, approval_id):
+    common.create_row(approval_id, "s" * 40, "approval")
+    common.transition(
+        approval_id, "STARTING", "PENDING", interrupts='[{"interruptId": "i1"}]', card="{}"
+    )
+    common._table.items[approval_id]["expires_ts"] = 1
+
+
+@pytest.mark.parametrize(
+    ("raised", "answer", "status"),
+    [
+        (ReadTimeoutError(endpoint_url="u"), None, "ERROR"),
+        (RuntimeError("boom"), None, "ERROR"),
+        (EndpointConnectionError(endpoint_url="u"), None, "PENDING"),
+        (None, {"status": "error", "error": "agent fell over"}, "ERROR"),
+        (None, {"status": "completed", "text": "refused"}, "EXPIRED"),
+    ],
+)
+def test_sweeper_expiry_applies_the_same_rule(modules, monkeypatch, raised, answer, status):
+    common, _, runner, _ = modules
+    _expired_pending(common, "appr-exp")
+
+    def _invoke(session_id, payload):
+        if raised is not None:
+            raise raised
+        return answer
+
+    monkeypatch.setattr(common, "invoke_agent", _invoke)
+    runner.sweep()
+    assert common.get("appr-exp")["status"] == status
+
+
+def test_repause_keeps_every_decision(modules, monkeypatch):
+    # Regression: a re-pause used to blank decided_by and decided_by_name.
+    common, api, runner, _ = modules
+    _approved_row(common, "appr-twice")
+    monkeypatch.setattr(common, "invoke_agent", lambda s, p: INTERRUPT_PAYLOAD)
+    monkeypatch.setattr(api, "_invoke_runner", lambda payload, asynchronous: {})
+    assert runner.resume("appr-twice")["status"] == "interrupt-again"
+    second = {"sub": "sub-9", "username": "second", "cognito:groups": "approvers"}
+    assert _decide(api, second, "decline", "appr-twice")["statusCode"] == 202
+    assert common.get("appr-twice")["decided_at"]
+    assert runner.resume("appr-twice")["status"] == "interrupt-again"
+    row = common.get("appr-twice")
+    assert row["status"] == "PENDING"
+    assert row["decided_by_name"] == "second"
+    assert [(d["decision"], d["decided_by_name"]) for d in row["decisions"]] == [
+        ("approve", "owner"),
+        ("decline", "second"),
+    ]
+    assert row["decisions"][0]["at"] == "2026-10-20T10:00:00+00:00"
+    view = common.public_view(row)
+    assert view["decisions"] == [
+        {key: entry[key] for key in ("decision", "decided_by_name", "at")}
+        for entry in row["decisions"]
+    ]
+    assert "sub-1" not in json.dumps(view) and "sub-9" not in json.dumps(view)
+
+
+def test_try_decision_records_decided_at(modules, monkeypatch):
+    common, api, _, _ = modules
+    monkeypatch.setattr(api, "_invoke_runner", lambda payload, asynchronous: {})
+    common.create_row("appr-try-at", "s" * 40, "try")
+    common.transition(
+        "appr-try-at", "STARTING", "PENDING", interrupts="[]", card=json.dumps({"layer": "decider"})
+    )
+    event = _event(
+        "POST /try/{token}/decision", {}, {"decision": "decline"}, {"token": "appr-try-at"}
+    )
+    assert api.handler(event, None)["statusCode"] == 202
+    assert common.get("appr-try-at")["decided_at"]
+
+
+def test_public_view_is_a_whitelist(modules):
+    # Regression: public_view returned the raw ERROR text (exception
+    # message included) to the anonymous /try lane.
+    common = modules[0]
+    secret_text = "ClientError: An error occurred (AccessDenied) arn:aws:iam::123456789012:role/x"
+    row = {
+        "approval_id": "appr-pv",
+        "session_id": "lachesis-session-secret-value-0000000000",
+        "status": "ERROR",
+        "lane": "try",
+        "decided_by": "cognito-sub-secret",
+        "decided_by_name": "owner",
+        "interrupts": json.dumps([{"interruptId": "i1", "reason": "r", "args": {"k": "v"}}]),
+        "card": json.dumps(
+            {
+                "reason": "pause reason",
+                "tool": "delete_file",
+                "layer": "refusal",
+                "args": {"path": "x"},
+                "session_id": "lachesis-session-secret-value-0000000000",
+                "prior_steps": [{"tool": "write_file", "verdict": "proceed", "args": {"a": 1}}],
+            }
+        ),
+        "result_text": secret_text,
+        "decisions": [{"decision": "approve", "decided_by_name": "owner", "at": "t", "sub": "x"}],
+        "created_ts": 5,
+    }
+    view = common.public_view(row)
+    assert set(view) == {
+        "approval_id", "status", "lane", "card", "decided_by_name",
+        "decisions", "result_text", "created_ts",
+    }
+    assert view["result_text"] == "ClientError"
+    dumped = json.dumps(view)
+    for leaked in ("cognito-sub-secret", "lachesis-session-secret", "123456789012", "AccessDenied"):
+        assert leaked not in dumped, leaked
+    assert "args" not in view["card"] and "session_id" not in view["card"]
+    assert view["card"]["prior_steps"] == [{"tool": "write_file", "verdict": "proceed"}]
+    assert view["decisions"] == [{"decision": "approve", "decided_by_name": "owner", "at": "t"}]
+    dotted = "botocore.exceptions.ReadTimeoutError"
+    for text, label in (
+        ("", ""),
+        ("no colon here at all", "Error"),
+        ("Bad name!: x", "Error"),
+        (dotted + ": x", dotted),
+    ):
+        assert common.public_view({**row, "result_text": text})["result_text"] == label
+    done = common.public_view({**row, "status": "DONE", "result_text": "final: answer"})
+    assert done["result_text"] == "final: answer"
+    assert common.public_view({**row, "card": "not json"})["card"] == {}
+    assert common.public_view({**row, "card": "[1]", "decisions": "x"})["card"] == {}
+
+
+def test_try_get_returns_the_whitelisted_view(modules):
+    common, api, _, _ = modules
+    common.create_row("appr-try-get", "s" * 40, "try")
+    common.transition("appr-try-get", "STARTING", "ERROR", result_text="ValueError: secret detail")
+    out = api.handler(_event("GET /try/{token}", {}, None, {"token": "appr-try-get"}), None)
+    body = json.loads(out["body"])
+    assert body["result_text"] == "ValueError"
+    assert "session_id" not in body and "secret detail" not in out["body"]
+
+
+def test_console_labels_every_layer_the_pattern_emits():
+    import re
+
+    root = Path(__file__).resolve().parents[1] / "src" / "lachesis"
+    source = "".join(path.read_text(encoding="utf-8") for path in root.glob("*.py"))
+    layers = set(re.findall(r'Verdict\((?:[^()]|\([^()]*\))*?"(\w+)"\s*,?\s*\)', source))
+    layers.add("decider")
+    assert {"refusal", "unavailable", "secretscan", "tier0"} <= layers
+    js = _console("app.js")
+    line = next(row for row in js.splitlines() if row.startswith("const LAYER = {"))
+    keys = set(re.findall(r"(\w+): \"", line))
+    assert layers <= keys, layers - keys
+
+
+def test_console_try_start_race_keeps_polling():
+    # Regression: POST /try returns its token before the async runner
+    # writes the row, and the first GET 404 ended the page with "No demo
+    # run matches this link".
+    js = _console("app.js")
+    start = js.index('$("#try-start").addEventListener("click"')
+    branch = js[start:js.index("\n});", start)]
+    store_at = branch.index('s.setItem("lachesis_try_started"')
+    assert store_at < branch.index("location.hash =")
+    assert "t: Date.now()" in branch
+    view = js[js.index("function viewTry(token)"):start]
+    assert 'getItem("lachesis_try_started")' in view
+    assert "!denied && mine.token === token && Date.now() - mine.t < 20000" in view
+    assert 'renderTry({ status: "STARTING", card: {} }, ctl); ctl.kick(); return;' in view
+    assert view.index("ctl.kick()") < view.index("No demo run matches this link")
+    # kick() re-arms a stopped poll on a 2 s tick, and 401/403 pass the
+    # response, so a denied request is never retried.
+    assert "handle = later(tick, 2000)" in js
+    assert "on404(out); return;" in js and "on404(); return;" in js
+    html = _console("index.html")
+    assert "app.js?v=20261020c" in html
+
+
+def test_console_hides_previous_approver_on_a_fresh_pause():
+    js = _console("app.js")
+    assert '["Decided by", view.decided_by_name && view.status !== "PENDING" ?' in js

@@ -16,6 +16,12 @@ Two actions:
 
 Also ``sweep``: expired PENDING rows are resumed with "no" and marked
 EXPIRED, so a forgotten pause ends refused, never open.
+
+Every agent answer goes through contract.read_result: an agent error
+(which comes back with HTTP 200) is recorded as ERROR, never as DONE.
+A failed resume returns to PENDING, where a person could decide again,
+only when common.failed_before_send proves the agent was never invoked;
+any other failure may already have run the paused call and ends ERROR.
 """
 
 from __future__ import annotations
@@ -26,6 +32,7 @@ import os
 
 import boto3
 import common
+import contract
 
 SES_FROM = os.environ.get("SES_FROM", "")
 SES_TO = os.environ.get("SES_TO", "")
@@ -110,29 +117,38 @@ def start(prompt: str, lane: str, approval_id: str = "") -> dict:
     session_id = common.new_session_id()
     common.create_row(approval_id, session_id, lane)
     try:
-        result = common.invoke_agent(session_id, {"prompt": prompt, "session_id": session_id})
+        raw = common.invoke_agent(session_id, {"prompt": prompt, "session_id": session_id})
     except Exception as exc:
-        common.transition(
-            approval_id, "STARTING", "ERROR", result_text=f"{type(exc).__name__}: {exc}"
-        )
+        common.transition(approval_id, "STARTING", "ERROR", result_text=common.error_text(exc))
         return {"status": "error", "approval_id": approval_id}
-    if result.get("status") != "interrupt":
-        common.transition(
-            approval_id, "STARTING", "DONE", result_text=result.get("text", "")
-        )
+    result = contract.read_result(raw)
+    if result.is_error:
+        common.transition(approval_id, "STARTING", "ERROR", result_text=result.error)
+        return {"status": "error", "approval_id": approval_id}
+    if result.kind == contract.COMPLETED:
+        common.transition(approval_id, "STARTING", "DONE", result_text=result.text)
         return {"status": "completed", "approval_id": approval_id}
-    interrupts = result.get("interrupts", [])
-    card = _pending_card(result)
+    card = _pending_card(result.as_payload())
     item = common.transition(
         approval_id,
         "STARTING",
         "PENDING",
-        interrupts=json.dumps(interrupts),
+        interrupts=json.dumps(result.interrupts),
         card=json.dumps(card),
     )
     if lane == "approval" and item is not None:
         _send_card(item)
     return {"status": "interrupt", "approval_id": approval_id}
+
+
+def _decision_entry(row: dict, status: str) -> dict:
+    """One history entry for the decision a resume consumed. The Cognito
+    sub is not copied: the history is public, the sub is not."""
+    return {
+        "decision": "approve" if status == "APPROVED" else "decline",
+        "decided_by_name": str(row.get("decided_by_name", "")),
+        "at": str(row.get("decided_at") or common.now_iso()),
+    }
 
 
 def resume(approval_id: str) -> dict:
@@ -150,7 +166,7 @@ def resume(approval_id: str) -> dict:
     answer = "y" if status == "APPROVED" else "no"
     interrupts = json.loads(row.get("interrupts") or "[]")
     try:
-        result = common.invoke_agent(
+        raw = common.invoke_agent(
             row["session_id"],
             {
                 "session_id": row["session_id"],
@@ -161,39 +177,48 @@ def resume(approval_id: str) -> dict:
             },
         )
     except Exception as exc:  # never strand a row in RESUMING
-        _attempt_failed(row)
-        return {"status": "error-resumable", "error": f"{type(exc).__name__}: {exc}"}
-    if result.get("status") == "interrupt":
+        if common.failed_before_send(exc):
+            # The agent was never invoked: the decision can be taken again.
+            return {"status": "error-resumable", "current": _attempt_failed(row)}
+        # The request may have reached the agent, so the paused call may
+        # already have run: nobody may be asked to decide it a second time.
+        common.transition(approval_id, "RESUMING", "ERROR", result_text=common.error_text(exc))
+        return {"status": "ERROR", "error": type(exc).__name__}
+    result = contract.read_result(raw)
+    if result.kind == contract.INTERRUPT:
         # The resumed run paused again: fold the new pause into a fresh
         # pending state on the same approval id, with a renewed expiry
-        # window and clean decision fields.
+        # window. The decision just consumed is appended to the history,
+        # and decided_by / decided_by_name are kept, so a re-pause never
+        # erases who decided first. The next decision overwrites them.
         now = int(_time.time())
+        history = row.get("decisions") if isinstance(row.get("decisions"), list) else []
         updated = common.transition(
             approval_id,
             "RESUMING",
             "PENDING",
-            interrupts=json.dumps(result.get("interrupts", [])),
-            card=json.dumps(_pending_card(result)),
+            interrupts=json.dumps(result.interrupts),
+            card=json.dumps(_pending_card(result.as_payload())),
             expires_ts=now + common.TTL_SECONDS,
             ttl=now + common.TTL_SECONDS + 86400,
-            decided_by="",
-            decided_by_name="",
+            decisions=[*history, _decision_entry(row, status)],
         )
         if row.get("lane", "approval") == "approval" and updated is not None:
             _send_card(updated)
         return {"status": "interrupt-again", "approval_id": approval_id}
-    final_status = "DONE" if status == "APPROVED" else "REFUSED_DONE"
-    common.transition(
-        approval_id, "RESUMING", final_status, result_text=result.get("text", "")
-    )
-    return {"status": final_status, "text": result.get("text", "")}
+    final_status = contract.final_status(result, status)
+    text = result.error if result.is_error else result.text
+    common.transition(approval_id, "RESUMING", final_status, result_text=text)
+    return {"status": final_status, "text": "" if result.is_error else result.text}
 
 
 MAX_SWEEP_ATTEMPTS = 3
 
 
 def _attempt_failed(item: dict) -> str:
-    """Count a failed resume attempt; the third failure is terminal."""
+    """Count a resume attempt that failed before the agent was invoked
+    (common.failed_before_send); the third such failure is terminal.
+    Never call this for a failure that may have reached the agent."""
     attempts = int(item.get("sweep_attempts", 0)) + 1
     if attempts >= MAX_SWEEP_ATTEMPTS:
         common.transition(
@@ -215,16 +240,29 @@ def sweep() -> dict:
     for item in common.list_by_status("STARTING", limit=50):
         if int(time.time()) - int(item.get("created_ts", 0)) < 600:
             continue
-        if common.transition(item["approval_id"], "STARTING", "ERROR") is not None:
+        closed = common.transition(
+            item["approval_id"],
+            "STARTING",
+            "ERROR",
+            result_text="StartTimeout: the start did not report back",
+        )
+        if closed is not None:
             closed_starting += 1
 
-    # A resume whose Lambda died mid-invoke leaves RESUMING behind; after
-    # twenty minutes it goes back to PENDING so a person can decide again.
+    # A resume whose Lambda died mid-invoke leaves RESUMING behind. Nothing
+    # proves the agent was not invoked, so the paused call may already
+    # have run: after twenty minutes the row ends ERROR, never PENDING,
+    # where a person could decide it a second time.
     rescued = 0
     for item in common.list_by_status("RESUMING", limit=50):
         if int(time.time()) - int(item.get("resuming_ts", 0)) < 1200:
             continue
-        moved = common.transition(item["approval_id"], "RESUMING", "PENDING")
+        moved = common.transition(
+            item["approval_id"],
+            "RESUMING",
+            "ERROR",
+            result_text="ResumeOutcomeUnknown: the resume did not report back",
+        )
         if moved is not None:
             rescued += 1
 
@@ -251,7 +289,7 @@ def sweep() -> dict:
             continue
         interrupts = json.loads(item.get("interrupts") or "[]")
         try:
-            common.invoke_agent(
+            raw = common.invoke_agent(
                 item["session_id"],
                 {
                     "session_id": item["session_id"],
@@ -261,8 +299,17 @@ def sweep() -> dict:
                     ],
                 },
             )
-        except Exception:  # retry on the next sweep, never crash it
-            _attempt_failed(item)
+        except Exception as exc:  # never crash the sweep
+            if common.failed_before_send(exc):
+                _attempt_failed(item)  # never sent: retried on the next sweep
+            else:
+                common.transition(
+                    item["approval_id"], "RESUMING", "ERROR", result_text=common.error_text(exc)
+                )
+            continue
+        outcome = contract.read_result(raw)
+        if outcome.is_error:
+            common.transition(item["approval_id"], "RESUMING", "ERROR", result_text=outcome.error)
             continue
         common.transition(item["approval_id"], "RESUMING", "EXPIRED")
     return {

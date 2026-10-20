@@ -188,6 +188,7 @@ def handler(event, _context):
             target,
             decided_by="try-token",
             decided_by_name="try-visitor",
+            decided_at=common.now_iso(),
         )
         if moved is None:
             return _response(409, {"error": "approval is no longer pending"})
@@ -251,6 +252,7 @@ def handler(event, _context):
             target,
             decided_by=claims.get("sub", ""),
             decided_by_name=claims.get("username", claims.get("cognito:username", "")),
+            decided_at=common.now_iso(),
         )
         if moved is None:
             return _response(409, {"error": "approval is no longer pending"})
