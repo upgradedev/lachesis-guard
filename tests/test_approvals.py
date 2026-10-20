@@ -1726,6 +1726,18 @@ def test_a_full_run_appends_contiguous_events(modules, monkeypatch):
     assert [e["seq"] for e in events] == list(range(1, len(events) + 1))
     assert [e["event_id"] for e in events] == [f"{token}#{n}" for n in range(1, len(events) + 1)]
     assert [e["run_version"] for e in events] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    # Each event carries the status its command left the run in.
+    assert [e["status"] for e in events] == [
+        "STARTING",
+        "STARTING",
+        "PENDING",
+        "APPROVED",
+        "RESUMING",
+        "PENDING",
+        "DECLINED",
+        "RESUMING",
+        "REFUSED_DONE",
+    ]
     row = table.items[token]
     assert row["version"] == 9 and row["event_seq"] == 9 and row["pause_seq"] == 2
     assert [e["data"]["pause_seq"] for e in events[2:]] == [1, 1, 1, 2, 2, 2, 2]
