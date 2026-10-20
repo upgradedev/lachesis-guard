@@ -255,6 +255,18 @@ class DynamoUnitOfWork:
             }
         }
 
+    def take(self, counter: Counter) -> bool:
+        """Consume one of ``counter`` on its own (B7b: the gate's hourly
+        Decider reading cap). False, consuming nothing, when it is at its
+        cap; any other failure is raised."""
+        try:
+            self.client.transact_write_items(TransactItems=[self._counter_item(counter)])
+        except ClientError as exc:
+            if classify(exc, [_CAP]) == _CAP:
+                return False
+            raise
+        return True
+
     def commit(self, run: domain.Run, counters: Iterable[Counter] = ()) -> domain.Run:
         """Write the command's changes and events atomically, or raise
         domain.Conflict / domain.Busy / domain.CapReached and write

@@ -5,24 +5,41 @@ Actions OIDC tokens (issuer https://token.actions.githubusercontent.com,
 audience lachesis-gate; see infra/stacks/approvals.py). The authorizer
 proves the token is GitHub's and meant for this gate. This function then
 checks, before anything else, that the claims say the same (issuer and
-audience) and that the ``repository`` claim names a repository in the
-committed project registry (activity/registry.py, projects.json). A
-token from any other repository is 403 and nothing is read.
+audience), that the ``repository`` claim names a repository in the
+committed project registry (activity/registry.py, projects.json), and
+that ``repository_owner_id`` is the pinned id of that owner (OWNER_IDS),
+so a name taken again after a rename or a deletion gets nothing. A token
+from any other repository is 403 and nothing is read.
 
-POST /gate/pulls (the body contract and its caps are gate/policy.py's):
-the body's repository must be the token's, and the token must come from
-a pull_request run of that very pull request (claims event_name
-"pull_request" and ref "refs/pull/<pr_number>/merge", GitHub's ref for
-that event), so another workflow of the repository cannot open, or win,
-the run of a pull request it is not running for. The run of a pull-request
-head has a derived id (policy.gate_id), so a re-run of the job finds the
-same run, and its decision, instead of opening a second card; only an
-EXPIRED or ERROR run is retried, under the next round's id. A new run is
-the deterministic scan of every change (activity.scan rules) and, only
-when the scan flags something and the Decider inference component
-already has a copy running, one advisory Decider reading (gate/decider.py,
-which never wakes the GPU). It is recorded through the Unit of Work as
-one transaction on lane "gate", project from the registry:
+POST /gate/pulls, before the body is read: the token must come from a
+pull_request run (claim event_name), its ref names the pull request
+(refs/pull/<n>/merge, GitHub's ref for that event), and the workflow
+that asked for it is this repository's lachesis-gate.yml at that ref
+(claims job_workflow_ref and workflow_ref), so no other workflow file
+can open, or win, the run of a pull request. The body (gate/policy.py)
+names the repository, the pull request and the head sha the run was for;
+the first two must be the token's.
+
+The gate then reads the pull request from GitHub itself, with the
+read-only token of the Secrets Manager secret lachesis/github-readonly
+(activity/github.py, shared with the B7a ingest): GET /pulls/{n} for its
+state and its real head sha, and GET /pulls/{n}/files for its changes,
+at most policy.FILE_PAGES pages. Nothing the request says changed is
+scanned. A pull request that is not open, or whose head is no longer the
+one the run was for (a newer push; its own run decides), is 409. Any
+GitHub failure is 503 and records nothing: the gate never passes what it
+could not read.
+
+The run of a pull-request head has a derived id (policy.gate_id), so a
+re-run of the job finds the same run, and its decision, instead of
+opening a second card; only an EXPIRED or ERROR run is retried, under the
+next round's id. A new run is the deterministic scan of every change
+(activity.scan rules) and, only when the scan flags something and the
+Decider inference component already has a copy running, one advisory
+Decider reading (gate/decider.py), within an hourly reading cap and the
+function's time budget. It is recorded through the Unit of Work as one
+transaction on lane "gate", project from the registry, together with the
+repository's daily counter of new gate runs (429 at the cap):
 
 - PASSED (stored as DONE) when nothing needs a person;
 - otherwise PENDING, with a card listing the flagged changes and their
@@ -34,8 +51,12 @@ A flag is never cleared by Decider: a flagged pull request waits for a
 person. GET /gate/{id} answers only for a gate run of the token's own
 repository (otherwise 404) and only with its status (PASSED, PENDING,
 APPROVED, DECLINED, EXPIRED or ERROR) and the verdict summary, which
-holds counts only: no path, reason, excerpt, login or message. The body
-is never logged.
+holds counts only: no path, reason, excerpt, login or message. The body,
+the GitHub token and GitHub's answers are never logged.
+
+Not enforcing yet: the check runs from the pull request's own copy of
+the workflow, which that pull request can change to skip this call (see
+.github/workflows/lachesis-gate.yml). Not yet deployed or run on AWS.
 """
 
 from __future__ import annotations
@@ -45,16 +66,29 @@ import binascii
 import json
 import re
 import time
+from typing import Any
 
 import common
-from activity import registry
+from activity import github, registry
 from approval import domain, service
 from gate import decider, policy
 
 GITHUB_ISSUER = "https://token.actions.githubusercontent.com"
 AUDIENCE = "lachesis-gate"
+WORKFLOW_PATH = ".github/workflows/lachesis-gate.yml"
+# The GitHub account id of every owner a registered repository may have
+# (GET /users/upgradedev, read 2026-10-21). A registered repository whose
+# owner is not here is refused.
+OWNER_IDS = {"upgradedev": "25751981"}
+# GitHub reads use a short timeout so the five reads at most (the pull
+# request twice, three pages of files) stay inside the API's 29 s.
+GITHUB_TIMEOUT_S = 4
+# Below this much time left, Decider is not asked (its reads take up to
+# about 10 s); the card then says so and a person decides.
+DECIDER_MIN_REMAINING_MS = 12_000
 
 _GATE_ID = re.compile(r"appr-gate-[0-9a-f]{40}-[0-9]")
+_PULL_REF = re.compile(r"refs/pull/([1-9][0-9]{0,8})/merge")
 _REUSABLE = frozenset({domain.EXPIRED, domain.ERROR})
 GATE_STATUS = {
     domain.DONE: "PASSED",
@@ -64,6 +98,13 @@ GATE_STATUS = {
     domain.EXPIRED: domain.EXPIRED,
     domain.ERROR: domain.ERROR,
 }
+
+# The token, read once per container and kept in memory only.
+_token: str | None = None
+
+
+class HeadMoved(Exception):
+    """The pull request's head is not the one this run was for."""
 
 
 def _response(status: int, payload: dict) -> dict:
@@ -96,10 +137,29 @@ def caller(event: dict) -> tuple[str, registry.Project] | None:
     repository = str(claims.get("repository") or "")
     if not registry.valid_repo(repository):
         return None
+    owner = repository.split("/", 1)[0]
+    if owner not in OWNER_IDS or str(claims.get("repository_owner_id") or "") != OWNER_IDS[owner]:
+        return None
     for project in registry.load():
         if repository in project.repos:
             return repository, project
     return None
+
+
+def pull_number(claims: dict, repository: str) -> int | None:
+    """The pull request a pull_request run's token is for, or None when
+    the token is from another event or another workflow file."""
+    if claims.get("event_name") != "pull_request":
+        return None
+    match = _PULL_REF.fullmatch(str(claims.get("ref") or ""))
+    if not match:
+        return None
+    expected = f"{repository}/{WORKFLOW_PATH}@{match.group(0)}"
+    if claims.get("job_workflow_ref") != expected:
+        return None
+    if claims.get("workflow_ref") not in (None, expected):
+        return None
+    return int(match.group(1))
 
 
 def _raw_body(event: dict) -> bytes | None:
@@ -132,17 +192,75 @@ def view(run: domain.Run) -> dict:
     }
 
 
-def _reading(pull: policy.PullRequest, result: policy.GateScan) -> decider.Reading:
+# --- GitHub -----------------------------------------------------------
+
+
+def _github() -> Any:  # pragma: no cover - the secret and urllib wiring
+    global _token
+    if _token is None:
+        _token = github.read_token()
+    return github.GitHub(_token, timeout=GITHUB_TIMEOUT_S)
+
+
+def _forget_token() -> None:
+    global _token
+    _token = None
+
+
+def _head(pull_json: dict) -> str:
+    head = pull_json.get("head") if isinstance(pull_json, dict) else None
+    sha = head.get("sha") if isinstance(head, dict) else None
+    return sha if isinstance(sha, str) else ""
+
+
+def _open_head(gh: Any, request: policy.Request) -> tuple[dict, str]:
+    """GitHub's pull request and its head sha. Raises HeadMoved."""
+    pull_json = gh.pull(request.repository, request.pr_number)
+    if pull_json.get("state") != "open":
+        raise HeadMoved("the pull request is not open")
+    head = _head(pull_json)
+    if head != request.head_sha:
+        raise HeadMoved("the pull request head moved; the run of its new head decides")
+    return pull_json, head
+
+
+def _read_pull(gh: Any, request: policy.Request, pull_json: dict) -> policy.PullRequest:
+    """The changed files as GitHub lists them, read twice-checked: the
+    head is read again after the files, so a push between the two reads
+    never pairs one head's files with another head's id."""
+    files, complete = gh.pull_files(request.repository, request.pr_number, policy.FILE_PAGES)
+    _, head = _open_head(gh, request)
+    return policy.from_github(request, head, files, complete, pull_json.get("changed_files"))
+
+
+# --- recording --------------------------------------------------------
+
+
+def _reading(
+    pull: policy.PullRequest, result: policy.GateScan, context: Any
+) -> decider.Reading:
+    def allow() -> bool:
+        remaining = getattr(context, "get_remaining_time_in_millis", None)
+        if remaining is not None and remaining() < DECIDER_MIN_REMAINING_MS:
+            return False
+        try:
+            return service.take_gate_reading()
+        except Exception as exc:  # the cap could not be read: do not ask
+            print(json.dumps({"decider_cap_unavailable": type(exc).__name__}))
+            return False
+
     try:
-        return decider.read(pull, result)
+        return decider.read(pull, result, allow=allow)
     except Exception as exc:  # the clients could not be built: fail closed
         print(json.dumps({"decider_unavailable": type(exc).__name__}))
         return decider.Reading(decider.FAILED)
 
 
-def _record(pull: policy.PullRequest, project: registry.Project, gate_id: str) -> domain.Run:
+def _record(
+    pull: policy.PullRequest, project: registry.Project, gate_id: str, context: Any
+) -> domain.Run:
     result = policy.scan_pull(pull)
-    reading = _reading(pull, result)
+    reading = _reading(pull, result, context)
     summary = policy.summary(result, reading.state)
     card = None
     if result.needs_person:
@@ -171,36 +289,49 @@ def _record(pull: policy.PullRequest, project: registry.Project, gate_id: str) -
     return run
 
 
-def post_pull(event: dict, repository: str, project: registry.Project) -> dict:
+def _parse(event: dict) -> policy.Request | dict:
     data = _raw_body(event)
     if data is None:
         return _response(413, {"error": f"the body is over {policy.MAX_BODY_BYTES} bytes"})
     try:
         body = json.loads(data) if data else None
-    except (ValueError, UnicodeDecodeError):
+    except (ValueError, UnicodeDecodeError, RecursionError):
         body = None
     try:
-        pull = policy.parse(body)
+        return policy.parse(body)
     except policy.Refused as exc:
         return _response(exc.http_status, {"error": str(exc)})
-    if pull.repository != repository:
+
+
+def post_pull(
+    event: dict, repository: str, project: registry.Project, context: Any = None
+) -> dict:
+    number = pull_number(_claims(event), repository)
+    if number is None:
+        return _response(
+            403, {"error": "the token is not from this repository's gate run of a pull request"}
+        )
+    request = _parse(event)
+    if isinstance(request, dict):
+        return request
+    if request.repository != repository:
         return _response(403, {"error": "the token is for another repository"})
-    claims = _claims(event)
-    if claims.get("event_name") != "pull_request" or claims.get("ref") != (
-        f"refs/pull/{pull.pr_number}/merge"
-    ):
+    if request.pr_number != number:
         return _response(403, {"error": "the token is not from a run of this pull request"})
-    work = service.unit_of_work()
     try:
+        gh = _github()
+        pull_json, _ = _open_head(gh, request)
+        work = service.unit_of_work()
         for round_ in range(policy.MAX_ROUNDS):
-            gate_id = policy.gate_id(pull, round_)
+            gate_id = policy.gate_id(request, round_)
             existing = work.get(gate_id)
             if existing is not None and existing.status in _REUSABLE:
                 continue
             if existing is not None:
                 return _response(200, view(existing))
+            pull = _read_pull(gh, request, pull_json)
             try:
-                return _response(202, view(_record(pull, project, gate_id)))
+                return _response(202, view(_record(pull, project, gate_id, context)))
             except domain.Busy:
                 raise
             except domain.Conflict:
@@ -209,8 +340,18 @@ def post_pull(event: dict, repository: str, project: registry.Project) -> dict:
                 if current is not None:
                     return _response(200, view(current))
                 raise
+    except HeadMoved as exc:
+        return _response(409, {"error": str(exc)})
+    except domain.CapReached:
+        return _response(429, {"error": "this repository reached its daily gate runs"})
     except domain.Busy as exc:
         return _response(exc.http_status, {"error": str(exc)})
+    except (github.GitHubError, github.NoToken) as exc:
+        status = getattr(exc, "status", 0)
+        if status == 401:
+            _forget_token()
+        print(json.dumps({"gate_github_failed": status, "kind": type(exc).__name__}))
+        return _response(503, {"error": "the gate could not read the pull request from GitHub"})
     except Exception as exc:
         print(json.dumps({"gate_record_failed": type(exc).__name__}))
         return _response(503, {"error": "the gate run could not be recorded"})
@@ -232,7 +373,7 @@ def get_gate(gate_id: str, repository: str) -> dict:
     return _response(200, view(run))
 
 
-def handler(event, _context):
+def handler(event, context=None):
     route = event.get("routeKey", "")
     known = caller(event)
     if known is None:
@@ -241,7 +382,7 @@ def handler(event, _context):
         )
     repository, project = known
     if route == "POST /gate/pulls":
-        return post_pull(event, repository, project)
+        return post_pull(event, repository, project, context)
     if route == "GET /gate/{id}":
         return get_gate((event.get("pathParameters") or {}).get("id", ""), repository)
     return _response(404, {"error": "unknown route"})

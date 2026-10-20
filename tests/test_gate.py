@@ -1,9 +1,10 @@
 """The merge gate (B7b), offline: GitHub OIDC claim checks in the Lambda,
-the deterministic scan to the gate status, the cold-GPU path that never
-invokes Decider, lane isolation, and a person's decision on a gate run.
+the gate's own read of the pull request from GitHub, the deterministic
+scan to the gate status, the cold-GPU path that never invokes Decider,
+the caps, lane isolation, and a person's decision on a gate run.
 
-DynamoDB is the in-memory fake of tests/test_approvals.py; SageMaker is
-a fake that records every call. No network.
+DynamoDB is the in-memory fake of tests/test_approvals.py; GitHub and
+SageMaker are fakes that record every call. No network.
 """
 
 from __future__ import annotations
@@ -14,6 +15,8 @@ import importlib.util
 import io
 import json
 import re
+import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -26,12 +29,17 @@ REPO = "upgradedev/volcan_amazon"
 OTHER_REPO = "upgradedev/mercury_amazon"
 SHA = "a" * 40
 GITHUB = "https://token.actions.githubusercontent.com"
+OWNER_ID = "25751981"
+WORKFLOW_FILE = ".github/workflows/lachesis-gate.yml"
+AKIA = "AKIA" + "Q" * 16
 
 
 def _claims(repository=REPO, iss=GITHUB, aud="lachesis-gate", event="pull_request",
-            ref="refs/pull/7/merge"):
+            ref="refs/pull/7/merge", owner_id=OWNER_ID, workflow=None):
+    workflow = workflow if workflow is not None else f"{repository}/{WORKFLOW_FILE}@{ref}"
     return {"iss": iss, "aud": aud, "repository": repository, "event_name": event, "ref": ref,
-            "sub": f"repo:{repository}:pull_request"}
+            "repository_owner_id": owner_id, "job_workflow_ref": workflow,
+            "workflow_ref": workflow, "sub": f"repo:{repository}:pull_request"}
 
 
 def _change(path="src/app.py", status="modified", excerpt="print('hello')", **extra):
@@ -48,11 +56,55 @@ def _body(changes=None, repository=REPO, sha=SHA, **extra):
     return body
 
 
+def _github_file(change):
+    """A test change as GET /pulls/{n}/files lists it: a patch of hunks
+    only, no ---/+++ headers, the way GitHub sends it."""
+    entry = {"filename": change["path"], "status": change["status"],
+             "additions": change.get("additions", 0), "deletions": change.get("deletions", 0)}
+    excerpt = change.get("added_lines_excerpt") or ""
+    if excerpt and not change.get("no_patch"):
+        entry["patch"] = "@@ -1,1 +1,1 @@\n" + "\n".join("+" + line for line in excerpt.split("\n"))
+    if change.get("previous_path"):
+        entry["previous_filename"] = change["previous_path"]
+    return entry
+
+
+class FakeGitHub:
+    """GitHub's pull request and its files, per (repository, number)."""
+
+    def __init__(self):
+        self.pulls = {}
+        self.calls = []
+        self.fail = None
+        self.head_after_files = None
+
+    def put(self, repository, number, head, files, complete=True, state="open",
+            changed_files=None):
+        self.pulls[(repository, number)] = {
+            "pull": {"state": state, "head": {"sha": head},
+                     "changed_files": len(files) if changed_files is None else changed_files},
+            "files": files, "complete": complete}
+
+    def pull(self, repository, number):
+        self.calls.append(("pull", repository, number))
+        if self.fail:
+            raise self.fail
+        return json.loads(json.dumps(self.pulls[(repository, number)]["pull"]))
+
+    def pull_files(self, repository, number, max_pages):
+        self.calls.append(("files", repository, number, max_pages))
+        data = self.pulls[(repository, number)]
+        if self.head_after_files:
+            data["pull"]["head"]["sha"] = self.head_after_files
+        return json.loads(json.dumps(data["files"])), data["complete"]
+
+
 class FakeSageMaker:
     """DescribeInferenceComponent and InvokeEndpoint, recorded."""
 
-    def __init__(self, copies=0, status="InService", answer=None, describe_error=None):
-        self.copies, self.status = copies, status
+    def __init__(self, copies=0, status="InService", answer=None, describe_error=None,
+                 desired=None):
+        self.copies, self.status, self.desired = copies, status, desired
         self.answer = answer or {"choice": "destructive_write", "confidence": 0.93}
         self.describe_error = describe_error
         self.described, self.invoked = [], []
@@ -61,8 +113,9 @@ class FakeSageMaker:
         self.described.append(kwargs)
         if self.describe_error:
             raise self.describe_error
+        desired = self.copies if self.desired is None else self.desired
         return {"InferenceComponentStatus": self.status,
-                "RuntimeConfig": {"DesiredCopyCount": 1, "CurrentCopyCount": self.copies}}
+                "RuntimeConfig": {"DesiredCopyCount": desired, "CurrentCopyCount": self.copies}}
 
     def invoke_endpoint(self, **kwargs):
         self.invoked.append(kwargs)
@@ -80,8 +133,9 @@ def gate(modules, monkeypatch):  # noqa: F811
     monkeypatch.setitem(sys.modules, "gate_api", gate_api)
     spec.loader.exec_module(gate_api)
     assert gate_api.common is common
-    sagemaker = FakeSageMaker()
+    sagemaker, github = FakeSageMaker(), FakeGitHub()
     monkeypatch.setattr(gate_api.decider, "_clients", lambda: (sagemaker, sagemaker))
+    monkeypatch.setattr(gate_api, "_github", lambda: github)
     agent_calls, runner_calls = [], []
     monkeypatch.setattr(common, "invoke_agent", lambda *a, **k: agent_calls.append(a) or {})
     monkeypatch.setattr(api, "_invoke_runner", lambda *a, **k: runner_calls.append(a) or {})
@@ -92,7 +146,7 @@ def gate(modules, monkeypatch):  # noqa: F811
 
     world = World()
     world.common, world.api, world.runner, world.table = common, api, runner, table
-    world.gate_api, world.sagemaker = gate_api, sagemaker
+    world.gate_api, world.sagemaker, world.github = gate_api, sagemaker, github
     world.agent_calls, world.runner_calls = agent_calls, runner_calls
     return world
 
@@ -101,12 +155,22 @@ def _context(claims):
     return {"authorizer": {"jwt": {"claims": _claims() if claims is None else claims}}}
 
 
-def _post(world, body, claims=None, raw=None, b64=False):
+def _post(world, body, claims=None, raw=None, b64=False, lambda_context=None):
+    """POST /gate/pulls. A dict body's ``changes`` (and files_truncated)
+    become what the fake GitHub lists for that pull request; the POST
+    itself carries only the repository, the number and the head."""
+    if isinstance(body, dict) and isinstance(body.get("changes"), list):
+        files = [_github_file(change) for change in body["changes"]]
+        if isinstance(body.get("pr_number"), int) and isinstance(body.get("head_sha"), str):
+            world.github.put(body.get("repository"), body["pr_number"], body["head_sha"], files,
+                             complete=not body.get("files_truncated"))
+        body = {key: value for key, value in body.items()
+                if key not in {"changes", "files_truncated"}}
     text = raw if raw is not None else json.dumps(body)
     event = {"routeKey": "POST /gate/pulls", "body": text, "requestContext": _context(claims)}
     if b64:
         event["body"], event["isBase64Encoded"] = base64.b64encode(text.encode()).decode(), True
-    out = world.gate_api.handler(event, None)
+    out = world.gate_api.handler(event, lambda_context)
     return out["statusCode"], json.loads(out["body"])
 
 
@@ -121,8 +185,16 @@ def _row(world, gate_id):
     return world.table.items[gate_id]
 
 
+def _card(world, view):
+    return json.loads(_row(world, view["gate_id"])["card"])
+
+
 def _event_types(world, gate_id):
     return [row["event_type"] for row in world.table.dynamo.events_of(gate_id)]
+
+
+def _gate_rows(world):
+    return {key: row for key, row in world.table.items.items() if str(key).startswith("appr-")}
 
 
 # --- the authorizer's claims, checked again in the Lambda -------------------------
@@ -136,6 +208,10 @@ def _event_types(world, gate_id):
         _claims(aud="sts.amazonaws.com"),
         _claims(repository="someone/else"),
         _claims(repository="upgradedev/lachesis-guard/../x"),
+        # The registered name, but not the pinned owner account: a name
+        # taken again after a rename or a deletion gets nothing.
+        _claims(owner_id="999"),
+        {key: value for key, value in _claims().items() if key != "repository_owner_id"},
         {"cognito:groups": "approvers", "sub": "s"},
     ],
 )
@@ -143,6 +219,7 @@ def test_only_a_github_token_of_a_registered_repository_gets_in(gate, claims):
     assert _post(gate, _body(), claims)[0] == 403
     assert _get(gate, "appr-gate-" + "0" * 40 + "-0", claims)[0] == 403
     assert gate.table.items == {} and gate.sagemaker.described == []
+    assert gate.github.calls == []
 
 
 def test_every_registered_repository_is_accepted_and_an_array_audience_too(gate):
@@ -153,6 +230,7 @@ def test_every_registered_repository_is_accepted_and_an_array_audience_too(gate)
             status, view = _post(gate, _body(repository=repo), claims)
             assert status == 202 and view["status"] == "PASSED", repo
             assert _row(gate, view["gate_id"])["project"] == project["name"]
+            assert repo.split("/")[0] in gate.gate_api.OWNER_IDS
 
 
 @pytest.mark.parametrize(
@@ -160,75 +238,165 @@ def test_every_registered_repository_is_accepted_and_an_array_audience_too(gate)
     [
         _claims(event="push", ref="refs/heads/main"),
         _claims(event="workflow_dispatch", ref="refs/pull/7/merge"),
-        _claims(ref="refs/pull/8/merge"),
         _claims(ref="refs/heads/feature"),
         {key: value for key, value in _claims().items() if key != "ref"},
+        # Another workflow file of the pull request itself, with id-token:
+        # write, cannot open or pre-empt the gate run.
+        _claims(workflow=f"{REPO}/.github/workflows/other.yml@refs/pull/7/merge"),
+        {**_claims(), "workflow_ref": f"{REPO}/.github/workflows/caller.yml@refs/pull/7/merge"},
+        {key: value for key, value in _claims().items() if key != "job_workflow_ref"},
+        _claims(workflow=f"{REPO}/{WORKFLOW_FILE}@refs/heads/main"),
     ],
 )
-def test_only_a_run_of_this_very_pull_request_may_post_its_gate(gate, claims):
-    # Another workflow of the same repository (a push, a dispatch, another
-    # pull request's run) can neither open nor pre-empt this head's run.
+def test_only_this_repositorys_gate_workflow_of_a_pull_request_may_post(gate, claims):
     status, body = _post(gate, _body([]), claims)
-    assert status == 403 and "not from a run of this pull request" in body["error"]
-    assert gate.table.items == {}
-    assert _post(gate, _body([]))[0] == 202
+    assert status == 403 and "gate run of a pull request" in body["error"]
+    assert gate.table.items == {} and gate.github.calls == []
+    assert _post(gate, _body())[0] == 202
 
 
-def test_a_long_path_is_cut_and_flagged_never_refused(gate):
-    long_path = "src/" + "d" * 500 + ".py"
-    status, view = _post(gate, _body([_change(long_path)]))
-    assert status == 202 and view["status"] == "PENDING"
-    card = json.loads(_row(gate, view["gate_id"])["card"])
-    assert "the path was longer than 400 characters and was cut" in card["reason"]
-    assert long_path not in card["reason"]
-
-
-def test_the_body_must_name_the_tokens_own_repository(gate):
+def test_the_body_must_name_the_tokens_own_repository_and_pull_request(gate):
     status, body = _post(gate, _body(repository=OTHER_REPO))
     assert status == 403 and "another repository" in body["error"]
+    status, body = _post(gate, _body(), _claims(ref="refs/pull/8/merge"))
+    assert status == 403 and "not from a run of this pull request" in body["error"]
     assert gate.table.items == {}
 
 
 # --- the request contract ------------------------------------------------------
 
 
-def test_the_body_and_the_file_list_are_capped_before_any_scan(gate):
+def test_the_body_is_capped_and_a_list_of_changes_in_it_is_ignored(gate):
     policy = gate.gate_api.policy
-    big = _body([_change(excerpt="x" * 7000) for _ in range(80)])
-    assert len(json.dumps(big)) > policy.MAX_BODY_BYTES
+    assert policy.MAX_BODY_BYTES <= 4096
+    big = {"repository": REPO, "pr_number": 7, "head_sha": SHA, "pad": "x" * 5000}
     assert _post(gate, big)[0] == 413
-    many = _body([_change(path=f"f{i}.txt") for i in range(policy.MAX_FILES + 1)])
-    assert _post(gate, many)[0] == 413
-    assert gate.table.items == {}
+    # GitHub lists a workflow change; the body claims nothing changed.
+    gate.github.put(REPO, 7, SHA, [_github_file(_change(".github/workflows/ci.yml"))])
+    status, view = _post(gate, None, raw=json.dumps({**_body(), "changes": []}))
+    assert status == 202 and view["status"] == "PENDING"
+    assert view["summary"]["files_by_rule"] == {"workflow_changed": 1}
 
 
 @pytest.mark.parametrize(
     "body",
     [
-        _body(sha="ABC"),
-        _body(sha="A" * 40),
+        {**_body(), "head_sha": "ABC"},
+        {**_body(), "head_sha": "A" * 40},
         {**_body(), "pr_number": True},
-        {**_body(), "pr_number": 0},
-        {**_body(), "changes": "nope"},
-        _body([{"path": "a", "status": "deleted"}]),
-        _body([{"path": "", "status": "added"}]),
-        _body([{"path": "a\x00b", "status": "added"}]),
-        _body([{"path": "a", "status": "added", "additions": -1}]),
-        _body([{"path": "a", "status": "added", "added_lines_excerpt": 5}]),
-        _body([{"path": "a", "status": "added", "excerpt_truncated": "yes"}]),
-        {**_body(), "files_truncated": 1},
+        {**_body(), "pr_number": "7"},
+        {**_body(), "repository": "nope"},
     ],
 )
 def test_a_malformed_body_is_400_and_writes_nothing(gate, body):
-    assert _post(gate, body)[0] == 400
+    assert _post(gate, None, raw=json.dumps(body))[0] == 400
     assert gate.table.items == {}
 
 
-def test_a_body_that_is_not_json_is_400_and_base64_bodies_are_read(gate):
+def test_a_body_that_is_not_json_or_too_deep_is_400_and_base64_bodies_are_read(gate):
     assert _post(gate, None, raw="{not json")[0] == 400
     assert _post(gate, None, raw="[]")[0] == 400
+    assert _post(gate, None, raw="[" * 1500 + "]" * 1500)[0] == 400
     status, view = _post(gate, _body(), b64=True)
     assert status == 202 and view["status"] == "PASSED"
+
+
+# --- GitHub, read by the gate itself ---------------------------------------------
+
+
+def test_the_gate_scans_what_github_lists_at_githubs_head(gate):
+    status, view = _post(gate, _body([_change("infra/main.tf")]))
+    assert status == 202
+    assert gate.github.calls == [("pull", REPO, 7), ("files", REPO, 7, 3), ("pull", REPO, 7)]
+    assert _row(gate, view["gate_id"])["head_sha"] == SHA
+
+
+@pytest.mark.parametrize("state", ["closed"])
+def test_a_pull_request_that_is_not_open_is_409(gate, state):
+    gate.github.put(REPO, 7, SHA, [_github_file(_change())], state=state)
+    status, body = _post(gate, None, raw=json.dumps({"repository": REPO, "pr_number": 7,
+                                                     "head_sha": SHA}))
+    assert status == 409 and "not open" in body["error"] and gate.table.items == {}
+
+
+def test_a_head_that_moved_is_409_and_records_nothing(gate):
+    gate.github.put(REPO, 7, "b" * 40, [_github_file(_change())])
+    status, body = _post(gate, None, raw=json.dumps({"repository": REPO, "pr_number": 7,
+                                                     "head_sha": SHA}))
+    assert status == 409 and "head moved" in body["error"]
+    # A push between the head read and the file read.
+    gate.github.put(REPO, 7, SHA, [_github_file(_change())])
+    gate.github.head_after_files = "c" * 40
+    status, body = _post(gate, None, raw=json.dumps({"repository": REPO, "pr_number": 7,
+                                                     "head_sha": SHA}))
+    assert status == 409 and "head moved" in body["error"]
+    assert _gate_rows(gate) == {}
+
+
+def test_a_github_failure_is_503_records_nothing_and_logs_no_token(gate, capsys):
+    github = sys.modules["activity.github"]
+    gate.github.put(REPO, 7, SHA, [_github_file(_change())])
+    for failure in (github.GitHubError(0, "/repos/x/pulls/7"),
+                    github.RateLimited("/repos/x/pulls/7", None, 60),
+                    github.NotAccessible(404, "/repos/x/pulls/7"),
+                    github.NoToken("the secret holds no token")):
+        gate.github.fail = failure
+        status, body = _post(gate, None, raw=json.dumps({"repository": REPO, "pr_number": 7,
+                                                         "head_sha": SHA}))
+        assert status == 503 and "could not read the pull request" in body["error"]
+    assert gate.table.items == {}
+    gate.gate_api._token = "ghp_" + "T" * 36
+    gate.github.fail = github.GitHubError(401, "/repos/x/pulls/7")
+    assert _post(gate, None, raw=json.dumps({"repository": REPO, "pr_number": 7,
+                                             "head_sha": SHA}))[0] == 503
+    assert gate.gate_api._token is None
+    assert "ghp_" not in capsys.readouterr().out
+
+
+def test_the_github_client_reads_a_pull_request_and_its_file_pages():
+    sys.path.insert(0, str(LAMBDA_DIR))
+    from activity import github
+
+    seen = []
+
+    class Response:
+        def __init__(self, body, link=None):
+            self.status, self._body = 200, json.dumps(body).encode()
+            self.headers = {"X-RateLimit-Remaining": "4000", **({"Link": link} if link else {})}
+
+        def read(self):
+            return self._body
+
+        def getcode(self):
+            return 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def opener(request, timeout):
+        seen.append((request.full_url, timeout))
+        url = request.full_url
+        if url.endswith("/pulls/7"):
+            return Response({"state": "open", "head": {"sha": SHA}})
+        found = re.search(r"&page=(\d+)", url)
+        page = int(found.group(1)) if found else 1
+        nxt = f'<{github.API}/repos/o/r/pulls/7/files?per_page=100&page={page + 1}>; rel="next"'
+        return Response([{"filename": f"f{page}.py"}], nxt)
+
+    client = github.GitHub("token", opener, timeout=4)
+    assert client.pull("o/r", 7)["head"]["sha"] == SHA
+    files, complete = client.pull_files("o/r", 7, 3)
+    assert [f["filename"] for f in files] == ["f1.py", "f2.py", "f3.py"] and complete is False
+    assert all(timeout == 4 for _, timeout in seen)
+    assert seen[1][0] == f"{github.API}/repos/o/r/pulls/7/files?per_page=100"
+    with pytest.raises(github.GitHubError):
+        client.pull("o/r", 0)
+    with pytest.raises(github.GitHubError):
+        client.pull_files("o/r", True, 3)
+    assert "token" not in repr(client)
 
 
 # --- scan to gate status ---------------------------------------------------------
@@ -244,10 +412,20 @@ def test_a_clean_pull_request_passes_without_asking_decider(gate):
     row = _row(gate, view["gate_id"])
     assert row["status"] == "DONE" and row["lane"] == "gate" and row["project"] == "Volcan"
     assert row["repository"] == REPO and row["pr_number"] == 7 and row["head_sha"] == SHA
-    # One transaction: the row and both events, so it is never seen STARTING.
+    # One transaction: the row, both events and the daily counter, so it is
+    # never seen STARTING.
     assert len(gate.table.dynamo.transactions) == 1
     assert _event_types(gate, view["gate_id"]) == ["RunRequested", "RunCompleted"]
     assert gate.sagemaker.described == [] and gate.sagemaker.invoked == []
+
+
+def test_a_gate_row_outlives_its_pause_so_a_rerun_days_later_finds_it(gate):
+    domain = sys.modules["approval.domain"]
+    status, view = _post(gate, _body([_change("infra/main.tf")]))
+    row = _row(gate, view["gate_id"])
+    assert row["ttl"] >= row["created_ts"] + domain.GATE_ROW_TTL_SECONDS
+    assert domain.GATE_ROW_TTL_SECONDS >= 30 * 86400
+    assert row["expires_ts"] == row["created_ts"] + gate.common.TTL_SECONDS
 
 
 @pytest.mark.parametrize(
@@ -258,7 +436,7 @@ def test_a_clean_pull_request_passes_without_asking_decider(gate):
         (_change("db/migrations/0002.sql"), "database_migration"),
         (_change("src/app.py", "removed", "", additions=0, deletions=40), "file_deleted"),
         (_change("schema.sql", excerpt="DROP TABLE users;"), "database_migration"),
-        (_change("conf.py", excerpt="key = 'AKIA" + "Q" * 16 + "'"), "secret_in_added_line"),
+        (_change("conf.py", excerpt=f"key = '{AKIA}'"), "secret_in_added_line"),
         (_change(".github/workflows/ci.yml", "renamed", previous_path="old.yml"),
          "workflow_changed"),
         (_change("docs/x.yml", "renamed", previous_path=".github/workflows/deploy.yml"),
@@ -288,12 +466,39 @@ def test_a_flagged_change_holds_the_gate_for_a_person(gate, change, rule):
 
 
 @pytest.mark.parametrize(
+    "excerpt",
+    [
+        # An added line whose text starts with ++ (no file headers in
+        # GitHub's patch), and fragments after separators splitlines()
+        # would have cut off: every one is scanned.
+        f'++i; const k = "{AKIA}";',
+        f'x = 1;\n++ k = "{AKIA}"',
+        f'x = 1;\x0c++k = "{AKIA}"',
+        f'x = 1; ++k = "{AKIA}"',
+        f'x = 1;\x1e++k = "{AKIA}"',
+        f'x = 1;\x85k = "{AKIA}"',
+    ],
+)
+def test_no_added_line_escapes_the_secret_scan(gate, excerpt):
+    status, view = _post(gate, _body([_change("app.js", excerpt=excerpt)]))
+    assert status == 202 and view["status"] == "PENDING"
+    assert view["summary"]["files_by_rule"] == {"secret_in_added_line": 1}
+
+
+def test_a_drop_after_a_form_feed_is_still_found(gate):
+    _, view = _post(gate, _body([_change("q.sql", excerpt="x = 1;\x0c++DROP TABLE users;")]))
+    assert view["summary"]["files_by_rule"] == {"database_migration": 1}
+
+
+@pytest.mark.parametrize(
     "body",
     [
-        _body([_change(excerpt="ok", excerpt_truncated=True)]),
-        _body([_change(excerpt="x\n" * 4500)]),
-        _body([_change(excerpt="")]),
+        _body([_change(excerpt="x" * 25000)]),
+        _body([_change(excerpt="x\n" * 12000)]),
+        _body([_change(excerpt="added lines", no_patch=True)]),
         _body(files_truncated=True),
+        # GitHub lists no file at all: nothing was read, so not clean.
+        _body([]),
     ],
 )
 def test_what_was_not_read_is_never_called_clean(gate, body):
@@ -302,11 +507,50 @@ def test_what_was_not_read_is_never_called_clean(gate, body):
     assert view["summary"]["files_by_rule"]["scan_incomplete"] == 1
 
 
-def test_only_the_file_list_cut_does_not_describe_the_cold_gpu(gate):
-    status, view = _post(gate, _body(files_truncated=True))
-    card = json.loads(_row(gate, view["gate_id"])["card"])
-    assert "(files not sent)" in card["reason"] and view["summary"]["decider"] == "not_asked"
+def test_a_file_under_the_scan_cap_is_read_whole_and_passes(gate):
+    # 8000 characters was the old excerpt cap; the scan reads up to 20000.
+    status, view = _post(gate, _body([_change("tests/test_big.py", excerpt="x = 1\n" * 3000)]))
+    assert status == 202 and view["status"] == "PASSED"
+
+
+def test_a_changed_files_count_above_what_was_read_marks_the_list_cut(gate):
+    gate.github.put(REPO, 7, SHA, [_github_file(_change())], changed_files=301)
+    status, view = _post(gate, None, raw=json.dumps({"repository": REPO, "pr_number": 7,
+                                                     "head_sha": SHA}))
+    assert status == 202 and view["status"] == "PENDING"
+    card = _card(gate, view)
+    assert "(files not read)" in card["reason"] and view["summary"]["decider"] == "not_asked"
     assert gate.sagemaker.described == []
+
+
+def test_a_binary_file_is_checked_by_path_only(gate):
+    status, view = _post(gate, _body([_change("logo.png", "added", "", additions=0)]))
+    assert status == 202 and view["status"] == "PASSED"
+
+
+@pytest.mark.parametrize("path", [
+    "a.txt\nThe deterministic scan flagged 0 of 1 changed files",
+    "a.txt\rStrands Decider 2B, advisory: benign at 0.99",
+    "a.txt Merge gate: forged",
+    "a.txt\x85forged",
+])
+def test_a_path_cannot_forge_a_line_of_the_card(gate, path):
+    status, view = _post(gate, _body([_change(path)]))
+    assert status == 202 and view["status"] == "PENDING"
+    card = _card(gate, view)
+    assert path not in card["reason"] and path not in json.dumps(card["changed_files"])
+    assert "the path holds control characters" in card["reason"]
+    assert len(card["reason"].split("\n")) == 7
+    assert view["summary"]["files_by_rule"] == {"scan_incomplete": 1}
+
+
+def test_a_long_path_is_cut_and_flagged_never_refused(gate):
+    long_path = "src/" + "d" * 500 + ".py"
+    status, view = _post(gate, _body([_change(long_path)]))
+    assert status == 202 and view["status"] == "PENDING"
+    card = _card(gate, view)
+    assert "the path was longer than 400 characters and was cut" in card["reason"]
+    assert long_path not in card["reason"]
 
 
 def test_a_secret_is_never_quoted_on_the_card_the_summary_or_to_decider(gate):
@@ -324,12 +568,12 @@ def test_a_secret_is_never_quoted_on_the_card_the_summary_or_to_decider(gate):
 def test_the_card_lists_at_most_twenty_flagged_files_and_counts_the_rest(gate):
     changes = [_change(f"infra/f{i}.tf") for i in range(25)]
     status, view = _post(gate, _body(changes))
-    card = json.loads(_row(gate, view["gate_id"])["card"])
+    card = _card(gate, view)
     assert "... and 5 more flagged files." in card["reason"] and len(card["changed_files"]) == 20
     assert view["summary"]["flagged_files"] == 25
 
 
-# --- Decider: never woken, never the gate ----------------------------------------
+# --- Decider: never invoked without a copy, never the gate ------------------------------
 
 
 @pytest.mark.parametrize(
@@ -338,7 +582,8 @@ def test_the_card_lists_at_most_twenty_flagged_files_and_counts_the_rest(gate):
         FakeSageMaker(copies=0),
         FakeSageMaker(copies=1, status="Updating"),
         FakeSageMaker(copies=None),
-        FakeSageMaker(describe_error=RuntimeError("AccessDenied")),
+        # Scale-in under way: the copy is still there, but going.
+        FakeSageMaker(copies=1, desired=0),
     ],
 )
 def test_a_cold_gpu_is_never_invoked_and_a_person_decides(gate, monkeypatch, sagemaker):
@@ -347,9 +592,18 @@ def test_a_cold_gpu_is_never_invoked_and_a_person_decides(gate, monkeypatch, sag
     assert status == 202 and view["status"] == "PENDING"
     assert len(sagemaker.described) == 1 and sagemaker.invoked == []
     assert sagemaker.described[0] == {"InferenceComponentName": "lachesis-decider-2b"}
-    card = json.loads(_row(gate, view["gate_id"])["card"])
+    card = _card(gate, view)
     assert "Decider asleep: a person decides" in card["reason"]
     assert view["summary"]["decider"] == "asleep"
+
+
+def test_a_describe_error_is_a_failure_never_called_asleep(gate, monkeypatch):
+    sagemaker = FakeSageMaker(describe_error=RuntimeError("AccessDenied"))
+    monkeypatch.setattr(gate.gate_api.decider, "_clients", lambda: (sagemaker, sagemaker))
+    status, view = _post(gate, _body([_change("infra/main.tf")]))
+    assert status == 202 and view["status"] == "PENDING" and sagemaker.invoked == []
+    assert view["summary"]["decider"] == "failed"
+    assert "Decider did not answer" in _card(gate, view)["reason"]
 
 
 def test_clients_that_cannot_be_built_fail_closed(gate, monkeypatch):
@@ -375,12 +629,33 @@ def test_a_warm_decider_is_asked_once_and_never_clears_a_flag(gate, answer):
     assert call["InferenceComponentName"] == "lachesis-decider-2b"
     request = json.loads(call["Body"])
     assert set(request) == {"state", "questions"} and set(request["questions"]) == {"risk_class"}
-    card = json.loads(_row(gate, view["gate_id"])["card"])
+    card = _card(gate, view)
     line = (f"Strands Decider 2B, advisory: {answer['choice']} "
             f"at {answer['confidence']:.2f}, 120 ms.")
     assert line in card["reason"] and "It does not clear a flag" in card["reason"]
     assert card["confidence"] is None and card["layer"] == "mergegate"
     assert view["summary"]["decider"] == "answered"
+
+
+def test_decider_readings_are_capped_per_hour(gate, monkeypatch):
+    service = gate.gate_api.service
+    monkeypatch.setattr(service, "GATE_DECIDER_HOURLY_CAP", 2)
+    gate.sagemaker.copies = 1
+    states = [_post(gate, _body([_change("infra/main.tf")], sha=ch * 40))[1]["summary"]["decider"]
+              for ch in "abc"]
+    assert states == ["answered", "answered", "skipped"] and len(gate.sagemaker.invoked) == 2
+    held = [row for key, row in gate.table.items.items() if str(key).startswith("appr-gate-")]
+    assert any("hourly reading cap" in json.loads(row["card"])["reason"] for row in held)
+
+
+def test_decider_is_not_asked_without_time_left(gate):
+    class Context:
+        def get_remaining_time_in_millis(self):
+            return 5000
+
+    gate.sagemaker.copies = 1
+    _, view = _post(gate, _body([_change("infra/main.tf")]), lambda_context=Context())
+    assert view["summary"]["decider"] == "skipped" and gate.sagemaker.invoked == []
 
 
 @pytest.mark.parametrize("answer", [
@@ -392,7 +667,7 @@ def test_a_warm_decider_is_asked_once_and_never_clears_a_flag(gate, answer):
 def test_an_unusable_decider_answer_is_a_failure_not_a_score(gate, answer):
     gate.sagemaker.copies, gate.sagemaker.answer = 1, answer
     status, view = _post(gate, _body([_change("infra/main.tf")]))
-    card = json.loads(_row(gate, view["gate_id"])["card"])
+    card = _card(gate, view)
     assert view["summary"]["decider"] == "failed" and "Decider did not answer" in card["reason"]
 
 
@@ -406,14 +681,17 @@ def test_the_risk_question_is_the_patterns_question():
     assert decider.RISK_CLASSES == questions.RISK_CLASSES
 
 
-# --- one run per pull-request head --------------------------------------------------
+# --- one run per pull-request head, and the caps -------------------------------------
 
 
 def test_a_rerun_finds_the_same_run_and_a_closed_one_opens_the_next_round(gate):
     gate.sagemaker.copies = 1
     first = _post(gate, _body([_change("infra/main.tf")]))
+    calls = len(gate.github.calls)
     again = _post(gate, _body([_change("infra/main.tf")]))
     assert first[0] == 202 and again[0] == 200 and again[1]["gate_id"] == first[1]["gate_id"]
+    # A re-run reads the head only, never the files again.
+    assert gate.github.calls[calls:] == [("pull", REPO, 7)]
     assert len(gate.sagemaker.invoked) == 1
     gate_id = first[1]["gate_id"]
     assert re.fullmatch(r"appr-gate-[0-9a-f]{40}-0", gate_id)
@@ -431,6 +709,17 @@ def test_every_round_used_is_409(gate):
         gate.table.items[policy.gate_id(pull, round_)] = {
             "approval_id": policy.gate_id(pull, round_), "status": "ERROR", "lane": "gate"}
     assert _post(gate, _body())[0] == 409
+
+
+def test_new_gate_runs_are_capped_per_repository_per_day(gate, monkeypatch):
+    service = gate.gate_api.service
+    monkeypatch.setattr(service, "GATE_REPO_DAILY_CAP", 2)
+    codes = [_post(gate, _body(sha=ch * 40))[0] for ch in "abc"]
+    assert codes == [202, 202, 429]
+    assert len([k for k in gate.table.items if str(k).startswith("appr-gate-")]) == 2
+    # Another repository has its own counter.
+    other = _body(repository=OTHER_REPO, sha="d" * 40)
+    assert _post(gate, other, _claims(repository=OTHER_REPO))[0] == 202
 
 
 def test_a_concurrent_writer_of_the_same_head_is_answered_with_its_run(gate, monkeypatch):
@@ -525,6 +814,18 @@ def test_the_approver_queue_lists_gate_runs_by_project_and_others_get_403(gate):
                                 None)["statusCode"] == 403
 
 
+def test_try_pauses_cannot_push_gate_runs_out_of_the_approver_queue(gate):
+    _, view = _post(gate, _body([_change("infra/main.tf")]))
+    created = _row(gate, view["gate_id"])["created_ts"]
+    for i in range(160):
+        key = f"appr-try{i:04d}"
+        gate.table.items[key] = {"approval_id": key, "status": "PENDING", "lane": "try",
+                                 "created_ts": created + 10 + i, "card": "{}"}
+    out = gate.api.handler(_event("GET /approvals", APPROVER), None)
+    rows = json.loads(out["body"])["approvals"]
+    assert [row["approval_id"] for row in rows] == [view["gate_id"]]
+
+
 def test_a_gate_token_cannot_use_the_approver_routes(gate):
     _, view = _post(gate, _body([_change("infra/main.tf")]))
     out = gate.api.handler(
@@ -597,6 +898,27 @@ def test_the_domain_refuses_to_resume_a_gate_run(gate):
     assert "project" not in plain.row
 
 
+# --- the console (read as source) ---------------------------------------------------------
+
+
+def test_the_console_decides_a_gate_run_without_promising_an_agent_or_a_score():
+    js = (ROOT / "approvals" / "console" / "app.js").read_text(encoding="utf-8")
+    # The ledger pill of a gate run reads the gate's status words.
+    assert "led._gate = gate" in js
+    assert 'STATUS[(el._gate ? "GATE_" : "") + e.status] || STATUS[e.status]' in js
+    # An expired gate run promises no agent.
+    assert "Nobody decided before the deadline; the merge check fails." in js
+    assert 'GATE_EXPIRED: ["Expired: nobody decided, the merge check fails"' in js
+    # A gate card never says "no score" beside a Decider reading.
+    assert ("The pause is the deterministic scan's; any Decider reading is advisory "
+            "and shown in the card text.") in js
+    assert "A pull request check still waiting reads it; otherwise re-run the lachesis-gate job." \
+        in js
+    # The queue warns before a private repository's paths are on screen.
+    assert 'rows.some(v => v.lane === "gate")' in js
+    assert "Do not record or share this screen." in js
+
+
 # --- the stack and the workflow (read as source) ------------------------------------------
 
 
@@ -617,9 +939,12 @@ def test_the_stack_wires_the_gate_with_least_privilege():
     assert constants["DECIDER_COMPONENT_NAME"] == "lachesis-decider-2b"
     gate = source[source.index('"Gate",'):source.index("stage = apigw.CfnStage(")]
     assert 'handler="gate_api.handler"' in gate
-    assert 'grant_store(gate_fn, ("GetItem", "PutItem"))' in gate
+    assert 'grant_store(gate_fn, ("GetItem", "PutItem", "UpdateItem"))' in gate
     assert re.findall(r'actions=\[([^\]]*)\]', gate) == [
-        '"sagemaker:DescribeInferenceComponent"', '"sagemaker:InvokeEndpoint"']
+        '"secretsmanager:GetSecretValue"', '"sagemaker:DescribeInferenceComponent"',
+        '"sagemaker:InvokeEndpoint"']
+    assert "resources=[github_secret_arn]" in gate
+    assert '"GITHUB_SECRET_ID": GITHUB_SECRET_NAME' in gate
     assert "resources=[decider_component_arn]" in gate
     assert 'f"endpoint/{DECIDER_ENDPOINT_NAME}"' in gate
     assert 'f"inference-component/{DECIDER_COMPONENT_NAME}"' in gate
@@ -637,53 +962,54 @@ def test_the_stack_wires_the_gate_with_least_privilege():
     assert '"POST /gate/pulls": {"ThrottlingRateLimit": 2, "ThrottlingBurstLimit": 5}' in settings
 
 
-def test_the_workflow_asks_the_gate_without_blocking_anything_yet():
-    text = WORKFLOW.read_text(encoding="utf-8")
+def _workflow():
     import yaml
 
-    doc = yaml.safe_load(text)
+    return yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+
+
+def test_the_workflow_names_the_pull_request_and_sends_no_file_list():
+    text = WORKFLOW.read_text(encoding="utf-8")
+    doc = _workflow()
     assert set(doc[True]) == {"pull_request"}  # "on" parses as True
-    assert doc["permissions"] == {"id-token": "write", "contents": "read",
-                                  "pull-requests": "read"}
+    assert doc["permissions"] == {"id-token": "write", "contents": "read"}
     job = doc["jobs"]["gate"]
     assert job["continue-on-error"] is True
-    assert "NOT YET A REQUIRED CHECK" in text and "must never block other work" in text
+    assert "NOT YET A REQUIRED CHECK, AND NOT YET ENFORCING" in text
+    assert "must never block other work" in text and "can skip the call" in text
     assert "vars.LACHESIS_GATE_URL != ''" in job["if"]
     assert "head.repo.full_name == github.repository" in job["if"]
     steps = "\n".join(step["run"] for step in job["steps"])
     assert "${{" not in steps
-    assert 'gh api --paginate "repos/${REPOSITORY}/pulls/${PR_NUMBER}/files' in steps
+    # No file list leaves the job: the gate reads GitHub itself.
+    assert "gh api" not in steps and "patch" not in steps and "changes" not in steps
+    assert "'{repository: $repo, pr_number: $pr, head_sha: $sha}'" in steps
     assert "&audience=lachesis-gate" in steps and 'echo "::add-mask::${TOKEN}"' in steps
     assert "call POST /gate/pulls gate-request.json" in steps
+    assert "429|503|000) ;;" in steps
     assert 'call GET "/gate/${gate_id}"' in steps
     assert "sleep 15" in steps and "+ 600 ))" in steps
     assert "PASSED|APPROVED) report \"$1\"; exit 0" in steps
     assert "DECLINED|EXPIRED|ERROR) report \"$1\"; exit 1" in steps
+    assert "Advisory only: this is not yet a required or enforcing check." in steps
     # The token is fetched in the step's own shell, never in $( ), so the
     # mask command is not swallowed.
     assert "$(call" not in steps and "$(fresh_token" not in steps
-    assert job["env"]["MAX_FILES"] == "300" and job["env"]["MAX_EXCERPT_CHARS"] == "8000"
+    # The file the gate pins in the token's job_workflow_ref is this one.
+    sys.path.insert(0, str(LAMBDA_DIR))
+    assert WORKFLOW.relative_to(ROOT).as_posix() == WORKFLOW_FILE
 
 
-def test_the_workflow_caps_are_the_gates_caps():
-    import yaml
-
+@pytest.mark.skipif(shutil.which("jq") is None, reason="jq is not installed here")
+def test_the_workflows_body_is_what_the_gate_parses(tmp_path):
+    steps = "\n".join(step["run"] for step in _workflow()["jobs"]["gate"]["steps"])
+    program = re.search(r"jq -n .*?\\\n\s*'([^']*)'", steps, re.S).group(1)
+    out = subprocess.run(
+        ["jq", "-n", "--arg", "repo", REPO, "--argjson", "pr", "7", "--arg", "sha", SHA,
+         program], capture_output=True, text=True, check=True).stdout
     sys.path.insert(0, str(LAMBDA_DIR))
     from gate import policy
 
-    env = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]["gate"]["env"]
-    from activity import scan
-
-    assert int(env["MAX_FILES"]) == policy.MAX_FILES
-    assert int(env["MAX_EXCERPT_CHARS"]) == policy.MAX_EXCERPT_CHARS
-    # The added lines in all fit the scan budget and leave room under the
-    # body cap; the byte backstop sits below the cap the gate refuses at.
-    total = int(env["MAX_TOTAL_EXCERPT_CHARS"])
-    assert total <= scan.SCAN_COMMIT_CHARS and total < policy.MAX_BODY_BYTES * 0.7
-    assert int(env["MAX_BODY_BYTES"]) < policy.MAX_BODY_BYTES
-    job = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]["gate"]
-    steps = "\n".join(step["run"] for step in job["steps"])
-    assert '-gt "$MAX_BODY_BYTES"' in steps
-    assert '.added_lines_excerpt = "" | .excerpt_truncated = true' in steps
-    assert "<= $max_total then $cut else" in steps
-
+    body = json.loads(out)
+    assert policy.parse(body) == policy.Request(REPO, 7, SHA)
+    assert len(out.encode()) < policy.MAX_BODY_BYTES

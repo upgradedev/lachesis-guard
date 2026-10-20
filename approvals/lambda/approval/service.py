@@ -13,6 +13,7 @@ subclass); the caller decides whether that is a 409 or a no-op.
 from __future__ import annotations
 
 import datetime
+import hashlib
 import time
 from collections.abc import Iterable
 from typing import Any
@@ -85,6 +86,40 @@ def start_try(
     )
 
 
+# B7b: the merge gate's caps. New gate runs per repository per UTC day
+# (a run needs a real push: its head is GitHub's), and Decider readings
+# per UTC hour across every repository, so gate traffic alone cannot
+# keep the Decider copy warm and billed.
+GATE_REPO_DAILY_CAP = 200
+GATE_DECIDER_HOURLY_CAP = 30
+
+
+def _digest(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()[:24]
+
+
+def gate_counters(repository: str, now: float | None = None) -> list[uow.Counter]:
+    """The per-repository daily counter of new gate runs."""
+    moment = _now(now)
+    day = datetime.datetime.fromtimestamp(moment, datetime.timezone.utc).strftime("%Y-%m-%d")
+    return [
+        uow.Counter(
+            f"gate-repo-{_digest(repository)}-{day}",
+            GATE_REPO_DAILY_CAP,
+            int(moment) + COUNTER_TTL_SECONDS,
+        )
+    ]
+
+
+def take_gate_reading(now: float | None = None) -> bool:
+    """One Decider reading of the gate this UTC hour, or False at the cap."""
+    moment = _now(now)
+    hour = datetime.datetime.fromtimestamp(moment, datetime.timezone.utc).strftime("%Y-%m-%dT%H")
+    return unit_of_work().take(
+        uow.Counter(f"gate-decider-{hour}", GATE_DECIDER_HOURLY_CAP, int(moment) + 86400)
+    )
+
+
 def record_gate(
     approval_id: str,
     project: str,
@@ -95,10 +130,11 @@ def record_gate(
     """B7b: write a merge-gate run in one transaction, already decided by
     the gate: PENDING with ``card`` when a person must decide, otherwise
     DONE (the gate passed). The row, RunRequested and RunPaused or
-    RunCompleted are one commit, so the run is never seen in STARTING.
-    ``approval_id`` is the caller's (gate_api derives it from the pull
-    request head); a run already at that id raises domain.Conflict and
-    writes nothing."""
+    RunCompleted, and the repository's daily counter are one commit, so
+    the run is never seen in STARTING. ``approval_id`` is the caller's
+    (gate_api derives it from the pull request head); a run already at
+    that id raises domain.Conflict, and a repository at its daily cap
+    raises domain.CapReached; either writes nothing."""
     moment = _now(now)
     run = domain.Run.request_gate(
         approval_id, common.new_session_id(), project, gate, moment, common.TTL_SECONDS
@@ -107,7 +143,9 @@ def record_gate(
         run.pass_gate()
     else:
         run.hold_gate(card, moment, common.TTL_SECONDS)
-    return unit_of_work().commit(run)
+    return unit_of_work().commit(
+        run, counters=gate_counters(str(gate.get("repository", "")), moment)
+    )
 
 
 def claim_run(approval_id: str, request_id: str) -> domain.Run | None:

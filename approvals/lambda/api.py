@@ -418,11 +418,7 @@ def handler(event, _context):
         return _dispatch_start(run, prompt, "approval_id")
 
     if route == "GET /approvals":
-        rows = [
-            row
-            for row in common.list_by_status("PENDING", limit=50)
-            if row.get("lane", "approval") in APPROVER_LANES
-        ]
+        rows = common.list_by_status_in_lanes("PENDING", APPROVER_LANES, limit=50)
         return _response(200, {"approvals": [common.public_view(row) for row in rows]})
 
     if route == "GET /approvals/projects":

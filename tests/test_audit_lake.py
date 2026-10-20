@@ -519,6 +519,22 @@ def test_fail_closed_counts(lake_rows):
     assert _run(lake_rows, sql) == [(DAY, 6, 1)]
 
 
+def test_a_merge_gate_hold_is_not_counted_as_a_paused_tool_call(lake_rows):
+    """B7b: a gate hold is a RunPaused row (layer mergegate, no score,
+    cached false), but not a Confirm verdict of a tool call."""
+    [template] = [d for d in lake_rows if d["type"] == "RunPaused" and d["layer"] == "decider"][:1]
+    hold = dict(template, event_id="gate-hold#2", run_ref="gate-hold", layer="mergegate",
+                risk="", confidence=None, latency_ms=None, tool="merge_gate", cached=False)
+    for name in (
+        "lachesis-pause-mix-by-layer-per-day",
+        "lachesis-fail-closed-per-day",
+        "lachesis-approval-pause-confidence-by-decision",
+    ):
+        _, sql = schema.QUERIES[name]
+        assert _run(lake_rows + [hold], sql) == _run(lake_rows, sql), name
+        assert "merge-gate holds are left out" in schema.QUERIES[name][0], name
+
+
 def test_time_to_decision_pairs_each_pause_with_its_latest_decision(lake_rows):
     _, sql = schema.QUERIES["lachesis-time-to-decision"]
     # approval: a 42 and 10 s, d 26 s (pause to the decline that was

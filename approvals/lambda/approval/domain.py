@@ -87,6 +87,11 @@ WORKFLOW = "sfn"
 # already PENDING (a person decides) or DONE (the gate passed), a decision
 # ends it APPROVED or DECLINED, and nothing ever resumes it.
 GATE = "gate"
+# A gate run's row lives this long (DynamoDB TTL), well past its pause:
+# a re-run of the job or a reopened pull request days later must still
+# find the run of that head and its decision, never a free id. The rows
+# are small, and the event log keeps 30 days too.
+GATE_ROW_TTL_SECONDS = 30 * 86400
 
 _TYPE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.]{0,63}")
 _TEXT_CAP = 64
@@ -408,6 +413,7 @@ class Run:
             pr_number=_int(gate.get("pr_number")),
             head_sha=str(gate.get("head_sha", "")),
             gate=json.dumps(gate.get("summary") or {}, sort_keys=True),
+            ttl=int(now) + GATE_ROW_TTL_SECONDS,
         )
         return run
 

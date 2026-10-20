@@ -69,13 +69,16 @@ gate_api.py) serves POST /gate/pulls and GET /gate/{id} behind a second
 JWT authorizer on the same HTTP API, for GitHub Actions OIDC tokens
 (issuer token.actions.githubusercontent.com, audience lachesis-gate);
 the function also checks the token's repository claim against the
-committed project registry. It writes a gate run (lane "gate") through
-the Unit of Work, so it gets the run table's GetItem and PutItem and the
-event log's PutItem, nothing else there. It may call
+committed project registry. It reads the pull request and its files
+from GitHub itself with the read-only token (GetSecretValue on the
+lachesis/github-readonly ARN only, the secret the ingest reads). It
+writes a gate run (lane "gate") through the Unit of Work with its daily
+and hourly counters, so it gets the run table's GetItem, PutItem and
+UpdateItem and the event log's PutItem, nothing else there. It may call
 sagemaker:DescribeInferenceComponent on the Decider component and
 sagemaker:InvokeEndpoint on the Decider endpoint and component, by
-literal ARN; it invokes only when a copy is already running, so it never
-wakes the GPU. Approvers decide gate runs through the existing decision
+literal ARN; it invokes only when a copy is already running and not
+being removed. Approvers decide gate runs through the existing decision
 route. Not yet deployed or run on AWS.
 
 Deploy isolation: the iac workflow deploys this stack with
@@ -142,7 +145,7 @@ RUN_FAILED_RULE_NAME = "lachesis-run-failed"
 OUTBOX_METRIC_NAMESPACE = "Lachesis/Outbox"
 RUN_FAILED_METRIC = "RunFailedPublished"
 # B7a: the activity ingest. The secret is created by the owner, outside
-# CDK; the ingest reads it and nothing else does.
+# CDK; the ingest and the merge gate (B7b) read it, nothing else does.
 ACTIVITY_SOURCE = "lachesis.activity"
 ACTIVITY_TABLE_NAME = "lachesis-activity"
 GITHUB_SECRET_NAME = "lachesis/github-readonly"
@@ -647,6 +650,14 @@ class ApprovalsStack(cdk.Stack):
             route_resources.append(route)
 
         # --- B7b: the merge gate ----------------------------------------
+        # The one GitHub secret, by its ARN; Secrets Manager appends a
+        # hyphen and six random characters to a secret's name in its ARN,
+        # so exactly six ? match it and no longer name
+        # (github-readonly-admin) does. The ingest (B7a) and the gate read
+        # it, nothing else.
+        github_secret_arn = (
+            f"arn:aws:secretsmanager:eu-west-1:{self.account}:secret:{GITHUB_SECRET_NAME}-??????"
+        )
         gate_fn = lambda_.Function(
             self,
             "Gate",
@@ -660,12 +671,23 @@ class ApprovalsStack(cdk.Stack):
                 **common_env,
                 "DECIDER_ENDPOINT": DECIDER_ENDPOINT_NAME,
                 "DECIDER_COMPONENT": DECIDER_COMPONENT_NAME,
+                "GITHUB_SECRET_ID": GITHUB_SECRET_NAME,
             },
         )
         # Reads a gate run, and writes a new one (the Put and its events
-        # inside TransactWriteItems). No UpdateItem: a gate run is decided
-        # by the API function, and expired by the sweeper.
-        grant_store(gate_fn, ("GetItem", "PutItem"))
+        # inside TransactWriteItems), with the repository's daily counter
+        # and the hourly Decider reading counter (UpdateItem on a
+        # counter row; a gate run itself is decided by the API function
+        # and expired by the sweeper).
+        grant_store(gate_fn, ("GetItem", "PutItem", "UpdateItem"))
+        # The gate reads the pull request and its files from GitHub itself
+        # with the read-only token, so the workflow cannot pick what is
+        # scanned.
+        gate_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["secretsmanager:GetSecretValue"], resources=[github_secret_arn]
+            )
+        )
         decider_component_arn = (
             f"arn:aws:sagemaker:{self.region}:{self.account}:"
             f"inference-component/{DECIDER_COMPONENT_NAME}"
@@ -1067,12 +1089,7 @@ class ApprovalsStack(cdk.Stack):
             "dynamodb:Query",
         )
         foundation.key.grant(ingest, *_KEY_ACTIONS)
-        # The one secret, by its ARN; Secrets Manager appends a hyphen and
-        # six random characters to a secret's name in its ARN, so exactly
-        # six ? match it and no longer name (github-readonly-admin) does.
-        github_secret_arn = (
-            f"arn:aws:secretsmanager:eu-west-1:{self.account}:secret:{GITHUB_SECRET_NAME}-??????"
-        )
+        # The one secret, by its ARN (github_secret_arn, above).
         ingest.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["secretsmanager:GetSecretValue"], resources=[github_secret_arn]

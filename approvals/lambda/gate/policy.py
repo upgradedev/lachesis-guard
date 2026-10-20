@@ -1,25 +1,27 @@
 """The merge gate's request contract, scan and card (B7b). Pure Python.
 
-The request (POST /gate/pulls) is
+The request (POST /gate/pulls) only names the pull request:
 
-    {"repository": "owner/name", "pr_number": 12, "head_sha": "<40 hex>",
-     "files_truncated": false,
-     "changes": [{"path", "status", "additions", "deletions",
-                  "added_lines_excerpt", "excerpt_truncated"?, "previous_path"?}]}
+    {"repository": "owner/name", "pr_number": 12, "head_sha": "<40 hex>"}
 
-and it is refused before any scan when it is larger than MAX_BODY_BYTES
-(413), lists more than MAX_FILES changes (413), or fails validation (400).
-An excerpt longer than MAX_EXCERPT_CHARS, or a path longer than
-MAX_PATH_CHARS, is cut here and flagged, never refused, so a large pull
-request always reaches a person.
+It is refused when larger than MAX_BODY_BYTES (413) or malformed (400);
+any other key, such as a list of changes, is ignored. The gate never
+scans what the request says changed: gate_api.py reads the pull request
+and its changed files from GitHub itself (activity/github.py, the
+read-only token) and builds the PullRequest here with from_github(). So
+a pull request's own copy of the workflow cannot choose, trim or empty
+the list the gate scans.
 
 Each change is checked by activity.scan, the deterministic scan the
-commit ingest uses, with the excerpt as its added lines. Beside the scan
-rules, the gate adds scan_incomplete whenever part of a change was not
-read: the workflow cut the file list or an excerpt, this module cut an
-excerpt or a path, the commit budget of the scan ran out, or GitHub returned no
-diff for a file that adds lines. What was not read is never called
-clean.
+commit ingest uses: its path rules, and its line rules on the added text
+of GitHub's patch, scanned as it is (scan.text_findings), never through
+a rebuilt diff. Beside the scan rules, the gate adds scan_incomplete
+whenever part of a change was not read: GitHub listed more files than
+the gate read (or none at all), a file's added text passed
+scan.SCAN_CHARS, a path was cut or holds control characters, the scan's
+budget for the pull request ran out, or GitHub returned no diff for a
+file that adds lines. A binary file (no additions, no patch) is checked
+by its path only. What was not read is never called clean.
 
 The gate passes only when no change has a finding; otherwise a person
 decides. This is the deterministic scan's verdict, labelled as such: a
@@ -28,14 +30,17 @@ never in place of it.
 
 The card a person decides on lists the flagged changes (path, rules and
 fixed reasons, never a matched line) and goes only to the approver lane.
-The summary GET /gate/{id} answers with holds counts only: no path, no
-reason, no excerpt.
+Paths on the card are shown with control characters escaped (shown()),
+so a file name cannot forge a line of the card. The summary GET
+/gate/{id} answers with holds counts only: no path, no reason, no
+excerpt.
 """
 
 from __future__ import annotations
 
 import hashlib
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -45,9 +50,10 @@ LABEL = scan.LABEL
 LAYER = "mergegate"
 TOOL = "merge_gate"
 
-MAX_BODY_BYTES = 512 * 1024
-MAX_FILES = 300
-MAX_EXCERPT_CHARS = 8000
+MAX_BODY_BYTES = 4096
+# Files the gate reads from GitHub: FILE_PAGES pages of 100.
+FILE_PAGES = 3
+MAX_FILES = FILE_PAGES * 100
 MAX_PATH_CHARS = 400
 # Flagged changes the card lists by name; the rest are counted.
 CARD_CHANGES = 20
@@ -55,15 +61,17 @@ CARD_CHANGES = 20
 # under the next round's id, at most this many times.
 MAX_ROUNDS = 5
 
-STATUSES = frozenset(
-    {"added", "modified", "removed", "renamed", "copied", "changed", "unchanged"}
-)
 _SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+_CONTROL = frozenset({"Cc", "Zl", "Zp"})
 
-FILES_NOT_SENT = "(files not sent)"
-REASON_LIST_CUT = "the workflow sent only part of the file list; the rest was not read"
-REASON_EXCERPT_CUT = "the added lines of this file were cut before the scan; the rest was not read"
+FILES_NOT_SENT = "(files not read)"
+REASON_LIST_CUT = "GitHub listed more changed files than the gate read; the rest were not read"
+REASON_NO_FILES = "GitHub listed no changed files for this pull request; nothing was read"
+REASON_EXCERPT_CUT = (
+    f"the added lines of this file passed {scan.SCAN_CHARS} characters; the rest was not read"
+)
 REASON_PATH_CUT = f"the path was longer than {MAX_PATH_CHARS} characters and was cut"
+REASON_PATH_CONTROL = "the path holds control characters; it is shown escaped, check it by hand"
 REASON_NO_DIFF = (
     "GitHub returned no diff for this file although it adds lines (too large); "
     "it was checked by path only"
@@ -80,6 +88,15 @@ class Refused(Exception):
 
 
 @dataclass(frozen=True)
+class Request:
+    """What the POST names; checked against the token and against GitHub."""
+
+    repository: str
+    pr_number: int
+    head_sha: str
+
+
+@dataclass(frozen=True)
 class Change:
     path: str
     status: str
@@ -89,6 +106,8 @@ class Change:
     previous_path: str = ""
     excerpt_truncated: bool = False
     path_truncated: bool = False
+    has_patch: bool = True
+    path_control: bool = False
 
 
 @dataclass(frozen=True)
@@ -135,67 +154,8 @@ class GateScan:
 # --- the request ----------------------------------------------------------
 
 
-def _count(value: Any, name: str) -> int:
-    if value is None:
-        return 0
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise Refused(f"{name} must be a whole number of at least 0")
-    return value
-
-
-def _flag(value: Any, name: str) -> bool:
-    if value is None:
-        return False
-    if not isinstance(value, bool):
-        raise Refused(f"{name} must be true or false")
-    return value
-
-
-def _path(value: Any, name: str, required: bool) -> tuple[str, bool]:
-    """The path, cut to MAX_PATH_CHARS, and whether it was cut. A cut
-    path is flagged scan_incomplete rather than refused, so a pull
-    request with one long path still reaches a person."""
-    if value is None or value == "":
-        if required:
-            raise Refused(f"{name} is required")
-        return "", False
-    if not isinstance(value, str) or "\x00" in value:
-        raise Refused(f"{name} must be a path")
-    if len(value) > MAX_PATH_CHARS:
-        return value[:MAX_PATH_CHARS], True
-    return value, False
-
-
-def _change(entry: Any) -> Change:
-    if not isinstance(entry, dict):
-        raise Refused("each change must be a JSON object")
-    status = entry.get("status")
-    if status not in STATUSES:
-        raise Refused("change status must be one of GitHub's file statuses")
-    excerpt = entry.get("added_lines_excerpt")
-    if excerpt is None:
-        excerpt = ""
-    if not isinstance(excerpt, str):
-        raise Refused("added_lines_excerpt must be a string")
-    truncated = _flag(entry.get("excerpt_truncated"), "excerpt_truncated")
-    if len(excerpt) > MAX_EXCERPT_CHARS:
-        excerpt, truncated = excerpt[:MAX_EXCERPT_CHARS], True
-    path, path_cut = _path(entry.get("path"), "change path", True)
-    previous, previous_cut = _path(entry.get("previous_path"), "previous_path", False)
-    return Change(
-        path=path,
-        status=status,
-        additions=_count(entry.get("additions"), "additions"),
-        deletions=_count(entry.get("deletions"), "deletions"),
-        excerpt=excerpt,
-        previous_path=previous,
-        excerpt_truncated=truncated,
-        path_truncated=path_cut or previous_cut,
-    )
-
-
-def parse(body: Any) -> PullRequest:
-    """The pull request a parsed body describes. Raises Refused."""
+def parse(body: Any) -> Request:
+    """The pull request a parsed body names. Raises Refused."""
     if not isinstance(body, dict):
         raise Refused("request body must be a JSON object")
     repository = body.get("repository")
@@ -207,67 +167,129 @@ def parse(body: Any) -> PullRequest:
     head_sha = body.get("head_sha")
     if not isinstance(head_sha, str) or not _SHA.fullmatch(head_sha):
         raise Refused("head_sha must be a full lowercase commit sha")
-    changes = body.get("changes")
-    if not isinstance(changes, list):
-        raise Refused("changes must be a list")
-    if len(changes) > MAX_FILES:
-        raise Refused(f"at most {MAX_FILES} changes per request", 413)
+    return Request(repository=repository, pr_number=number, head_sha=head_sha)
+
+
+def _is_control(ch: str) -> bool:
+    return unicodedata.category(ch) in _CONTROL
+
+
+def shown(text: str) -> str:
+    """A path as the card shows it: every control character (C0, C1 and
+    the Unicode line and paragraph separators) escaped, so it stays on
+    one line and cannot pass for a line of the card."""
+    return "".join(
+        ch.encode("unicode_escape").decode("ascii") if _is_control(ch) else ch for ch in text
+    )
+
+
+def _path(value: Any) -> tuple[str, bool, bool]:
+    """The path cut to MAX_PATH_CHARS, whether it was cut, and whether it
+    holds control characters. Both are flagged, never refused: git
+    allows any byte but NUL in a file name."""
+    text = value if isinstance(value, str) else ""
+    control = any(_is_control(ch) for ch in text)
+    if len(text) > MAX_PATH_CHARS:
+        return text[:MAX_PATH_CHARS], True, control
+    return text, False, control
+
+
+def _number(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return 0
+    return value
+
+
+def change_from_github(entry: dict[str, Any]) -> Change:
+    """One entry of GET /pulls/{n}/files as a Change. The added text of
+    its patch (scan.added_text, capped at scan.SCAN_CHARS) is read here;
+    the patch itself is not kept."""
+    path, path_cut, control = _path(entry.get("filename"))
+    previous, previous_cut, previous_control = _path(entry.get("previous_filename"))
+    status = entry.get("status")
+    patch = entry.get("patch")
+    has_patch = isinstance(patch, str) and patch != ""
+    added, cut = scan.added_text(patch) if has_patch else ("", False)
+    return Change(
+        path=path or "(no path)",
+        status=status if isinstance(status, str) and status else "changed",
+        additions=_number(entry.get("additions")),
+        deletions=_number(entry.get("deletions")),
+        excerpt=added,
+        previous_path=previous,
+        excerpt_truncated=cut,
+        path_truncated=path_cut or previous_cut,
+        has_patch=has_patch,
+        path_control=control or previous_control,
+    )
+
+
+def from_github(
+    request: Request,
+    head_sha: str,
+    files: list[Any],
+    complete: bool,
+    changed_files: Any = None,
+) -> PullRequest:
+    """The pull request as GitHub lists it. ``head_sha`` is GitHub's own
+    head. ``complete`` False, more than MAX_FILES entries, or a
+    ``changed_files`` count above the files read marks the list cut."""
+    entries = [entry for entry in files if isinstance(entry, dict)]
+    kept = entries[:MAX_FILES]
     return PullRequest(
-        repository=repository,
-        pr_number=number,
+        repository=request.repository,
+        pr_number=request.pr_number,
         head_sha=head_sha,
-        changes=tuple(_change(entry) for entry in changes),
-        files_truncated=_flag(body.get("files_truncated"), "files_truncated"),
+        changes=tuple(change_from_github(entry) for entry in kept),
+        files_truncated=(
+            not complete or len(entries) > MAX_FILES or _number(changed_files) > len(kept)
+        ),
     )
 
 
 # --- the scan -------------------------------------------------------------
 
 
-def _pseudo_patch(excerpt: str) -> str:
-    """The excerpt as the added lines of a unified diff, for activity.scan."""
-    return "\n".join("+" + line for line in excerpt.splitlines())
-
-
 def scan_pull(pull: PullRequest) -> GateScan:
     """Every change through the deterministic scan, under the scan's own
-    per-commit budget, plus the gate's scan_incomplete findings."""
+    per-commit budget, plus the gate's scan_incomplete findings. The
+    line rules run on each change's added text as it is."""
     verdicts: list[ChangeVerdict] = []
     budget, spent = scan.SCAN_COMMIT_CHARS, False
     for change in pull.changes:
         file_change = scan.FileChange(
-            path=change.path,
-            status=change.status,
-            patch=_pseudo_patch(change.excerpt),
-            previous_path=change.previous_path,
+            path=change.path, status=change.status, previous_path=change.previous_path
         )
-        size = len(scan.added_lines(file_change.patch)) if file_change.patch else 0
+        size = len(change.excerpt)
         found: list[scan.Finding] = []
         if not spent and size > budget:
             spent = True
             found.append(scan.Finding(scan.SCAN_INCOMPLETE, change.path, scan.BUDGET_REASON))
-        found.extend(scan.scan_file(file_change, read_lines=not spent))
+        found.extend(scan.scan_file(file_change, read_lines=False))
         if not spent:
+            found.extend(scan.text_findings(change.path, change.excerpt, found))
             budget -= size
         if change.path_truncated:
             found.append(scan.Finding(scan.SCAN_INCOMPLETE, change.path, REASON_PATH_CUT))
+        if change.path_control:
+            found.append(scan.Finding(scan.SCAN_INCOMPLETE, change.path, REASON_PATH_CONTROL))
         if change.excerpt_truncated:
             found.append(scan.Finding(scan.SCAN_INCOMPLETE, change.path, REASON_EXCERPT_CUT))
-        elif change.additions > 0 and not change.excerpt and change.status != "removed":
+        elif change.additions > 0 and not change.has_patch and change.status != "removed":
             found.append(scan.Finding(scan.SCAN_INCOMPLETE, change.path, REASON_NO_DIFF))
         verdicts.append(ChangeVerdict(change, tuple(found)))
-    extra = (
-        (scan.Finding(scan.SCAN_INCOMPLETE, FILES_NOT_SENT, REASON_LIST_CUT),)
-        if pull.files_truncated
-        else ()
-    )
+    extra: tuple[scan.Finding, ...] = ()
+    if pull.files_truncated:
+        extra = (scan.Finding(scan.SCAN_INCOMPLETE, FILES_NOT_SENT, REASON_LIST_CUT),)
+    elif not pull.changes:
+        extra = (scan.Finding(scan.SCAN_INCOMPLETE, FILES_NOT_SENT, REASON_NO_FILES),)
     return GateScan(tuple(verdicts), extra)
 
 
 # --- what is recorded -----------------------------------------------------
 
 
-def gate_id(pull: PullRequest, round_: int) -> str:
+def gate_id(pull: PullRequest | Request, round_: int) -> str:
     """The approval id of a pull-request head's gate run in ``round_``.
     Derived, so a re-run of the job finds the same run (and its decision)
     instead of opening a second card. Knowing it grants nothing: every
@@ -280,7 +302,8 @@ def gate_id(pull: PullRequest, round_: int) -> str:
 
 def summary(result: GateScan, decider: str) -> dict[str, Any]:
     """The verdict summary GET /gate/{id} may show: counts only.
-    ``decider`` is "not_needed", "asleep", "answered" or "failed"."""
+    ``decider`` is one of gate/decider.py's states: "not_needed",
+    "not_asked", "asleep", "skipped", "answered" or "failed"."""
     by_rule = dict.fromkeys(scan.RULES, 0)
     for verdict in result.verdicts:
         for rule in verdict.rules:
@@ -323,9 +346,12 @@ def card(
     ]
     for verdict in flagged[:CARD_CHANGES]:
         change = verdict.change
-        lines.append(f"{change.path} ({change.status}, +{change.additions} -{change.deletions})")
+        lines.append(
+            f"{shown(change.path)} ({shown(change.status)}, "
+            f"+{change.additions} -{change.deletions})"
+        )
         for finding in verdict.findings:
-            where = "" if finding.path == change.path else f" [{finding.path}]"
+            where = "" if finding.path == change.path else f" [{shown(finding.path)}]"
             lines.append(f"  {finding.rule}: {finding.reason}{where}")
     if len(flagged) > CARD_CHANGES:
         lines.append(f"... and {len(flagged) - CARD_CHANGES} more flagged files.")
@@ -339,7 +365,7 @@ def card(
         "confidence": None,
         "latency_ms": None,
         "layer": LAYER,
-        "changed_files": [verdict.change.path for verdict in flagged[:CARD_CHANGES]],
+        "changed_files": [shown(verdict.change.path) for verdict in flagged[:CARD_CHANGES]],
         "created_at": created_at,
         "expires_at": expires_at,
     }

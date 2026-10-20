@@ -101,6 +101,43 @@ def list_by_status(status: str, limit: int = 50) -> list[dict]:
     return response.get("Items", [])
 
 
+# The approver queue's read (B7b): status-index pages of this many rows,
+# at most this many pages, newest first.
+QUEUE_PAGE_SIZE = 100
+QUEUE_MAX_PAGES = 10
+
+
+def list_by_status_in_lanes(status: str, lanes, limit: int = 50) -> list[dict]:
+    """The newest ``limit`` rows in ``status`` whose lane is in ``lanes``.
+
+    The lane is filtered page by page, before the limit: read the other
+    way (one page of ``limit``, then the lane), public /try pauses filled
+    the page and pushed approval and gate rows out of the approver queue.
+    At most QUEUE_MAX_PAGES pages are read."""
+    wanted = set(lanes)
+    rows: list[dict] = []
+    kwargs = {
+        "IndexName": "status-index",
+        "KeyConditionExpression": "#s = :status",
+        "ExpressionAttributeNames": {"#s": "status"},
+        "ExpressionAttributeValues": {":status": status},
+        "ScanIndexForward": False,
+        "Limit": QUEUE_PAGE_SIZE,
+    }
+    for _ in range(QUEUE_MAX_PAGES):
+        response = _table.query(**kwargs)
+        for row in response.get("Items", []):
+            if row.get("lane", "approval") in wanted:
+                rows.append(row)
+                if len(rows) >= limit:
+                    return rows
+        last = response.get("LastEvaluatedKey")
+        if not last:
+            break
+        kwargs["ExclusiveStartKey"] = last
+    return rows
+
+
 # Rows per status-index page in the sweeper's read (B4).
 SWEEP_PAGE_SIZE = 100
 
@@ -312,7 +349,7 @@ def public_view(item: dict) -> dict:
         ],
         "result_text": error_label(result_text) if status == "ERROR" else result_text,
         "created_ts": int(item.get("created_ts", 0)),
-        # B7a: the queue groups runs by project. A run carries no project
-        # of its own yet, so every run is the canned demo's.
+        # B7a: the queue groups runs by project. A gate run (B7b) carries
+        # its registry project; every other run falls back to Demo.
         "project": str(item.get("project") or "Demo"),
     }
