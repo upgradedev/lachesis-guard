@@ -8,8 +8,10 @@ One command is one TransactWriteItems call:
   version the run was loaded at (a row written before the Unit of Work
   has no version, so version 0 is conditioned on attribute_not_exists);
 - one Put per new domain event on lachesis-run-events (pk approval_id,
-  sk seq, event_id = approval_id#seq), conditioned on attribute_not_exists,
-  so a retried command can never write an event twice;
+  sk seq, event_id = approval_id#seq, plus the run status the command
+  left), conditioned on attribute_not_exists, so a retried command can
+  never write an event twice. The table is the outbox: its stream feeds
+  publisher.py, which relays each new event to EventBridge;
 - optionally, counter Updates on lachesis-approvals (the /try caps),
   conditioned on the cap, so a start consumes its counters only when the
   run row and its first event are written too.
@@ -235,6 +237,9 @@ class DynamoUnitOfWork:
             "seq": seq,
             "event_id": f"{run.approval_id}#{seq}",
             "event_type": event.name,
+            # The run status after the command that wrote this event (all
+            # events of one command share it). The publisher relays it.
+            "status": run.status,
             "run_version": run.loaded_version + 1,
             "at": domain.iso(now),
             "ts": int(now),

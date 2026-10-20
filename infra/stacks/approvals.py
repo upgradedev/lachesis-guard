@@ -14,6 +14,17 @@ lambda/approval/uow.py): the run row on lachesis-approvals plus its
 domain events on lachesis-run-events. TransactWriteItems has no IAM
 action of its own; each item is authorized as its PutItem or UpdateItem,
 so each function is granted only the item actions its code issues.
+
+lachesis-run-events is a transactional outbox (B2): its NEW_IMAGE
+stream feeds the publisher Lambda (approvals/lambda/publisher.py), which
+puts each new event on the custom bus lachesis-events with a whitelisted
+detail. The detail names a run by run_ref (a SHA-256 prefix of the
+approval_id), never by the raw id, because for a /try run the id is the
+bearer token of its decision endpoint. Records that still fail after
+the mapping's retries land on lachesis-publisher-dlq. Alarms on the
+foundation alerts topic: accepted RunFailed entries (an embedded metric
+the publisher writes), each new message on the queue, and the queue's
+depth.
 """
 
 from __future__ import annotations
@@ -25,14 +36,18 @@ import aws_cdk as cdk
 from aws_cdk import aws_apigatewayv2 as apigw
 from aws_cdk import aws_cloudfront as cloudfront
 from aws_cdk import aws_cloudfront_origins as origins
+from aws_cdk import aws_cloudwatch as cloudwatch
+from aws_cdk import aws_cloudwatch_actions as cw_actions
 from aws_cdk import aws_cognito as cognito
 from aws_cdk import aws_dynamodb as dynamodb
 from aws_cdk import aws_events as events
 from aws_cdk import aws_events_targets as targets
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_lambda as lambda_
+from aws_cdk import aws_lambda_event_sources as event_sources
 from aws_cdk import aws_s3 as s3
 from aws_cdk import aws_s3_deployment as s3deploy
+from aws_cdk import aws_sqs as sqs
 from constructs import Construct
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -51,6 +66,15 @@ _KEY_ACTIONS = (
 # the sweeper while it still runs. A dropped resume event is re-dispatched
 # by the sweeper (runner.REDISPATCH_AFTER_S).
 RUNNER_MAX_EVENT_AGE_S = 300
+# The outbox relay (B2). The names are literal because the RunFailed
+# alarm's metric must name exactly what the publisher writes
+# (publisher.METRIC_NAMESPACE, RUN_FAILED_METRIC and its Bus dimension);
+# tests/test_publisher.py pins that they match.
+EVENT_BUS_NAME = "lachesis-events"
+EVENT_SOURCE = "lachesis.approvals"
+RUN_FAILED_RULE_NAME = "lachesis-run-failed"
+OUTBOX_METRIC_NAMESPACE = "Lachesis/Outbox"
+RUN_FAILED_METRIC = "RunFailedPublished"
 LAMBDA_ASSET = str(_REPO_ROOT / "approvals" / "lambda")
 CONSOLE_ASSET = str(_REPO_ROOT / "approvals" / "console")
 
@@ -86,8 +110,8 @@ class ApprovalsStack(cdk.Stack):
         )
 
         # The append-only event log of each run (B1): pk approval_id, sk
-        # the per-run seq, event_id = approval_id#seq. The stream is for a
-        # later consumer; nothing reads it yet.
+        # the per-run seq, event_id = approval_id#seq. It is the outbox:
+        # its stream feeds the publisher below (B2).
         events_table = dynamodb.Table(
             self,
             "RunEventsTable",
@@ -397,7 +421,162 @@ class ApprovalsStack(cdk.Stack):
         )
         runner.add_environment("CONSOLE_URL", f"https://{distribution.domain_name}")
 
+        # --- B2: the outbox relay to EventBridge -----------------------
+        # The custom bus, with the AWS owned key (no kms_key given).
+        bus = events.EventBus(self, "EventsBus", event_bus_name=EVENT_BUS_NAME)
+        # Where a stream batch goes once its retries are spent. Lambda
+        # sends the shard and sequence range, not the record, so a redrive
+        # re-reads lachesis-run-events. SSE-SQS: no new CMK.
+        publisher_dlq = sqs.Queue(
+            self,
+            "PublisherDlq",
+            queue_name="lachesis-publisher-dlq",
+            encryption=sqs.QueueEncryption.SQS_MANAGED,
+            enforce_ssl=True,
+            retention_period=cdk.Duration.days(14),
+            removal_policy=cdk.RemovalPolicy.DESTROY,
+        )
+        publisher = lambda_.Function(
+            self,
+            "Publisher",
+            function_name="lachesis-run-events-publisher",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            handler="publisher.handler",
+            code=code,
+            # The EventBridge client's worst case is about 48 s (3
+            # attempts of 5 s connect plus 10 s read, plus backoff, see
+            # publisher._events); batch_size 10 means one PutEvents call
+            # per invocation, so 60 s leaves room to return
+            # batchItemFailures instead of timing out the whole batch.
+            timeout=cdk.Duration.seconds(60),
+            memory_size=256,
+            environment={"EVENT_BUS_NAME": bus.event_bus_name},
+        )
+        # TRIM_HORIZON: a mapping created or re-created later still relays
+        # every row the stream holds, so the outbox never skips an event.
+        # The first deploy therefore also relays up to 24 h of rows already
+        # written (the stream's retention), and the RunFailed alarm will
+        # fire for any failure from that window: expect one alert after
+        # the first deploy if a run failed in the last day. Consumers
+        # dedupe on event_id, so a replayed event is harmless to them.
+        publisher.add_event_source(
+            event_sources.DynamoEventSource(
+                events_table,
+                starting_position=lambda_.StartingPosition.TRIM_HORIZON,
+                batch_size=10,
+                bisect_batch_on_error=True,
+                retry_attempts=3,
+                report_batch_item_failures=True,
+                filters=[
+                    lambda_.FilterCriteria.filter(
+                        {"eventName": lambda_.FilterRule.is_equal("INSERT")}
+                    )
+                ],
+                on_failure=event_sources.SqsDlq(publisher_dlq),
+            )
+        )
+        # The publisher role is the union of these statements and what
+        # CDK's event source grants on its own (read from CDK, not yet
+        # from the synthesized template): DynamoEventSource grants stream
+        # read on the stream ARN, dynamodb:ListStreams on "*" (that action
+        # has no resource-level scoping) and, because the table uses the
+        # CMK, kms:Decrypt and kms:DescribeKey on it; SqsDlq grants
+        # sqs:SendMessage, GetQueueAttributes and GetQueueUrl on the
+        # queue. The two statements below repeat the send and the decrypt
+        # so the actions the relay needs stay pinned here even if CDK's
+        # grants change. PutEvents is the only grant CDK does not add: on
+        # this bus only, and only with this stack's event source. The
+        # publisher has no table item actions.
+        publisher.add_to_role_policy(
+            iam.PolicyStatement(actions=["sqs:SendMessage"], resources=[publisher_dlq.queue_arn])
+        )
+        foundation.key.grant(publisher, "kms:Decrypt")
+        publisher.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["events:PutEvents"],
+                resources=[bus.event_bus_arn],
+                conditions={"StringEquals": {"events:source": [EVENT_SOURCE]}},
+            )
+        )
+
+        # The rule that names a failed run on the bus, kept as the routing
+        # point for later consumers. It has no target; the alarm below
+        # does not depend on it.
+        events.Rule(
+            self,
+            "RunFailedRule",
+            rule_name=RUN_FAILED_RULE_NAME,
+            event_bus=bus,
+            description="A Lachesis run ended in ERROR (RunFailed from the outbox)",
+            event_pattern=events.EventPattern(source=[EVENT_SOURCE], detail_type=["RunFailed"]),
+        )
+        # A failed run is an alarm, not a rule target: CloudWatch alarm
+        # actions on the existing alerts topic (whose CloudWatch publish
+        # statement ObservabilityStack adds), so this stack never touches
+        # the Foundation topic policy. The metric is the embedded-metric
+        # line the publisher prints after PutEvents accepts a RunFailed
+        # entry, so it does not rest on how AWS/Events publishes rule
+        # metrics for a rule without targets. Embedded metrics need no
+        # cloudwatch:PutMetricData grant; CloudWatch Logs extracts them
+        # from the function's log group. Not verified on AWS yet: check
+        # with list_metrics after the first RunFailed, as was done for
+        # the SageMaker alarms in observability.py (F8).
+        run_failed = cloudwatch.Metric(
+            namespace=OUTBOX_METRIC_NAMESPACE,
+            metric_name=RUN_FAILED_METRIC,
+            dimensions_map={"Bus": EVENT_BUS_NAME},
+            statistic="Sum",
+            period=cdk.Duration.minutes(5),
+        )
+        run_failed_alarm = cloudwatch.Alarm(
+            self,
+            "RunFailedAlarm",
+            metric=run_failed,
+            threshold=1,
+            evaluation_periods=1,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            alarm_description="A Lachesis run ended in ERROR (RunFailed on lachesis-events)",
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+        run_failed_alarm.add_alarm_action(cw_actions.SnsAction(foundation.alerts_topic))
+        # One notification per new give-up: the depth alarm below stays in
+        # ALARM while any message waits (14 days), so a second give-up
+        # would not change its state. NumberOfMessagesSent counts the
+        # SendMessage calls the on-failure destination makes; not yet
+        # observed on AWS for this queue.
+        dlq_sent_alarm = cloudwatch.Alarm(
+            self,
+            "PublisherDlqSentAlarm",
+            metric=publisher_dlq.metric_number_of_messages_sent(
+                period=cdk.Duration.minutes(5), statistic="Sum"
+            ),
+            threshold=1,
+            evaluation_periods=1,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            alarm_description="The outbox publisher gave up on a new stream batch (publisher DLQ)",
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+        dlq_sent_alarm.add_alarm_action(cw_actions.SnsAction(foundation.alerts_topic))
+        # The backlog: messages waiting on the queue. Draining it (after a
+        # redrive from lachesis-run-events by shard and sequence range)
+        # returns this alarm to OK.
+        dlq_alarm = cloudwatch.Alarm(
+            self,
+            "PublisherDlqAlarm",
+            metric=publisher_dlq.metric_approximate_number_of_messages_visible(
+                period=cdk.Duration.minutes(5), statistic="Maximum"
+            ),
+            threshold=1,
+            evaluation_periods=1,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            alarm_description="Outbox publisher DLQ holds messages (drain after redrive)",
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+        dlq_alarm.add_alarm_action(cw_actions.SnsAction(foundation.alerts_topic))
+
         self.events_table = events_table
+        self.event_bus = bus
+        self.publisher_dlq = publisher_dlq
         self.api_url = api.attr_api_endpoint
         self.console_url = f"https://{distribution.domain_name}"
         self.user_pool = pool
