@@ -25,6 +25,20 @@ the mapping's retries land on lachesis-publisher-dlq. Alarms on the
 foundation alerts topic: accepted RunFailed entries (an embedded metric
 the publisher writes), each new message on the queue, and the queue's
 depth.
+
+The runner's async invocations (B4) keep zero retries and a 300 s
+maximum event age, and gain an on-failure destination: the SSE-SQS
+queue lachesis-runner-dlq, with an alarm on each new message. It
+receives only what the runner does not handle itself (an uncaught
+exception, a timeout, an out-of-memory, an event too old to run); not
+yet observed on AWS.
+
+Deploy isolation: the iac workflow deploys this stack with
+--exclusively, so a deploy here never redeploys LachesisFoundation,
+LachesisDecider or LachesisAgent. A change here that needs something
+new in one of those stacks (a new export, or a statement CDK writes
+into a resource another stack owns, such as the Foundation key policy)
+needs that stack deployed first.
 """
 
 from __future__ import annotations
@@ -66,6 +80,8 @@ _KEY_ACTIONS = (
 # the sweeper while it still runs. A dropped resume event is re-dispatched
 # by the sweeper (runner.REDISPATCH_AFTER_S).
 RUNNER_MAX_EVENT_AGE_S = 300
+# The on-failure destination of the runner's async invocations (B4).
+RUNNER_DLQ_NAME = "lachesis-runner-dlq"
 # The outbox relay (B2). The names are literal because the RunFailed
 # alarm's metric must name exactly what the publisher writes
 # (publisher.METRIC_NAMESPACE, RUN_FAILED_METRIC and its Bus dimension);
@@ -259,14 +275,62 @@ class ApprovalsStack(cdk.Stack):
         # and the approver queue.
         grant_store(api_fn, ("GetItem", "PutItem", "UpdateItem", "Query"))
         runner.grant_invoke(api_fn)
-        lambda_.CfnEventInvokeConfig(
+        # B4: where an async runner event goes when the runner fails it
+        # (an uncaught exception, a timeout, an out-of-memory) or when it
+        # waited longer than RUNNER_MAX_EVENT_AGE_S in the Lambda queue.
+        # start and resume catch agent failures and record them on the
+        # run, and a duplicate delivery returns "conflict", so neither
+        # lands here. Lambda sends a record of the request and its error;
+        # the run row stays where it was and the sweeper still closes or
+        # re-dispatches it. SSE-SQS: no new CMK and no key policy change.
+        runner_dlq = sqs.Queue(
+            self,
+            "RunnerDlq",
+            queue_name=RUNNER_DLQ_NAME,
+            encryption=sqs.QueueEncryption.SQS_MANAGED,
+            enforce_ssl=True,
+            retention_period=cdk.Duration.days(14),
+            removal_policy=cdk.RemovalPolicy.DESTROY,
+        )
+        # The L1 destination below grants nothing: the runner role sends
+        # to this queue only through this statement. Lambda checks the
+        # role for it when the invoke config is written; the config
+        # references the function, which CloudFormation creates after its
+        # role policy, and the explicit dependency keeps that order.
+        runner.add_to_role_policy(
+            iam.PolicyStatement(actions=["sqs:SendMessage"], resources=[runner_dlq.queue_arn])
+        )
+        runner_invoke_config = lambda_.CfnEventInvokeConfig(
             self,
             "RunnerInvokeConfig",
             function_name=runner.function_name,
             qualifier="$LATEST",
             maximum_retry_attempts=0,
             maximum_event_age_in_seconds=RUNNER_MAX_EVENT_AGE_S,
+            destination_config=lambda_.CfnEventInvokeConfig.DestinationConfigProperty(
+                on_failure=lambda_.CfnEventInvokeConfig.OnFailureProperty(
+                    destination=runner_dlq.queue_arn
+                )
+            ),
         )
+        runner_invoke_config.node.add_dependency(runner.role)
+        # One notification per failed or dropped runner event, on the
+        # existing alerts topic through a CloudWatch alarm action (no
+        # topic policy change). Not yet observed on AWS for this queue:
+        # the forced-failure drill has not run.
+        runner_dlq_sent_alarm = cloudwatch.Alarm(
+            self,
+            "RunnerDlqSentAlarm",
+            metric=runner_dlq.metric_number_of_messages_sent(
+                period=cdk.Duration.minutes(5), statistic="Sum"
+            ),
+            threshold=1,
+            evaluation_periods=1,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            alarm_description="An async runner event failed or expired (runner DLQ)",
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+        runner_dlq_sent_alarm.add_alarm_action(cw_actions.SnsAction(foundation.alerts_topic))
 
         api = apigw.CfnApi(
             self,
@@ -574,6 +638,7 @@ class ApprovalsStack(cdk.Stack):
         )
         dlq_alarm.add_alarm_action(cw_actions.SnsAction(foundation.alerts_topic))
 
+        self.runner_dlq = runner_dlq
         self.events_table = events_table
         self.event_bus = bus
         self.publisher_dlq = publisher_dlq
