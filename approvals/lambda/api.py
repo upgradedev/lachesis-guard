@@ -26,6 +26,7 @@ import common
 from botocore.exceptions import ClientError
 
 RUNNER_ARN = os.environ.get("RUNNER_ARN", "")
+COUNTER_TTL_SECONDS = 2 * 86400
 # The governed calls must be ones Decider has to judge (F2): no
 # secret-shaped string anywhere, so the deterministic scan stays silent.
 # The first call is a benign write whose content the prompt dictates
@@ -70,15 +71,28 @@ def _is_approver(event: dict) -> bool:
 
 
 def _counter_ok(key: str, cap: int) -> bool:
-    """One DynamoDB counter row caps a counter per UTC day."""
+    """One DynamoDB counter row caps a counter per UTC day.
+
+    The row carries a ttl two days out, set on its first write, so the
+    table's TTL removes it (and the visitor address in its key) once the
+    day it counts is over."""
+    import time as _time
+
     table = common._table
     try:
         response = table.update_item(
             Key={"approval_id": key},
-            UpdateExpression="SET #c = if_not_exists(#c, :zero) + :one",
+            UpdateExpression=(
+                "SET #c = if_not_exists(#c, :zero) + :one, #t = if_not_exists(#t, :ttl)"
+            ),
             ConditionExpression="attribute_not_exists(#c) OR #c < :cap",
-            ExpressionAttributeNames={"#c": "count"},
-            ExpressionAttributeValues={":zero": 0, ":one": 1, ":cap": cap},
+            ExpressionAttributeNames={"#c": "count", "#t": "ttl"},
+            ExpressionAttributeValues={
+                ":zero": 0,
+                ":one": 1,
+                ":cap": cap,
+                ":ttl": int(_time.time()) + COUNTER_TTL_SECONDS,
+            },
             ReturnValues="ALL_NEW",
         )
     except ClientError as exc:

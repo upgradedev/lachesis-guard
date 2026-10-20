@@ -163,7 +163,9 @@ def main() -> int:
         deadline = time.time() + 900
         while time.time() < deadline:
             _, view = _call(api_url, "GET", f"/approvals/{approval_id}", approver)
-            if view.get("status") in {"DONE", "REFUSED_DONE", "EXPIRED"}:
+            # ERROR is terminal too: an agent error ends the wait at once
+            # instead of after the full deadline.
+            if view.get("status") in {"DONE", "REFUSED_DONE", "EXPIRED", "ERROR"}:
                 break
             if view.get("status") == "PENDING":
                 # A later call paused again (fail-closed while the GPU was
@@ -176,13 +178,22 @@ def main() -> int:
                     {"decision": "approve"},
                 )
             time.sleep(10)
-        assert view.get("status") == "DONE", f"resume did not finish: {view}"
+        assert view.get("status") == "DONE", (
+            f"resume did not finish: status {view.get('status')}, "
+            f"result {view.get('result_text', '')!r}"
+        )
         print("resume completed ok")
 
         status, trial = _call(api_url, "POST", "/try", None, {})
         assert status == 202, trial
         token = trial["token"]
+        # POST /try returns the token before the async runner writes the
+        # row, so a 404 right after it is expected for a few seconds.
+        deadline = time.time() + 20
         status, view = _call(api_url, "GET", f"/try/{token}", None)
+        while status == 404 and time.time() < deadline:
+            time.sleep(2)
+            status, view = _call(api_url, "GET", f"/try/{token}", None)
         assert status == 200, view
         status, _ = _call(api_url, "GET", "/try/appr-foreign-token", None)
         assert status == 404, f"foreign token must be 404, got {status}"

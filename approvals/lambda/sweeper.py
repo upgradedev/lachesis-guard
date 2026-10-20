@@ -6,5 +6,5 @@ from __future__ import annotations
 import runner
 
 
-def handler(_event, _context):
-    return runner.sweep()
+def handler(_event, context):
+    return runner.sweep(context)

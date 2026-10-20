@@ -22,6 +22,8 @@ Every agent answer goes through contract.read_result: an agent error
 A failed resume returns to PENDING, where a person could decide again,
 only when common.failed_before_send proves the agent was never invoked;
 any other failure may already have run the paused call and ends ERROR.
+A start is retried twice, with a short backoff, only for those pre-send
+failures and for a throttling or quota refusal (START_RETRY_CODES).
 """
 
 from __future__ import annotations
@@ -29,10 +31,12 @@ from __future__ import annotations
 import html
 import json
 import os
+import time
 
 import boto3
 import common
 import contract
+from botocore.exceptions import ClientError
 
 SES_FROM = os.environ.get("SES_FROM", "")
 SES_TO = os.environ.get("SES_TO", "")
@@ -112,12 +116,68 @@ def _pending_card(result: dict) -> dict:
     }
 
 
-def start(prompt: str, lane: str, approval_id: str = "") -> dict:
+# Margin left after an agent call for the outcome write, and the least
+# Lambda time the sweeper needs before it starts another expiry resume.
+OUTCOME_MARGIN_S = 20
+SWEEP_MIN_BUDGET_S = 60
+
+# A start is retried only when the request provably did not run the
+# agent: it failed before it was sent, or the service refused it with
+# one of these codes. A resume is never retried here (see resume).
+START_RETRY_CODES = frozenset({"ThrottlingException", "ServiceQuotaExceededException"})
+START_BACKOFF_S = (1.0, 2.0)
+_sleep = time.sleep
+
+
+def _remaining_s(context) -> float | None:
+    """Seconds left in this Lambda invocation, or None without a context."""
+    get = getattr(context, "get_remaining_time_in_millis", None)
+    return get() / 1000.0 if callable(get) else None
+
+
+def _read_timeout(context) -> float:
+    """The agent read timeout: the remaining Lambda time minus the margin
+    for the outcome write, capped at common.AGENT_READ_TIMEOUT, so a slow
+    run ends in a recorded ReadTimeoutError and not in a Lambda timeout
+    that leaves the row behind."""
+    remaining = _remaining_s(context)
+    if remaining is None:
+        return float(common.AGENT_READ_TIMEOUT)
+    return max(5.0, min(float(common.AGENT_READ_TIMEOUT), remaining - OUTCOME_MARGIN_S))
+
+
+def _start_retryable(exc: BaseException) -> bool:
+    if common.failed_before_send(exc):
+        return True
+    # isinstance, not an exact type: botocore raises modeled errors such
+    # as ThrottlingException as ClientError subclasses. Any ClientError
+    # carries a service response, so only its code decides.
+    if isinstance(exc, ClientError):
+        return exc.response.get("Error", {}).get("Code") in START_RETRY_CODES
+    return False
+
+
+def _invoke_start(session_id: str, prompt: str, context) -> dict:
+    for backoff in (*START_BACKOFF_S, None):
+        try:
+            return common.invoke_agent(
+                session_id,
+                {"prompt": prompt, "session_id": session_id},
+                read_timeout=_read_timeout(context),
+            )
+        except Exception as exc:
+            if backoff is None or not _start_retryable(exc):
+                raise
+            _sleep(backoff)
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+def start(prompt: str, lane: str, approval_id: str = "", context=None) -> dict:
     approval_id = approval_id or common.new_approval_id()
     session_id = common.new_session_id()
     common.create_row(approval_id, session_id, lane)
     try:
-        raw = common.invoke_agent(session_id, {"prompt": prompt, "session_id": session_id})
+        raw = _invoke_start(session_id, prompt, context)
     except Exception as exc:
         common.transition(approval_id, "STARTING", "ERROR", result_text=common.error_text(exc))
         return {"status": "error", "approval_id": approval_id}
@@ -141,26 +201,26 @@ def start(prompt: str, lane: str, approval_id: str = "") -> dict:
     return {"status": "interrupt", "approval_id": approval_id}
 
 
-def _decision_entry(row: dict, status: str) -> dict:
+def _decision_entry(row: dict, status: str, suffix: str = "") -> dict:
     """One history entry for the decision a resume consumed. The Cognito
-    sub is not copied: the history is public, the sub is not."""
+    sub is not copied: the history is public, the sub is not. ``suffix``
+    "_not_sent" marks a decision whose resume failed before the agent was
+    invoked (see _attempt_failed)."""
     return {
-        "decision": "approve" if status == "APPROVED" else "decline",
+        "decision": ("approve" if status == "APPROVED" else "decline") + suffix,
         "decided_by_name": str(row.get("decided_by_name", "")),
         "at": str(row.get("decided_at") or common.now_iso()),
     }
 
 
-def resume(approval_id: str) -> dict:
+def resume(approval_id: str, context=None) -> dict:
     row = common.get(approval_id)
     if row is None:
         return {"status": "missing"}
     status = row["status"]
     if status not in {"APPROVED", "DECLINED"}:
         return {"status": "noop", "current": status}
-    import time as _time
-
-    moved = common.transition(approval_id, status, "RESUMING", resuming_ts=int(_time.time()))
+    moved = common.transition(approval_id, status, "RESUMING", resuming_ts=int(time.time()))
     if moved is None:
         return {"status": "noop", "current": "moved-by-another"}
     answer = "y" if status == "APPROVED" else "no"
@@ -175,11 +235,12 @@ def resume(approval_id: str) -> dict:
                     for item in interrupts
                 ],
             },
+            read_timeout=_read_timeout(context),
         )
     except Exception as exc:  # never strand a row in RESUMING
         if common.failed_before_send(exc):
             # The agent was never invoked: the decision can be taken again.
-            return {"status": "error-resumable", "current": _attempt_failed(row)}
+            return {"status": "error-resumable", "current": _attempt_failed(row, status)}
         # The request may have reached the agent, so the paused call may
         # already have run: nobody may be asked to decide it a second time.
         common.transition(approval_id, "RESUMING", "ERROR", result_text=common.error_text(exc))
@@ -190,8 +251,9 @@ def resume(approval_id: str) -> dict:
         # pending state on the same approval id, with a renewed expiry
         # window. The decision just consumed is appended to the history,
         # and decided_by / decided_by_name are kept, so a re-pause never
-        # erases who decided first. The next decision overwrites them.
-        now = int(_time.time())
+        # erases who decided first. The next decision overwrites them;
+        # public_view shows no name while the row is PENDING or EXPIRED.
+        now = int(time.time())
         history = row.get("decisions") if isinstance(row.get("decisions"), list) else []
         updated = common.transition(
             approval_id,
@@ -215,25 +277,41 @@ def resume(approval_id: str) -> dict:
 MAX_SWEEP_ATTEMPTS = 3
 
 
-def _attempt_failed(item: dict) -> str:
+def _attempt_failed(item: dict, decided: str = "") -> str:
     """Count a resume attempt that failed before the agent was invoked
     (common.failed_before_send); the third such failure is terminal.
-    Never call this for a failure that may have reached the agent."""
+    Never call this for a failure that may have reached the agent.
+
+    ``decided`` is the APPROVED or DECLINED status a person set, empty
+    for a sweeper expiry. When the row returns to PENDING, that decision
+    was made but never sent: it is appended to ``decisions`` as
+    "<choice>_not_sent" and the current-decision fields are cleared, so
+    the next decision neither overwrites it nor inherits its name."""
     attempts = int(item.get("sweep_attempts", 0)) + 1
     if attempts >= MAX_SWEEP_ATTEMPTS:
         common.transition(
             item["approval_id"], "RESUMING", "ERROR", sweep_attempts=attempts
         )
         return "ERROR"
-    common.transition(
-        item["approval_id"], "RESUMING", "PENDING", sweep_attempts=attempts
-    )
+    fields: dict = {"sweep_attempts": attempts}
+    if decided:
+        history = item.get("decisions") if isinstance(item.get("decisions"), list) else []
+        fields.update(
+            decisions=[*history, _decision_entry(item, decided, "_not_sent")],
+            **NOBODY_DECIDED,
+        )
+    common.transition(item["approval_id"], "RESUMING", "PENDING", **fields)
     return "PENDING"
 
 
-def sweep() -> dict:
-    import time
+# Clears the current-decision fields when a pause ends with nobody
+# deciding it. A re-pause keeps the previous pause's decider in the row;
+# without this, an expiry would be credited to that person. The earlier
+# decisions stay in ``decisions``.
+NOBODY_DECIDED = {"decided_by": "", "decided_by_name": "", "decided_at": ""}
 
+
+def sweep(context=None) -> dict:
     # Rows whose start invoke failed after create_row sit in STARTING;
     # anything older than ten minutes there is terminal.
     closed_starting = 0
@@ -272,6 +350,7 @@ def sweep() -> dict:
         if int(item.get("expires_ts", 0)) < int(time.time())
     ]
     closed_try = 0
+    deferred = 0
     for item in expired:
         if item.get("lane") == "try":
             # A public /try pause that nobody decided simply ends. It
@@ -279,11 +358,24 @@ def sweep() -> dict:
             # and wakes the Decider GPU a second time for a run nobody
             # is watching (measured 2026-10-15: expiries at 21:54 and
             # 22:09 UTC each re-woke it).
-            if common.transition(item["approval_id"], "PENDING", "EXPIRED") is not None:
+            if (
+                common.transition(item["approval_id"], "PENDING", "EXPIRED", **NOBODY_DECIDED)
+                is not None
+            ):
                 closed_try += 1
             continue
+        remaining = _remaining_s(context)
+        if remaining is not None and remaining < SWEEP_MIN_BUDGET_S:
+            # Not enough Lambda time for another resume: the row stays
+            # PENDING and the next sweep resumes it.
+            deferred += 1
+            continue
         moved = common.transition(
-            item["approval_id"], "PENDING", "RESUMING", resuming_ts=int(time.time())
+            item["approval_id"],
+            "PENDING",
+            "RESUMING",
+            resuming_ts=int(time.time()),
+            **NOBODY_DECIDED,
         )
         if moved is None:
             continue
@@ -298,6 +390,7 @@ def sweep() -> dict:
                         for entry in interrupts
                     ],
                 },
+                read_timeout=_read_timeout(context),
             )
         except Exception as exc:  # never crash the sweep
             if common.failed_before_send(exc):
@@ -317,19 +410,21 @@ def sweep() -> dict:
         "rescued": rescued,
         "closed_starting": closed_starting,
         "closed_try": closed_try,
+        "deferred": deferred,
     }
 
 
-def handler(event, _context):
+def handler(event, context):
     action = event.get("action")
     if action == "start":
         return start(
             str(event.get("prompt", "")),
             str(event.get("lane", "approval")),
             str(event.get("approval_id", "")),
+            context=context,
         )
     if action == "resume":
-        return resume(str(event.get("approval_id", "")))
+        return resume(str(event.get("approval_id", "")), context=context)
     if action == "sweep":
-        return sweep()
+        return sweep(context)
     return {"status": "error", "error": f"unknown action {action!r}"}
