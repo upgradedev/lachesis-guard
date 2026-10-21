@@ -1442,15 +1442,25 @@ def test_the_console_projects_view_renders_only_backend_numbers():
     assert 'get("/" + encodeURIComponent(key) + "/activity")' in block
     assert "Do not record or share this screen." in block
     assert 'let projPriv = false;' in js and "projPriv = e.target.checked; route();" in js
-    # The tile number and the commit mix are named apart.
-    assert 'p.flagged_changes + " flagged changes"' in block
+    # The tile number and the commit mix are named apart. The number is a
+    # sum of scan findings, not of changes, and a cut count says so.
+    assert ('p.flagged_changes + " scan findings" + (p.counts_truncated ? " (count cut)" : "")'
+            in block)
+    assert '" flagged changes"' not in block
     assert '"Commits by deterministic scan: "' in block and '"Actors (by trailer): "' in block
+    # The approver tile names each repository's ingest status and stall count.
+    assert 'b.lane === "approver" ? ", ingest " + (r.ingest_status || "not run yet")' in block
+    assert '", stalled " + r.stalled_runs + " runs"' in block
+    # Commits dated in the future are listed apart, under their own label.
+    assert "later = b.dated_in_future || []" in block and '"Dated in the future"' in block
+    assert "b.dated_in_future_truncated" in block and "table(later)" in block
     # A secret finding on the anonymous lane has no path.
     assert '(f.path ? f.path + ": " : "") + f.reason' in block
     # Counts are the backend's: nothing is counted or scored in the page.
     assert "length +" not in block and "reduce(" not in block
     assert "confidence" not in block and "meter(" not in block
-    for field in ("p.flagged_changes", "p.commits", "p.by_actor_kind", "p.by_scan_verdict",
+    for field in ("p.flagged_changes", "p.counts_truncated", "r.ingest_status", "r.stalled_runs",
+                  "p.commits", "p.by_actor_kind", "p.by_scan_verdict",
                   "b.window_days", "b.hidden_repos", "b.scan_label", "c.files_changed",
                   "c.co_author_agents", "f.reason", "c.finding_count", "c.future_dated"):
         assert field in block, field

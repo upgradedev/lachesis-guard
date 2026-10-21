@@ -1318,7 +1318,7 @@ def test_console_try_start_race_keeps_polling():
     assert "handle = later(tick, 2000)" in js
     assert "on404(out); return;" in js and "on404(); return;" in js
     html = _console("index.html")
-    assert "app.js?v=20261021a" in html
+    assert "app.js?v=20261021d" in html
 
 
 def test_console_hides_previous_approver_on_a_fresh_pause():
