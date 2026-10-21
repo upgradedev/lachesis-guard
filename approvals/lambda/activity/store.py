@@ -11,17 +11,23 @@ Keys: pk ``project_repo`` ("<project key>#<owner>/<name>"), sk ``sk``.
   anyone can set), so such a row expires a window after it was written.
   The repository row remembers at most service.MAX_FUTURE such commits;
   one it cannot remember is listed again, so its row is written again
-  after it expires, and every run that sees more of them than the cap
-  is reported failed (the ingest alarm then names the repository).
+  after it expires. The row stores how many it could not remember
+  (``future_over_cap``), and a run that counts more than that is
+  reported failed. Only the run log line names the repository:
+  IngestFailed carries a count of repositories, and IngestErrorsAlarm
+  is the ingest Lambda's Errors metric.
 - The repository row has sk "#meta": the GitHub ``private`` flag, the
-  ingest cursor, the last activity time, the window counts and
-  ``stalled_runs``. "#" sorts before every digit, so every commit-row
-  read is a Query with sk above the window floor, which never returns it.
+  ingest cursor, the last activity time, the window counts,
+  ``stalled_runs`` and ``future_over_cap``. "#" sorts before every
+  digit, so every commit-row read is a Query with sk above the window
+  floor, which never returns it.
 
 Reads: the window counts read every row above the window floor, future
-dated or not. The page of recent commits stops at dated_ceiling(now), so
-a commit dated in the future never pushes a real one off the page;
-``future`` lists those rows apart.
+dated or not, at most MAX_WINDOW_ROWS; when more are left unread, the
+commit count, both mixes and the findings are all cut, and the row's
+``counts_truncated`` says so. The page of recent commits stops at
+dated_ceiling(now), so a commit dated in the future never pushes a real
+one off the page; ``future`` lists those rows apart.
 
 Stored per commit: the project, repository, sha, commit time, actor login
 and git name, actor kind, co-author agents, subject line, the changed

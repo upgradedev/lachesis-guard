@@ -33,9 +33,13 @@
    clock never moves the cursor: a committer date is whatever the
    committer set, and a cursor in the future would hide every later
    commit. Re-listing is harmless: the writes are idempotent. The
-   repository row remembers at most MAX_FUTURE future-dated commits; a
-   run that sees more reports the repository failed
-   (``future_over_cap``), since the rest are fetched again every run.
+   repository row remembers at most MAX_FUTURE future-dated commits; the
+   rest are fetched again every run, and every run logs how many
+   (``future_over_cap``). The row stores that count, and a run reports
+   the repository failed only when its count is above the stored one, so
+   one over-cap condition fails one run, not every run after it. A run
+   that stopped early saw only part of the listing, so it never lowers
+   the stored count.
 5. Recount the window (actor kinds, scan verdicts, findings) from the
    table and store the counts on the repository row, so GET /projects
    reads one row per repository.
@@ -77,8 +81,10 @@ from activity import store as activity_store
 MAX_COMMITS_PER_RUN = 60
 WINDOW_S = activity_store.WINDOW_S
 # The most future-dated commits one repository row remembers. More are
-# fetched again each run (idempotent), and the run reports the repository
-# failed, so the alarm names it instead of the re-fetch going unseen.
+# fetched again each run (idempotent) and counted in the run log line,
+# which names the repository; a run whose count grew is reported failed,
+# so IngestErrorsAlarm sees it. The alarm names no repository: IngestFailed
+# carries only a count, and the alarm is the Lambda Errors metric.
 MAX_FUTURE = 200
 # Stalled runs in a row (github_error or publish_failed, nothing handled,
 # the cursor held) from which the run reports the repository failed.
@@ -95,8 +101,9 @@ STORE_ERROR = "store_error"
 ERROR = "error"
 AUTH_FAILED = "auth_failed"  # GitHub refused the token (401): revoked or expired
 # A run with one of these, with a commit not stored, with STALL_RUNS
-# stalled runs or with more future-dated commits than MAX_FUTURE is
-# reported failed by the ingest Lambda, so IngestErrorsAlarm fires.
+# stalled runs or with a future_over_cap count above its row's stored one
+# is reported failed by the ingest Lambda, so IngestErrorsAlarm fires
+# (the alarm names no repository; the run log line does).
 FAILED = frozenset({STORE_ERROR, ERROR, AUTH_FAILED})
 # The statuses that count as a stalled run (see the module docstring).
 STALLS = frozenset({GITHUB_ERROR, PUBLISH_FAILED})
@@ -115,6 +122,7 @@ class RepoResult:
     errors: list[str] = field(default_factory=list)
     stalled_runs: int = 0
     future_over_cap: int = 0  # future-dated commits the row cannot remember
+    future_over_cap_before: int = 0  # the count the repository row stored
 
     @property
     def failed(self) -> bool:
@@ -122,7 +130,7 @@ class RepoResult:
             self.status in FAILED
             or bool(self.errors)
             or self.stalled_runs >= STALL_RUNS
-            or self.future_over_cap > 0
+            or self.future_over_cap > self.future_over_cap_before
         )
 
     def as_log(self) -> dict[str, Any]:
@@ -140,9 +148,13 @@ class RepoResult:
         }
 
 
-def _stalled_before(meta: dict[str, Any]) -> int:
-    count = meta.get("stalled_runs")
+def _stored_count(meta: dict[str, Any], name: str) -> int:
+    count = meta.get(name)
     return count if isinstance(count, int) and not isinstance(count, bool) and count > 0 else 0
+
+
+def _stalled_before(meta: dict[str, Any]) -> int:
+    return _stored_count(meta, "stalled_runs")
 
 
 def _listed_at(summary: dict[str, Any]) -> str:
@@ -342,6 +354,15 @@ def ingest_repo(
     future = {entry for entry in future if entry.rsplit("#", 1)[0] >= cursor}
     future |= {f"{when}#{sha}" for when, sha in handled if not dated_now(when)}
     result.future_over_cap = max(0, len(future) - MAX_FUTURE)
+    result.future_over_cap_before = _stored_count(meta, "future_over_cap")
+    # Only a run that handled its whole listing saw every such commit; one
+    # that stopped early keeps the higher count, so the next full run does
+    # not read the same condition as new (see step 4).
+    over_cap_stored = (
+        result.future_over_cap
+        if result.status == OK
+        else max(result.future_over_cap, result.future_over_cap_before)
+    )
     result.cursor = cursor
     progressed = bool(handled) or cursor != str(meta.get("cursor") or "")
     if result.status in STALLS and not progressed:
@@ -360,6 +381,7 @@ def ingest_repo(
             "cursor": cursor,
             "seen_at_cursor": sorted(new_seen),
             "future_dated": sorted(future)[:MAX_FUTURE],
+            "future_over_cap": over_cap_stored,
             "last_activity_at": last_activity,
             "stalled_runs": result.stalled_runs,
             **window_counts(store, project_repo, now),
