@@ -1507,6 +1507,10 @@ def test_the_console_projects_view_renders_only_backend_numbers():
                    'id="projects-private"', "do not record or share it"):
         assert needle in view, needle
     assert "by a person, a person with a coding agent" not in view
+    # The copy names no agent product: the trailer names "a coding agent".
+    assert "agent-assisted means a trailer names a coding agent, and" in view
+    for name in ("Claude", "Codex", "Gemini"):
+        assert name not in view, name
     block = js[js.index("function viewProjects(key)"):js.index("function viewDetail(id)")]
     assert "innerHTML" not in block and "insertAdjacentHTML" not in block
     # The anonymous lane is the default, also when signed in; the approver
@@ -1525,7 +1529,18 @@ def test_the_console_projects_view_renders_only_backend_numbers():
     assert '"Commits by deterministic scan: "' in block and '"Actors (by trailer): "' in block
     # The approver tile names each repository's ingest status and stall count.
     assert 'b.lane === "approver" ? ", ingest " + (r.ingest_status || "not run yet")' in block
-    assert '", stalled " + r.stalled_runs + " runs"' in block
+    # One stalled run is "1 run", not "1 runs".
+    assert ('", stalled " + r.stalled_runs + (r.stalled_runs === 1 ? " run" : " runs")'
+            in block)
+    assert '", stalled " + r.stalled_runs + " runs"' not in block
+    # A cut window read cuts the commit count and both mixes too, so each
+    # says so, not only the findings number.
+    tile = block[block.index('"Last activity: "'):]
+    for label in ('" commits"', '"Actors (by trailer): " + mix(p.by_actor_kind)',
+                  '"Commits by deterministic scan: " + mix(p.by_scan_verdict)'):
+        assert label in tile, label
+    assert '].map(t => sub(t + (p.counts_truncated ? " (count cut)" : "")))' in tile
+    assert 'sub = t => h("span", { class: "tile-sub", text: t })' in block
     # Commits dated in the future are listed apart, under their own label.
     assert "later = b.dated_in_future || []" in block and '"Dated in the future"' in block
     assert "b.dated_in_future_truncated" in block and "table(later)" in block
@@ -1544,3 +1559,10 @@ def test_the_console_projects_view_renders_only_backend_numbers():
     # The queue groups by project; a run without one is the demo's.
     queue = js[js.index("function viewQueue()"):js.index("function viewProjects(key)")]
     assert '"Project: " + grp' in queue and 'v.project || "Demo"' in queue
+    # The headers show only when the rows span more than one project: a
+    # demo-only queue renders as it was recorded, with no "Project: Demo"
+    # row. With one project, grp starts at it, so no row differs from it.
+    assert ('let grp = new Set(rows.map(v => v.project || "Demo")).size > 1 ? null'
+            ' : (rows[0] || {}).project || "Demo";') in queue
+    assert "let grp = null;" not in queue
+    assert queue.index("let grp = new Set(") < queue.index('"Project: " + grp')
