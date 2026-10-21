@@ -32,10 +32,26 @@
    published. A commit dated more than store.SKEW_S past the ingest's
    clock never moves the cursor: a committer date is whatever the
    committer set, and a cursor in the future would hide every later
-   commit. Re-listing is harmless: the writes are idempotent.
+   commit. Re-listing is harmless: the writes are idempotent. The
+   repository row remembers at most MAX_FUTURE future-dated commits; a
+   run that sees more reports the repository failed
+   (``future_over_cap``), since the rest are fetched again every run.
 5. Recount the window (actor kinds, scan verdicts, findings) from the
    table and store the counts on the repository row, so GET /projects
    reads one row per repository.
+
+A stalled repository fails the run. A run that ends github_error or
+publish_failed with no commit handled and the cursor where it was adds
+one to the row's ``stalled_runs``; a run that ends ok or more, or that
+moved the cursor or handled a commit, sets it back to 0. From
+STALL_RUNS stalled runs on (about an hour at the 15-minute schedule),
+every stalled run is reported failed, so a commit GitHub never serves,
+or an event the bus always refuses, raises IngestErrorsAlarm instead of
+freezing the repository in silence.
+
+The ``private`` flag is written once per run, in step 1, and never
+again: the last write of a run never stores a flag read before an
+overlapping run read a newer one.
 
 Known limits: GitHub's ``since`` filters on the committer date, so a
 commit whose committer date is older than the cursor when it reaches the
@@ -60,9 +76,13 @@ from activity import store as activity_store
 
 MAX_COMMITS_PER_RUN = 60
 WINDOW_S = activity_store.WINDOW_S
-# The most future-dated commits one repository row remembers; more are
-# fetched again each run (idempotent, it only costs requests).
+# The most future-dated commits one repository row remembers. More are
+# fetched again each run (idempotent), and the run reports the repository
+# failed, so the alarm names it instead of the re-fetch going unseen.
 MAX_FUTURE = 200
+# Stalled runs in a row (github_error or publish_failed, nothing handled,
+# the cursor held) from which the run reports the repository failed.
+STALL_RUNS = 4
 
 OK = "ok"
 MORE = "more"
@@ -74,9 +94,12 @@ DEADLINE = "deadline"
 STORE_ERROR = "store_error"
 ERROR = "error"
 AUTH_FAILED = "auth_failed"  # GitHub refused the token (401): revoked or expired
-# A run with one of these, or with a commit not stored, is reported failed
-# by the ingest Lambda, so IngestErrorsAlarm fires.
+# A run with one of these, with a commit not stored, with STALL_RUNS
+# stalled runs or with more future-dated commits than MAX_FUTURE is
+# reported failed by the ingest Lambda, so IngestErrorsAlarm fires.
 FAILED = frozenset({STORE_ERROR, ERROR, AUTH_FAILED})
+# The statuses that count as a stalled run (see the module docstring).
+STALLS = frozenset({GITHUB_ERROR, PUBLISH_FAILED})
 
 
 @dataclass
@@ -90,10 +113,17 @@ class RepoResult:
     private: bool | None = None
     cursor: str = ""
     errors: list[str] = field(default_factory=list)
+    stalled_runs: int = 0
+    future_over_cap: int = 0  # future-dated commits the row cannot remember
 
     @property
     def failed(self) -> bool:
-        return self.status in FAILED or bool(self.errors)
+        return (
+            self.status in FAILED
+            or bool(self.errors)
+            or self.stalled_runs >= STALL_RUNS
+            or self.future_over_cap > 0
+        )
 
     def as_log(self) -> dict[str, Any]:
         """The run log line: counts and status only."""
@@ -105,7 +135,14 @@ class RepoResult:
             "published": self.published,
             "skipped": self.skipped,
             "commits_not_stored": len(self.errors),
+            "stalled_runs": self.stalled_runs,
+            "future_dated_over_cap": self.future_over_cap,
         }
+
+
+def _stalled_before(meta: dict[str, Any]) -> int:
+    count = meta.get("stalled_runs")
+    return count if isinstance(count, int) and not isinstance(count, bool) and count > 0 else 0
 
 
 def _listed_at(summary: dict[str, Any]) -> str:
@@ -232,6 +269,9 @@ def ingest_repo(
         fields = {**base, "status": result.status}
         if 400 <= exc.status < 500:
             fields["private"] = None  # refused: visibility unknown, so hidden
+        if result.status in STALLS:  # nothing handled, the cursor held
+            result.stalled_runs = _stalled_before(meta) + 1
+            fields["stalled_runs"] = result.stalled_runs
         store.save_meta(project_repo, fields)
         return result
     # Only an explicit false is public: a missing flag is treated as private.
@@ -301,17 +341,27 @@ def ingest_repo(
     # A future-dated commit stays remembered while a listing can return it.
     future = {entry for entry in future if entry.rsplit("#", 1)[0] >= cursor}
     future |= {f"{when}#{sha}" for when, sha in handled if not dated_now(when)}
+    result.future_over_cap = max(0, len(future) - MAX_FUTURE)
     result.cursor = cursor
+    progressed = bool(handled) or cursor != str(meta.get("cursor") or "")
+    if result.status in STALLS and not progressed:
+        result.stalled_runs = _stalled_before(meta) + 1
+    elif result.status in (OK, MORE) or progressed:
+        result.stalled_runs = 0
+    else:  # a deadline, a rate limit or a store failure: neither way
+        result.stalled_runs = _stalled_before(meta)
+    # No "private" here: step 1 stored it, and writing the flag read at
+    # the start again could undo a newer flag an overlapping run stored.
     store.save_meta(
         project_repo,
         {
             **base,
             "status": result.status,
-            "private": private,
             "cursor": cursor,
             "seen_at_cursor": sorted(new_seen),
             "future_dated": sorted(future)[:MAX_FUTURE],
             "last_activity_at": last_activity,
+            "stalled_runs": result.stalled_runs,
             **window_counts(store, project_repo, now),
         },
     )
