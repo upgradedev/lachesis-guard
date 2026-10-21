@@ -18,8 +18,9 @@ of GitHub's patch, scanned as it is (scan.text_findings), never through
 a rebuilt diff. Beside the scan rules, the gate adds scan_incomplete
 whenever part of a change was not read: GitHub listed more files than
 the gate read (or none at all), a file's added text passed
-scan.SCAN_CHARS, a path was cut or holds control characters, the scan's
-budget for the pull request ran out, or GitHub returned no diff for a
+scan.SCAN_CHARS, a path was cut or holds control characters (format
+characters such as bidi overrides and zero-width marks included), the
+scan's budget for the pull request ran out, or GitHub returned no diff for a
 file that adds lines. A binary file (no additions, no patch) is checked
 by its path only. What was not read is never called clean.
 
@@ -31,14 +32,17 @@ never in place of it.
 The card a person decides on lists the flagged changes (path, rules and
 fixed reasons, never a matched line) and goes only to the approver lane.
 Paths on the card are shown with control characters escaped (shown()),
-so a file name cannot forge a line of the card. The summary GET
-/gate/{id} answers with holds counts only: no path, no reason, no
-excerpt.
+so a file name cannot forge a line of the card, and the card stops
+listing changes before it passes CARD_MAX_BYTES as stored, so a pull
+request of long non-ASCII paths still fits its DynamoDB row. The
+summary GET /gate/{id} answers with holds counts only: no path, no
+reason, no excerpt.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -57,12 +61,24 @@ MAX_FILES = FILE_PAGES * 100
 MAX_PATH_CHARS = 400
 # Flagged changes the card lists by name; the rest are counted.
 CARD_CHANGES = 20
+# The card's reason and changed_files as stored (json.dumps with the
+# default ensure_ascii, so an astral character costs 12 bytes) stop
+# growing before the whole stored card passes this many bytes; a DynamoDB
+# item holds at most 400 KB. CARD_OTHER_BYTES is kept for the card's
+# other keys (tool, layer, the timestamps), which take about 250.
+CARD_MAX_BYTES = 300_000
+CARD_OTHER_BYTES = 1024
 # Gate runs per pull-request head: an EXPIRED or ERROR run may be retried
 # under the next round's id, at most this many times.
 MAX_ROUNDS = 5
 
 _SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
-_CONTROL = frozenset({"Cc", "Zl", "Zp"})
+# Cc: C0 and C1 controls. Cf: format characters, such as the bidi
+# overrides and isolates (U+202A-202E, U+2066-2069), zero-width marks
+# (U+200B-200F, U+FEFF), U+061C and the tag block, which can reorder a
+# path on screen or make it look like another one. Zl, Zp: the line and
+# paragraph separators.
+_CONTROL = frozenset({"Cc", "Cf", "Zl", "Zp"})
 
 FILES_NOT_SENT = "(files not read)"
 REASON_LIST_CUT = "GitHub listed more changed files than the gate read; the rest were not read"
@@ -175,9 +191,11 @@ def _is_control(ch: str) -> bool:
 
 
 def shown(text: str) -> str:
-    """A path as the card shows it: every control character (C0, C1 and
-    the Unicode line and paragraph separators) escaped, so it stays on
-    one line and cannot pass for a line of the card."""
+    """A path as the card shows it: every control character (C0, C1, the
+    Unicode format characters such as bidi overrides and zero-width
+    marks, and the line and paragraph separators) escaped, so it stays
+    on one line, shows in the order it is stored, and cannot pass for a
+    line of the card or for another path."""
     return "".join(
         ch.encode("unicode_escape").decode("ascii") if _is_control(ch) else ch for ch in text
     )
@@ -289,13 +307,18 @@ def scan_pull(pull: PullRequest) -> GateScan:
 # --- what is recorded -----------------------------------------------------
 
 
-def gate_id(pull: PullRequest | Request, round_: int) -> str:
-    """The approval id of a pull-request head's gate run in ``round_``.
-    Derived, so a re-run of the job finds the same run (and its decision)
-    instead of opening a second card. Knowing it grants nothing: every
-    route that reads or decides by id checks the lane and the caller."""
+def gate_id(pull: PullRequest | Request, round_: int, base_ref: str) -> str:
+    """The approval id of the gate run of a pull-request head against the
+    base branch ``base_ref`` in ``round_``. Derived, so a re-run of the
+    job finds the same run (and its decision) instead of opening a second
+    card. The base branch is in it because GitHub lists a pull request's
+    files against its base: after a retarget the same head has another
+    file list, so it gets a new run, never the old verdict. The branch
+    name, not its tip sha, so a merge to the base does not orphan an
+    approval. Knowing the id grants nothing: every route that reads or
+    decides by id checks the lane and the caller."""
     digest = hashlib.sha256(
-        f"{pull.repository}#{pull.pr_number}#{pull.head_sha}".encode()
+        f"{pull.repository}#{pull.pr_number}#{pull.head_sha}#{base_ref}".encode()
     ).hexdigest()[:40]
     return f"appr-gate-{digest}-{int(round_)}"
 
@@ -320,6 +343,12 @@ def summary(result: GateScan, decider: str) -> dict[str, Any]:
     }
 
 
+def _stored(text: str) -> int:
+    """The bytes ``text`` takes in the stored card: json.dumps with the
+    default ensure_ascii, the way domain.Run.pause() stores it."""
+    return len(json.dumps(text))
+
+
 def card(
     pull: PullRequest,
     project: str,
@@ -331,7 +360,10 @@ def card(
     """The approver card of a held gate run. ``reason`` is plain text: the
     console shows it as is. It names paths, so it is never on an
     anonymous route. ``risk`` and ``confidence`` stay empty: the pause is
-    the deterministic scan's, not a Decider verdict."""
+    the deterministic scan's, not a Decider verdict. At most CARD_CHANGES
+    flagged changes are listed, fewer when the next one would take the
+    stored reason and changed_files past CARD_MAX_BYTES; the rest are
+    counted."""
     flagged = result.flagged
     lines = [
         (
@@ -344,20 +376,35 @@ def card(
         ),
         "",
     ]
+    tail = [f"{finding.path}: {finding.rule}: {finding.reason}" for finding in result.extra]
+    tail += ["", decider_line]
+    # The header, the tail, the count line and the other keys are always
+    # there; each listed change adds its lines (the quotes _stored counts
+    # per line stand for the "\n" that joins them) and its changed_files
+    # entry with its ", " separator.
+    total = CARD_OTHER_BYTES + sum(_stored(line) for line in [*lines, *tail])
+    total += _stored(f"... and {len(flagged)} more flagged files.")
+    listed: list[str] = []
     for verdict in flagged[:CARD_CHANGES]:
         change = verdict.change
-        lines.append(
-            f"{shown(change.path)} ({shown(change.status)}, "
-            f"+{change.additions} -{change.deletions})"
-        )
+        block = [
+            (
+                f"{shown(change.path)} ({shown(change.status)}, "
+                f"+{change.additions} -{change.deletions})"
+            )
+        ]
         for finding in verdict.findings:
             where = "" if finding.path == change.path else f" [{shown(finding.path)}]"
-            lines.append(f"  {finding.rule}: {finding.reason}{where}")
-    if len(flagged) > CARD_CHANGES:
-        lines.append(f"... and {len(flagged) - CARD_CHANGES} more flagged files.")
-    for finding in result.extra:
-        lines.append(f"{finding.path}: {finding.rule}: {finding.reason}")
-    lines += ["", decider_line]
+            block.append(f"  {finding.rule}: {finding.reason}{where}")
+        cost = sum(_stored(line) for line in block) + _stored(shown(change.path)) + 2
+        if total + cost > CARD_MAX_BYTES:
+            break
+        total += cost
+        lines += block
+        listed.append(shown(change.path))
+    if len(flagged) > len(listed):
+        lines.append(f"... and {len(flagged) - len(listed)} more flagged files.")
+    lines += tail
     return {
         "reason": "\n".join(lines),
         "tool": TOOL,
@@ -365,7 +412,7 @@ def card(
         "confidence": None,
         "latency_ms": None,
         "layer": LAYER,
-        "changed_files": [shown(verdict.change.path) for verdict in flagged[:CARD_CHANGES]],
+        "changed_files": listed,
         "created_at": created_at,
         "expires_at": expires_at,
     }

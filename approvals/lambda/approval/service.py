@@ -89,9 +89,13 @@ def start_try(
 # B7b: the merge gate's caps. New gate runs per repository per UTC day
 # (a run needs a real push: its head is GitHub's), and Decider readings
 # per UTC hour across every repository, so gate traffic alone cannot
-# keep the Decider copy warm and billed.
+# keep the Decider copy warm and billed. And POSTs per repository per UTC
+# hour, taken before the gate reads GitHub, so one repository's workflow
+# cannot spend the read-only token every repository and the B7a ingest
+# share (GitHub allows 5000 calls an hour; a POST costs one to five).
 GATE_REPO_DAILY_CAP = 200
 GATE_DECIDER_HOURLY_CAP = 30
+GATE_POST_HOURLY_CAP = 300
 
 
 def _digest(text: str) -> str:
@@ -109,6 +113,18 @@ def gate_counters(repository: str, now: float | None = None) -> list[uow.Counter
             int(moment) + COUNTER_TTL_SECONDS,
         )
     ]
+
+
+def take_gate_post(repository: str, now: float | None = None) -> bool:
+    """One gate POST of ``repository`` this UTC hour, or False at the cap.
+    The key holds a digest of the repository, never its name."""
+    moment = _now(now)
+    hour = datetime.datetime.fromtimestamp(moment, datetime.timezone.utc).strftime("%Y-%m-%dT%H")
+    return unit_of_work().take(
+        uow.Counter(
+            f"gate-post-{_digest(repository)}-{hour}", GATE_POST_HOURLY_CAP, int(moment) + 86400
+        )
+    )
 
 
 def take_gate_reading(now: float | None = None) -> bool:

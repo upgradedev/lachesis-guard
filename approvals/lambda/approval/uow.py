@@ -257,15 +257,25 @@ class DynamoUnitOfWork:
 
     def take(self, counter: Counter) -> bool:
         """Consume one of ``counter`` on its own (B7b: the gate's hourly
-        Decider reading cap). False, consuming nothing, when it is at its
-        cap; any other failure is raised."""
-        try:
-            self.client.transact_write_items(TransactItems=[self._counter_item(counter)])
-        except ClientError as exc:
-            if classify(exc, [_CAP]) == _CAP:
-                return False
-            raise
-        return True
+        Decider reading cap and its hourly POST cap per repository).
+        False, consuming nothing, when it is at its cap. A cancellation
+        caused only by a concurrent transaction wrote nothing and is
+        tried again, as in commit(), up to CONTENTION_RETRIES times; it
+        is never read as the cap. Any other failure, and contention that
+        outlasts the retries, is raised."""
+        for attempt in range(CONTENTION_RETRIES + 1):
+            try:
+                self.client.transact_write_items(TransactItems=[self._counter_item(counter)])
+                return True
+            except ClientError as exc:
+                kind = classify(exc, [_CAP])
+                if kind == _CAP:
+                    return False
+                if kind == _RETRY and attempt < CONTENTION_RETRIES:
+                    _sleep(_jitter(*CONTENTION_PAUSE_S))
+                    continue
+                raise
+        raise AssertionError("unreachable")  # pragma: no cover
 
     def commit(self, run: domain.Run, counters: Iterable[Counter] = ()) -> domain.Run:
         """Write the command's changes and events atomically, or raise

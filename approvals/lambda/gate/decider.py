@@ -8,11 +8,12 @@ InService, with RuntimeConfig.DesiredCopyCount and CurrentCopyCount both
 current) or a status other than InService reads as asleep; an error of
 the describe call reads as failed (the code never learnt whether the GPU
 is cold). In both cases Decider is not invoked: this module never invokes
-a component that has no copy running. A narrow race remains: target
-tracking can remove the copy between the describe and the invoke, and a
-NoCapacity invoke then counts toward the wake alarm of decider_ic.py.
-The caller can also refuse the invoke (``allow``, the gate's hourly
-reading cap or its time budget): that reads as skipped.
+a component the describe shows without a running copy. A narrow race
+remains: target tracking can remove the copy between the describe and
+the invoke, and a NoCapacity invoke then counts toward the wake alarm of
+decider_ic.py. The caller can also refuse the invoke (``allow``, the
+gate's hourly reading cap or its time budget, checked again right before
+the invoke): that reads as skipped.
 
 When awake, one InvokeEndpoint on the same endpoint and inference
 component the agent uses (agent/decider_sagemaker.py), with the same
@@ -116,7 +117,10 @@ class Reading:
                 "A person decides."
             )
         if self.state == NOT_ASKED:
-            return "Decider not asked: only the file list was cut. A person decides."
+            return (
+                "Decider not asked: no flagged file to describe (the file list was cut "
+                "or empty). A person decides."
+            )
         if self.state == NOT_NEEDED:
             return "Decider not asked: the scan flagged nothing."
         return policy.DECIDER_ASLEEP
@@ -220,8 +224,9 @@ def read(
     clients: tuple[Any, Any] | None = None,
     allow: Callable[[], bool] | None = None,
 ) -> Reading:
-    """NOT_NEEDED when nothing is flagged, NOT_ASKED when only the file
-    list was cut (no change to describe), ASLEEP when no copy is running
+    """NOT_NEEDED when nothing is flagged, NOT_ASKED when the scan needs a
+    person but flagged no file (the file list was cut or GitHub listed
+    none, so no change to describe), ASLEEP when no copy is running
     and FAILED when the describe call failed (Decider is then never
     invoked), SKIPPED when ``allow`` refuses the invoke, else the answer."""
     if not result.needs_person:

@@ -28,9 +28,13 @@ name: lachesis-gate
 # The OIDC token is masked and requested afresh for every call; no token
 # is printed or stored.
 
+# "edited" is the event GitHub sends when the base branch changes: a
+# retarget (also the automatic one of a stacked pull request) runs the
+# check again, and the gate's run id holds the base branch, so the new
+# base's file list is read. A title or body edit finds the same run.
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, edited]
 
 permissions:
   id-token: write

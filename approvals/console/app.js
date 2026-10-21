@@ -114,7 +114,7 @@ setInterval(tickClocks, 1000);
 
 function parseReason(reason) {
   const r = { args: null, argsText: "", grounded: null, threshold: null, rule: null, message: "" };
-  if (!reason) return r;
+  if (!reason || reason.startsWith("Merge gate: ")) return r; // B7b: a gate card holds attacker-chosen paths, so no agent-card heuristic reads it
   const m = reason.match(/Decider: (\S+) at ([0-9.]+), threshold ([0-9.]+); grounded: (yes|no)/);
   if (m) { r.threshold = parseFloat(m[3]); r.grounded = m[4] === "yes"; }
   const i = reason.indexOf("\narguments:\n");
@@ -135,7 +135,7 @@ function targetOf(args) {
 }
 function rulePill(card, p) {
   if (card.layer === "unavailable") return h("span", { class: "pill pill--warn", text: "Fail-closed \u00B7 no score" });
-  const label = { R1: "R1 \u00B7 score under the line", R3: "R3 \u00B7 " + String(card.risk || "").replace(/_/g, " "), R4: "R4 \u00B7 unknown class", secretscan: "Secret scan", R0: "Unusable score" }[p.rule] || "Paused";
+  const label = card.layer === "mergegate" ? "Merge gate" : { R1: "R1 \u00B7 score under the line", R3: "R3 \u00B7 " + String(card.risk || "").replace(/_/g, " "), R4: "R4 \u00B7 unknown class", secretscan: "Secret scan", R0: "Unusable score" }[p.rule] || "Paused";
   return h("span", { class: "pill " + (p.rule === "R3" ? "pill--danger" : "pill--warn"), text: label });
 }
 const scored = c => c && c.layer === "decider" && typeof c.confidence === "number" && isFinite(c.confidence);
@@ -288,7 +288,7 @@ function decisionCard(view, lane, onDecided) {
   const why = h("div", { class: "s4-why" }, h("h4", { text: "Why it paused" }), h("p", {}, rulePill(card, p)),
     scored(card) ? [meter(card.confidence, thr, false), thr !== null ? h("p", { class: "caption",
       text: "At or above " + thr.toFixed(2) + " Decider's class is trusted; a destructive class still asks a person." }) : null]
-      : h("p", { class: "muted", text: lane === "gate" ? "The pause is the deterministic scan's; any Decider reading is advisory and shown in the card text." : "No Decider score for this call." }),
+      : h("p", { class: "muted", text: lane === "gate" ? "The pause is the deterministic scan's; any Decider reading is advisory and shown in the card text. The pull request check itself is advisory: it is not yet required, so it blocks no merge." : "No Decider score for this call." }),
     kv([["Risk class", card.risk ? card.risk.replace(/_/g, " ") : lane === "gate" ? "not a Decider verdict" : "not scored"], ["Grounded", p.grounded === null ? "" : p.grounded ? "yes" : "no"],
       ["Paused by", LAYER[card.layer] || card.layer || ""], ["Decided by", view.decided_by_name && view.status !== "PENDING" ? (view.decided_by_name === "try-visitor" ? "a visitor on this page" : view.decided_by_name) : ""],
       ["Latency", card.latency_ms ? Math.round(card.latency_ms) + " ms" : ""], ["Paused at", isFinite(Date.parse(card.created_at)) ? hhmmss(Date.parse(card.created_at)) + " UTC" : ""],
@@ -463,9 +463,9 @@ function viewQueue() {
     rows.forEach(v => { if ((v.project || "Demo") !== grp) { grp = v.project || "Demo"; body.append(h("tr", { class: "grp" }, h("th", { colspan: "6", scope: "colgroup", text: "Project: " + grp }))); }
       const c = v.card || {}, p = parseReason(c.reason || ""), t = targetOf(p.args), exp = expiry(v), made = Date.parse(c.created_at) || (v.created_ts || 0) * 1000;
       body.append(h("tr", {}, h("td", { "data-label": "Waiting", text: made ? age(made) : "" }),
-        h("td", { "data-label": "Tool \u00B7 target" }, h("a", { href: "#/a/" + encodeURIComponent(v.approval_id), text: (c.tool || "tool") + (t ? " \u00B7 " + t : "") })),
+        h("td", { "data-label": "Tool \u00B7 target" }, h("a", { href: "#/a/" + encodeURIComponent(v.approval_id), text: (c.tool || "tool") + (v.head ? " \u00B7 head " + v.head : t ? " \u00B7 " + t : "") })),
         h("td", { "data-label": "Why paused" }, rulePill(c, p)),
-        h("td", { "data-label": "Score" }, scored(c) ? meter(c.confidence, p.threshold, true) : h("span", { class: "muted", text: "no score" })),
+        h("td", { "data-label": "Score" }, scored(c) ? meter(c.confidence, p.threshold, true) : h("span", { class: "muted", text: v.lane === "gate" ? "scan hold" : "no score" })),
         h("td", { "data-label": "Layer", text: LAYER[c.layer] || c.layer || "" }),
         h("td", { "data-label": "Expires" }, exp ? h("span", { class: "countdown", "data-exp": exp }) : "")));
     });
@@ -508,7 +508,7 @@ function viewDetail(id) {
   later(() => { if (g === gen && !body.children.length) body.append(h("div", { class: "skeleton" }), h("div", { class: "skeleton" })); }, 200);
   const ctl = poll("/approvals/" + encodeURIComponent(id), v => {
     const gate = v.lane === "gate"; statusLine(st, gate && STATUS["GATE_" + v.status] ? "GATE_" + v.status : v.status); body.textContent = ""; const card = v.card || {};
-    if (card.tool || card.reason) body.append(decisionCard(v, gate ? "gate" : "approval", () => ctl.kick()));
+    if (card.tool || card.reason) { if (gate) body.append(h("p", { class: "lane-warn", text: "This merge-gate run can name a private repository and its file paths. Do not record or share this screen." })); body.append(decisionCard(v, gate ? "gate" : "approval", () => ctl.kick())); }
     const end = outcomeRow(v); if (end) body.append(h("ol", { class: "steps" }, end)); tickClocks(); led._gate = gate;
     loadLedger("/approvals/" + encodeURIComponent(id) + "/events", led, TERMINAL.includes(v.status));
   }, out => {

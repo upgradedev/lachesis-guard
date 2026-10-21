@@ -418,7 +418,13 @@ def handler(event, _context):
         return _dispatch_start(run, prompt, "approval_id")
 
     if route == "GET /approvals":
-        rows = common.list_by_status_in_lanes("PENDING", APPROVER_LANES, limit=50)
+        # One limit per lane: gate rows (up to 200 per repository a day)
+        # can never push the approval lane's Confirm pauses off the queue.
+        rows = [
+            row
+            for lane in APPROVER_LANES
+            for row in common.list_by_status_in_lanes("PENDING", (lane,), limit=50)
+        ]
         return _response(200, {"approvals": [common.public_view(row) for row in rows]})
 
     if route == "GET /approvals/projects":

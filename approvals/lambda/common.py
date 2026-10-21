@@ -336,7 +336,7 @@ def public_view(item: dict) -> dict:
     if lane == "try" and isinstance(card.get("reason"), str):
         card["reason"] = _try_reason(card["reason"], str(card.get("tool", "")))
     decided_by_name = "" if status in {"PENDING", "EXPIRED"} else item.get("decided_by_name", "")
-    return {
+    view = {
         "approval_id": item["approval_id"],
         "status": status,
         "lane": lane,
@@ -353,3 +353,9 @@ def public_view(item: dict) -> dict:
         # its registry project; every other run falls back to Demo.
         "project": str(item.get("project") or "Demo"),
     }
+    if lane == "gate":
+        # B7b: the head a gate run is for, cut to 12 characters, so the
+        # queue tells an older head's card from the live head's. A gate
+        # run is only on the approver routes.
+        view["head"] = str(item.get("head_sha", ""))[:12]
+    return view

@@ -13,8 +13,9 @@ installed or configured on a developer's machine.
   approver card. Pure Python: no boto3, no clock, no I/O.
 - ``decider``: an optional, advisory Strands Decider 2B reading of the
   flagged changes, asked only when the inference component already has
-  a copy running. It never invokes a component without a copy and
-  never clears a flag.
+  a copy running. It invokes only a component the describe shows with
+  a running copy (a narrow race with scale-in remains, see decider.py)
+  and never clears a flag.
 
 The gate itself is the deterministic scan: a change it flags needs a
 person, whatever Decider says. gate_api.py is the Lambda entrypoint. It

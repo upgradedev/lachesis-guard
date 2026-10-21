@@ -20,24 +20,31 @@ can open, or win, the run of a pull request. The body (gate/policy.py)
 names the repository, the pull request and the head sha the run was for;
 the first two must be the token's.
 
+Before any GitHub read, each POST takes one of its repository's hourly
+POST counter (service.GATE_POST_HOURLY_CAP, 429 at the cap), so a
+workflow that loops POSTs cannot spend the read-only token that every
+repository's gate and the B7a ingest share.
+
 The gate then reads the pull request from GitHub itself, with the
 read-only token of the Secrets Manager secret lachesis/github-readonly
 (activity/github.py, shared with the B7a ingest): GET /pulls/{n} for its
-state and its real head sha, and GET /pulls/{n}/files for its changes,
-at most policy.FILE_PAGES pages. Nothing the request says changed is
-scanned. A pull request that is not open, or whose head is no longer the
-one the run was for (a newer push; its own run decides), is 409. Any
-GitHub failure is 503 and records nothing: the gate never passes what it
-could not read.
+state, its real head sha and its base branch, and GET /pulls/{n}/files
+for its changes, at most policy.FILE_PAGES pages. Nothing the request
+says changed is scanned. A pull request that is not open, whose head is
+no longer the one the run was for (a newer push; its own run decides),
+or whose base branch changed between the reads, is 409. Any GitHub
+failure is 503 and records nothing: the gate never passes what it could
+not read.
 
-The run of a pull-request head has a derived id (policy.gate_id), so a
-re-run of the job finds the same run, and its decision, instead of
-opening a second card; only an EXPIRED or ERROR run is retried, under the
-next round's id. A new run is the deterministic scan of every change
-(activity.scan rules) and, only when the scan flags something and the
-Decider inference component already has a copy running, one advisory
-Decider reading (gate/decider.py), within an hourly reading cap and the
-function's time budget. It is recorded through the Unit of Work as one
+The run of a pull-request head against its base branch has a derived id
+(policy.gate_id), so a re-run of the job finds the same run, and its
+decision, instead of opening a second card, and a retarget to another
+base (GitHub then lists other files) opens a new run; only an EXPIRED or
+ERROR run is retried, under the next round's id. A new run is the
+deterministic scan of every change (activity.scan rules) and, only when
+the scan flags something and the Decider inference component already has
+a copy running, one advisory Decider reading (gate/decider.py), within an
+hourly reading cap and the function's time budget. It is recorded through the Unit of Work as one
 transaction on lane "gate", project from the registry, together with the
 repository's daily counter of new gate runs (429 at the cap):
 
@@ -83,8 +90,10 @@ OWNER_IDS = {"upgradedev": "25751981"}
 # GitHub reads use a short timeout so the five reads at most (the pull
 # request twice, three pages of files) stay inside the API's 29 s.
 GITHUB_TIMEOUT_S = 4
-# Below this much time left, Decider is not asked (its reads take up to
-# about 10 s); the card then says so and a person decides.
+# Below this much time left, Decider is not asked; the card then says so
+# and a person decides. Each SageMaker call can take up to 10 s (connect
+# 2 s plus read 8 s, one attempt), so the budget is checked before the
+# describe and again before the invoke.
 DECIDER_MIN_REMAINING_MS = 12_000
 
 _GATE_ID = re.compile(r"appr-gate-[0-9a-f]{40}-[0-9]")
@@ -213,6 +222,13 @@ def _head(pull_json: dict) -> str:
     return sha if isinstance(sha, str) else ""
 
 
+def _base(pull_json: dict) -> str:
+    """The pull request's base branch name, "" when GitHub gave none."""
+    base = pull_json.get("base") if isinstance(pull_json, dict) else None
+    ref = base.get("ref") if isinstance(base, dict) else None
+    return ref if isinstance(ref, str) else ""
+
+
 def _open_head(gh: Any, request: policy.Request) -> tuple[dict, str]:
     """GitHub's pull request and its head sha. Raises HeadMoved."""
     pull_json = gh.pull(request.repository, request.pr_number)
@@ -226,10 +242,13 @@ def _open_head(gh: Any, request: policy.Request) -> tuple[dict, str]:
 
 def _read_pull(gh: Any, request: policy.Request, pull_json: dict) -> policy.PullRequest:
     """The changed files as GitHub lists them, read twice-checked: the
-    head is read again after the files, so a push between the two reads
-    never pairs one head's files with another head's id."""
+    pull request is read again after the files, so a push or a retarget
+    between the two reads never pairs one head's or one base's files with
+    another's id."""
     files, complete = gh.pull_files(request.repository, request.pr_number, policy.FILE_PAGES)
-    _, head = _open_head(gh, request)
+    again, head = _open_head(gh, request)
+    if _base(again) != _base(pull_json):
+        raise HeadMoved("the pull request base branch changed; the run for its new base decides")
     return policy.from_github(request, head, files, complete, pull_json.get("changed_files"))
 
 
@@ -239,13 +258,16 @@ def _read_pull(gh: Any, request: policy.Request, pull_json: dict) -> policy.Pull
 def _reading(
     pull: policy.PullRequest, result: policy.GateScan, context: Any
 ) -> decider.Reading:
-    # The time budget is checked before any SageMaker call: the describe
-    # and the invoke together can take about 10 s.
+    # Each SageMaker call can take up to 10 s (connect 2 s plus read 8 s),
+    # so the time budget is checked before the describe and again, in
+    # allow(), before the invoke.
     remaining = getattr(context, "get_remaining_time_in_millis", None)
     if result.needs_person and remaining is not None and remaining() < DECIDER_MIN_REMAINING_MS:
         return decider.Reading(decider.SKIPPED if result.flagged else decider.NOT_ASKED)
 
     def allow() -> bool:
+        if remaining is not None and remaining() < DECIDER_MIN_REMAINING_MS:
+            return False
         try:
             return service.take_gate_reading()
         except Exception as exc:  # the cap could not be read: do not ask
@@ -322,11 +344,16 @@ def post_pull(
     if request.pr_number != number:
         return _response(403, {"error": "the token is not from a run of this pull request"})
     try:
+        if not service.take_gate_post(repository):
+            return _response(
+                429, {"error": "this repository reached its hourly gate requests; try again later"}
+            )
         gh = _github()
         pull_json, _ = _open_head(gh, request)
+        base_ref = _base(pull_json)
         work = service.unit_of_work()
         for round_ in range(policy.MAX_ROUNDS):
-            gate_id = policy.gate_id(request, round_)
+            gate_id = policy.gate_id(request, round_, base_ref)
             existing = work.get(gate_id)
             if existing is not None and existing.status in _REUSABLE:
                 continue
