@@ -113,7 +113,7 @@
     </section>
 
     <section data-view="projects" class="page" aria-labelledby="projects-h" hidden>
-      <div class="cockpit-bar"><div><p class="eyebrow">Read-only GitHub Ingest · Deterministic Scan</p><h1 id="projects-h" tabindex="-1">Projects</h1><p class="subline">Commits of the registered repositories. The actor kind reads the GitHub account and the commit's Co-Authored-By trailers: agent-assisted means a trailer names Claude, Codex or Gemini, and a commit without one counts as human, even when an agent wrote it. Flags come from a deterministic scan of each change, never from Decider. A private repository shows only its counts until it is public.</p></div></div>
+      <div class="cockpit-bar"><div><p class="eyebrow">Read-only GitHub Ingest · Deterministic Scan</p><h1 id="projects-h" tabindex="-1">Projects</h1><p class="subline">Commits of the registered repositories. The actor kind reads the GitHub account and the commit's Co-Authored-By trailers: agent-assisted means a trailer names a coding agent, and a commit without one counts as human, even when an agent wrote it. Flags come from a deterministic scan of each change, never from Decider. A private repository shows only its counts until it is public.</p></div></div>
       <p id="projects-msg" class="muted" aria-live="polite"></p><label id="projects-lane" class="small" hidden><input type="checkbox" id="projects-private"> Show private repositories (approver view; do not record or share it)</label>
       <div id="projects-body" class="tiles tiles--3"></div>
       <section id="project-activity" class="panel" aria-label="Recent commits" hidden></section>
@@ -224,6 +224,6 @@
 <noscript><p class="page">This console needs JavaScript.</p></noscript>
 <script src="config.js"></script>
 <script src="data.js?v=20261020"></script>
-<script src="app.js?v=20261021f"></script>
+<script src="app.js?v=20261021h"></script>
 </body>
 </html>

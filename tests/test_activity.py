@@ -913,17 +913,64 @@ def test_more_future_dated_commits_than_the_row_remembers_fail_the_run(
     assert first.status == "ok" and first.future_over_cap == 1 and first.failed
     assert first.errors == []  # every commit was stored: no false "not stored"
     assert len(dynamo.meta(PR)["future_dated"]) == 3
+    assert dynamo.meta(PR)["future_over_cap"] == 1
     # The one the row cannot remember is fetched again on every run, and
-    # every such run is reported failed, so the alarm fires.
+    # every run logs the count. The same count is not a new condition, so
+    # the run is not reported failed again: one alarm per condition, and a
+    # later failure of another kind can still raise a fresh one.
     ingest = _ingest_module()
     server.requests.clear()
-    with pytest.raises(ingest.IngestFailed):
-        ingest.handler({}, None, deps={"github": gh, "store": store, "bus": bus,
-                                        "now": NOW + 900, "projects": (PROJECT,)})
+
+    def run(now):
+        return ingest.handler({}, None, deps={"github": gh, "store": store, "bus": bus,
+                                               "now": now, "projects": (PROJECT,)})
+
+    assert run(NOW + 900)["failed_repos"] == 0
     fetched = [url for url, _ in server.requests if "/commits/" in url]
     assert len(fetched) == 1 and sha_of(103) in fetched[0]
     out = capsys.readouterr().out
     assert '"future_dated_over_cap": 1' in out and '"commits_not_stored": 0' in out
+    assert run(NOW + 1800)["failed_repos"] == 0
+    assert '"future_dated_over_cap": 1' in capsys.readouterr().out
+    # One more forged commit grows the count: that run fails, the next not.
+    server.repos[REPO]["commits"].insert(0, make_commit(104, "2099-01-01T00:00:04Z"))
+    with pytest.raises(ingest.IngestFailed):
+        run(NOW + 2700)
+    assert '"future_dated_over_cap": 2' in capsys.readouterr().out
+    assert dynamo.meta(PR)["future_over_cap"] == 2
+    assert run(NOW + 3600)["failed_repos"] == 0
+    # Once the condition clears, a new one fails a run again.
+    server.repos[REPO]["commits"] = [c for c in server.repos[REPO]["commits"]
+                                     if c["sha"] not in (sha_of(103), sha_of(104))]
+    cleared = _run(world, now=NOW + 4500)
+    assert cleared.status == "ok" and cleared.future_over_cap == 0 and not cleared.failed
+    assert dynamo.meta(PR)["future_over_cap"] == 0
+    server.repos[REPO]["commits"].insert(0, make_commit(105, "2099-01-01T00:00:05Z"))
+    again = _run(world, now=NOW + 5400)
+    assert again.future_over_cap == 1 and again.failed
+
+
+def test_a_run_that_stops_early_never_lowers_the_stored_over_cap_count(world, monkeypatch):
+    server, dynamo, _, _, _, _ = world
+    monkeypatch.setattr(service, "MAX_FUTURE", 3)
+    forged = [make_commit(100 + n, f"2099-01-01T00:00:{n:02d}Z") for n in range(5)]
+    server.add(REPO, False, [*forged, make_commit(1, "2026-10-17T09:00:00Z")])
+    first = _run(world)
+    assert first.future_over_cap == 2 and first.failed
+    # Two new real commits: with one commit per run, the forged ones the
+    # row cannot remember are never reached, so this run sees fewer.
+    server.repos[REPO]["commits"][:0] = [make_commit(3, "2026-10-20T11:00:00Z"),
+                                         make_commit(2, "2026-10-20T10:00:00Z")]
+    capped = _run(world, now=NOW + 900, max_commits=1)
+    assert capped.status == "more" and capped.future_over_cap == 0 and not capped.failed
+    assert dynamo.meta(PR)["future_over_cap"] == 2
+    late = _run(world, now=NOW + 1800, out_of_time=lambda: True)
+    assert late.status == "deadline" and not late.failed
+    assert dynamo.meta(PR)["future_over_cap"] == 2
+    # The next full run sees the same condition, so it is not new.
+    full = _run(world, now=NOW + 2700)
+    assert full.status == "ok" and full.future_over_cap == 2 and not full.failed
+    assert len(dynamo.commit_rows(PR)) == 8
 
 
 def test_a_commit_github_never_serves_fails_the_run_after_an_hour(world, capsys):
@@ -1227,6 +1274,34 @@ def test_the_anonymous_lane_shows_a_private_repo_only_as_counts(mixed):
         assert leaked not in dumped, leaked
 
 
+def test_a_cut_window_read_marks_the_commit_count_and_both_mixes_cut(world, monkeypatch):
+    server, dynamo, _, _, store, _ = world
+    monkeypatch.setattr(activity_store, "MAX_WINDOW_ROWS", 2)
+    server.add(REPO, False, _three_commits())
+    assert _run(world).written == 3
+    # The one capped read feeds the commit count, both mixes and the
+    # findings, so all of them are cut and the row says so.
+    meta = dynamo.meta(PR)
+    assert meta["commits"] == 2 and meta["counts_truncated"] is True
+    assert sum(meta["by_actor_kind"].values()) == 2
+    assert sum(meta["by_scan_verdict"].values()) == 2
+    [summary] = read.projects_view((PROJECT,), store, approver=False)["projects"]
+    assert summary["commits"] == 2 and summary["counts_truncated"] is True
+    # read._counts: one cut repository marks the project's sums cut.
+    whole = {"counted_at": "2026-10-20T12:00:00Z", "commits": 3, "flagged_changes": 1,
+             "by_actor_kind": {"human": 3}, "by_scan_verdict": {"clean": 2, "flagged": 1},
+             "counts_truncated": False}
+    cut = {**whole, "commits": 2, "by_actor_kind": {"human": 2},
+           "by_scan_verdict": {"clean": 2}, "counts_truncated": True}
+    alone = read._counts([whole, None])
+    assert alone["counts_truncated"] is False and alone["commits"] == 3
+    both = read._counts([whole, cut])
+    assert both["counts_truncated"] is True and both["commits"] == 5
+    assert both["by_actor_kind"]["human"] == 5 and both["by_scan_verdict"]["clean"] == 4
+    # Only an explicit true is a cut: no stored flag reads as whole.
+    assert read._counts([{**cut, "counts_truncated": "yes"}])["counts_truncated"] is False
+
+
 def test_the_approver_lane_shows_every_repository(mixed):
     project, store = mixed
     [summary] = read.projects_view((project,), store, approver=True)["projects"]
@@ -1464,6 +1539,10 @@ def test_the_console_projects_view_renders_only_backend_numbers():
                    'id="projects-private"', "do not record or share it"):
         assert needle in view, needle
     assert "by a person, a person with a coding agent" not in view
+    # The copy names no agent product: the trailer names "a coding agent".
+    assert "agent-assisted means a trailer names a coding agent, and" in view
+    for name in ("Claude", "Codex", "Gemini"):
+        assert name not in view, name
     block = js[js.index("function viewProjects(key)"):js.index("function viewDetail(id)")]
     assert "innerHTML" not in block and "insertAdjacentHTML" not in block
     # The anonymous lane is the default, also when signed in; the approver
@@ -1482,7 +1561,18 @@ def test_the_console_projects_view_renders_only_backend_numbers():
     assert '"Commits by deterministic scan: "' in block and '"Actors (by trailer): "' in block
     # The approver tile names each repository's ingest status and stall count.
     assert 'b.lane === "approver" ? ", ingest " + (r.ingest_status || "not run yet")' in block
-    assert '", stalled " + r.stalled_runs + " runs"' in block
+    # One stalled run is "1 run", not "1 runs".
+    assert ('", stalled " + r.stalled_runs + (r.stalled_runs === 1 ? " run" : " runs")'
+            in block)
+    assert '", stalled " + r.stalled_runs + " runs"' not in block
+    # A cut window read cuts the commit count and both mixes too, so each
+    # says so, not only the findings number.
+    tile = block[block.index('"Last activity: "'):]
+    for label in ('" commits"', '"Actors (by trailer): " + mix(p.by_actor_kind)',
+                  '"Commits by deterministic scan: " + mix(p.by_scan_verdict)'):
+        assert label in tile, label
+    assert '].map(t => sub(t + (p.counts_truncated ? " (count cut)" : "")))' in tile
+    assert 'sub = t => h("span", { class: "tile-sub", text: t })' in block
     # Commits dated in the future are listed apart, under their own label.
     assert "later = b.dated_in_future || []" in block and '"Dated in the future"' in block
     assert "b.dated_in_future_truncated" in block and "table(later)" in block
@@ -1501,3 +1591,10 @@ def test_the_console_projects_view_renders_only_backend_numbers():
     # The queue groups by project; a run without one is the demo's.
     queue = js[js.index("function viewQueue()"):js.index("function viewProjects(key)")]
     assert '"Project: " + grp' in queue and 'v.project || "Demo"' in queue
+    # The headers show only when the rows span more than one project: a
+    # demo-only queue renders as it was recorded, with no "Project: Demo"
+    # row. With one project, grp starts at it, so no row differs from it.
+    assert ('let grp = new Set(rows.map(v => v.project || "Demo")).size > 1 ? null'
+            ' : (rows[0] || {}).project || "Demo";') in queue
+    assert "let grp = null;" not in queue
+    assert queue.index("let grp = new Set(") < queue.index('"Project: " + grp')

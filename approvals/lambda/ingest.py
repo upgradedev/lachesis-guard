@@ -14,11 +14,14 @@ An EventBridge schedule runs it every 15 minutes. One run:
 3. logs one line per repository with counts and a status, and returns
    the same counts. When a repository's ingest failed (a store failure,
    an unexpected error, a refused token, a commit that could not be
-   stored, service.STALL_RUNS stalled runs in a row, or more
-   future-dated commits than its row remembers), it raises
-   IngestFailed after the log line instead, so the Lambda Errors metric
-   and IngestErrorsAlarm see the failed run. The function has no async
-   retry (retry_attempts 0 in the stack): the next scheduled run is the
+   stored, service.STALL_RUNS stalled runs in a row, or a count of
+   future-dated commits its row cannot remember that grew since the
+   row's last count), it raises IngestFailed after the log line
+   instead, so the Lambda Errors metric and IngestErrorsAlarm see the
+   failed run. IngestFailed carries only the number of failed
+   repositories and the alarm only the metric, so the repository is
+   named in its log line alone. The function has no async retry
+   (retry_attempts 0 in the stack): the next scheduled run is the
    retry.
 
 It stops early, leaving each cursor where the work stopped, when the
