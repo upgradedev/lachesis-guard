@@ -13,7 +13,9 @@ An EventBridge schedule runs it every 15 minutes. One run:
    per commit and one ActivityObserved per new commit on lachesis-events;
 3. logs one line per repository with counts and a status, and returns
    the same counts. When a repository's ingest failed (a store failure,
-   an unexpected error, or a commit that could not be stored), it raises
+   an unexpected error, a refused token, a commit that could not be
+   stored, service.STALL_RUNS stalled runs in a row, or more
+   future-dated commits than its row remembers), it raises
    IngestFailed after the log line instead, so the Lambda Errors metric
    and IngestErrorsAlarm see the failed run. The function has no async
    retry (retry_attempts 0 in the stack): the next scheduled run is the

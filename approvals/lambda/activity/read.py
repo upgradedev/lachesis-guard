@@ -18,6 +18,13 @@ hides them). A repository with no stored flag yet counts as private.
 - The approver lane (GET /approvals/projects, GET
   /approvals/projects/{key}/activity, JWT): every repository in full.
 
+The page of recent commits (``recent``) holds only commits not dated in
+the future (store.dated_ceiling), so forged committer dates never push a
+real commit off it. Commits dated in the future are listed apart
+(``dated_in_future``, at most FUTURE_SHOWN, the nearest first, with
+``dated_in_future_truncated`` when more are stored), on the same lanes
+and with the same redaction.
+
 A commit lists at most FINDINGS_SHOWN findings, with finding_count and
 findings_truncated for the rest, and never its file list (files_changed
 is the count): each row read is projected to COMMIT_FIELDS, so a page of
@@ -38,6 +45,7 @@ from activity import store as activity_store
 
 RECENT_PER_REPO = 50
 RECENT_TOTAL = 50
+FUTURE_SHOWN = 5
 FINDINGS_SHOWN = 20
 WINDOW_DAYS = activity_store.TTL_DAYS
 
@@ -116,6 +124,7 @@ def project_summary(
         if shown:
             entry["last_activity_at"] = str((meta or {}).get("last_activity_at") or "")
             entry["ingest_status"] = str((meta or {}).get("status") or "")
+            entry["stalled_runs"] = _int((meta or {}).get("stalled_runs"))
             last = max(last, entry["last_activity_at"])
         repos.append(entry)
     return {
@@ -169,6 +178,7 @@ def activity_view(
 ) -> dict[str, Any]:
     summary = project_summary(project, store, approver)
     commits: list[dict[str, Any]] = []
+    future: list[dict[str, Any]] = []
     hidden = 0
     for repo in project.repos:
         project_repo = project.project_repo(repo)
@@ -177,8 +187,15 @@ def activity_view(
             continue
         rows = store.recent(project_repo, now, RECENT_PER_REPO, COMMIT_FIELDS)
         commits.extend(_commit(row, approver) for row in rows)
-    commits.sort(key=lambda c: (str(c.get("committed_at", "")), str(c.get("sha", ""))),
-                 reverse=True)
+        # One more than shown, so "more are stored" is known, not guessed.
+        rows = store.future(project_repo, now, FUTURE_SHOWN + 1, COMMIT_FIELDS)
+        future.extend(_commit(row, approver) for row in rows)
+
+    def order(commit: dict[str, Any]) -> tuple[str, str]:
+        return str(commit.get("committed_at", "")), str(commit.get("sha", ""))
+
+    commits.sort(key=order, reverse=True)
+    future.sort(key=order)
     return {
         **summary,
         "lane": "approver" if approver else "public",
@@ -186,4 +203,6 @@ def activity_view(
         "scan_label": scan.LABEL,
         "hidden_repos": hidden,
         "recent": commits[:RECENT_TOTAL],
+        "dated_in_future": future[:FUTURE_SHOWN],
+        "dated_in_future_truncated": len(future) > FUTURE_SHOWN,
     }

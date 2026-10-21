@@ -228,10 +228,21 @@ class FakeDynamo:
         if self.fail_reads:
             raise ClientError({"Error": {"Code": "ProvisionedThroughputExceededException"}}, "Q")
         self.calls.append("Query")
-        assert KeyConditionExpression == "#pk = :pk AND #sk > :floor"
+        # Exactly the two forms the adapter issues, with exactly their values.
+        bounded = KeyConditionExpression == "#pk = :pk AND #sk BETWEEN :floor AND :ceil"
+        assert bounded or KeyConditionExpression == "#pk = :pk AND #sk > :floor"
+        assert set(ExpressionAttributeValues) == (
+            {":pk", ":floor", ":ceil"} if bounded else {":pk", ":floor"}
+        )
         pk, floor = ExpressionAttributeValues[":pk"], ExpressionAttributeValues[":floor"]
+        ceil = ExpressionAttributeValues.get(":ceil")
+        assert not bounded or floor <= ceil  # DynamoDB refuses BETWEEN high AND low
+
+        def inside(sk):
+            return floor <= sk <= ceil if bounded else sk > floor
+
         rows = sorted(
-            (item for (p, sk), item in self.items.items() if p == pk and sk > floor),
+            (item for (p, sk), item in self.items.items() if p == pk and inside(sk)),
             key=lambda item: item["sk"],
             reverse=not ScanIndexForward,
         )
@@ -832,6 +843,138 @@ def test_a_future_dated_commit_never_moves_the_cursor(world):
     assert len(events.entries) == 3
 
 
+def test_forged_future_dates_never_push_a_real_commit_off_the_page(world):
+    server, dynamo, _, _, store, _ = world
+    server.page_size = 100  # one listing page: github.MAX_PAGES would cut a long one
+    project = registry.Project("lachesis", "Lachesis", (REPO,))
+    forged = [make_commit(100 + n, f"2099-01-01T00:{n // 60:02d}:{n % 60:02d}Z")
+              for n in range(read.RECENT_PER_REPO + 1)]
+    deploy = [{"filename": ".github/workflows/deploy.yml", "status": "removed"}]
+    server.add(REPO, False, [make_commit(1, "2026-10-20T11:00:00Z", files=deploy), *forged])
+    result = _run(world)
+    assert result.status == "ok" and result.written == len(forged) + 1 and not result.failed
+    for approver in (False, True):
+        view = read.activity_view(project, store, approver=approver, now=NOW)
+        [real] = view["recent"]
+        assert real["sha"] == sha_of(1) and real["scan_verdict"] == "flagged"
+        # The forged ones are listed apart, the nearest first, and cut.
+        later = view["dated_in_future"]
+        assert [c["sha"] for c in later] == [sha_of(100 + n) for n in range(read.FUTURE_SHOWN)]
+        assert all(c["future_dated"] for c in later)
+        assert view["dated_in_future_truncated"] is True
+    # The counts still cover every stored row, forged or not.
+    assert dynamo.meta(PR)["commits"] == len(forged) + 1
+    # A private repository lists neither on the anonymous lane.
+    server.repos[REPO]["private"] = True
+    _run(world, now=NOW + 900)
+    hidden = read.activity_view(project, store, approver=False, now=NOW + 900)
+    assert hidden["recent"] == [] and hidden["dated_in_future"] == []
+    assert hidden["dated_in_future_truncated"] is False and hidden["hidden_repos"] == 1
+
+
+def test_more_future_dated_commits_than_the_row_remembers_fail_the_run(
+    world, monkeypatch, capsys
+):
+    server, dynamo, _, gh, store, bus = world
+    monkeypatch.setattr(service, "MAX_FUTURE", 3)
+    forged = [make_commit(100 + n, f"2099-01-01T00:00:{n:02d}Z") for n in range(4)]
+    server.add(REPO, False, [*forged, make_commit(1, "2026-10-17T09:00:00Z")])
+    first = _run(world)
+    assert first.status == "ok" and first.future_over_cap == 1 and first.failed
+    assert first.errors == []  # every commit was stored: no false "not stored"
+    assert len(dynamo.meta(PR)["future_dated"]) == 3
+    # The one the row cannot remember is fetched again on every run, and
+    # every such run is reported failed, so the alarm fires.
+    ingest = _ingest_module()
+    server.requests.clear()
+    with pytest.raises(ingest.IngestFailed):
+        ingest.handler({}, None, deps={"github": gh, "store": store, "bus": bus,
+                                        "now": NOW + 900, "projects": (PROJECT,)})
+    fetched = [url for url, _ in server.requests if "/commits/" in url]
+    assert len(fetched) == 1 and sha_of(103) in fetched[0]
+    out = capsys.readouterr().out
+    assert '"future_dated_over_cap": 1' in out and '"commits_not_stored": 0' in out
+
+
+def test_a_commit_github_never_serves_fails_the_run_after_an_hour(world, capsys):
+    server, dynamo, _, gh, store, bus = world
+    ingest = _ingest_module()
+    server.add(REPO, False, _three_commits())
+    broken = "/repos/upgradedev/lachesis-guard/commits/" + sha_of(2)
+    server.fail[broken] = (502, {})
+    tick = iter(range(100))
+
+    def run():
+        return ingest.handler({}, None, deps={"github": gh, "store": store, "bus": bus,
+                                               "now": NOW + 900 * next(tick),
+                                               "projects": (PROJECT,)})
+
+    # The first run stores commit 1 and moves the cursor up to commit 2.
+    assert run()["statuses"] == ["github_error"]
+    assert dynamo.meta(PR)["stalled_runs"] == 0
+    # Every later run stops at commit 2 with the cursor held: stalled.
+    for count in range(1, service.STALL_RUNS):
+        assert run()["failed_repos"] == 0
+        assert dynamo.meta(PR)["stalled_runs"] == count
+    with pytest.raises(ingest.IngestFailed):
+        run()
+    assert dynamo.meta(PR)["stalled_runs"] == service.STALL_RUNS
+    assert f'"stalled_runs": {service.STALL_RUNS}' in capsys.readouterr().out
+    assert [r["sha"] for r in dynamo.commit_rows(PR)] == [sha_of(1)]
+    # Once GitHub serves it, the repository catches up and the count resets.
+    del server.fail[broken]
+    out = run()
+    assert out["statuses"] == ["ok"] and out["failed_repos"] == 0
+    assert dynamo.meta(PR)["stalled_runs"] == 0 and len(dynamo.commit_rows(PR)) == 3
+    # A repository GitHub does not serve at all stalls the same way.
+    server.fail["/repos/upgradedev/lachesis-guard"] = (502, {})
+    for count in range(1, service.STALL_RUNS):
+        assert run()["failed_repos"] == 0
+        assert dynamo.meta(PR)["stalled_runs"] == count
+    with pytest.raises(ingest.IngestFailed):
+        run()
+
+
+def test_an_event_the_bus_always_refuses_fails_the_run_after_an_hour(world):
+    server, _, events, _, _, _ = world
+    server.add(REPO, False, [make_commit(1, "2026-10-17T09:00:00Z")])
+    events.refuse = 100
+    runs = [_run(world, now=NOW + 900 * n) for n in range(service.STALL_RUNS + 1)]
+    assert [r.status for r in runs] == ["publish_failed"] * (service.STALL_RUNS + 1)
+    # The first run moved the cursor up to the commit; the rest held it.
+    assert [r.stalled_runs for r in runs] == list(range(service.STALL_RUNS + 1))
+    assert [r.failed for r in runs] == [False] * service.STALL_RUNS + [True]
+    events.refuse = 0
+    done = _run(world, now=NOW + 900 * (service.STALL_RUNS + 1))
+    assert done.status == "ok" and done.published == 1
+    assert done.stalled_runs == 0 and not done.failed
+
+
+def test_an_overlapping_older_run_never_republishes_a_repo_just_made_private(world):
+    server, dynamo, _, gh, store, bus = world
+    project = registry.Project("lachesis", "Lachesis", (REPO,))
+    server.add(REPO, False, _three_commits())
+    listing = gh.commits_since
+
+    def flip_then_list(repo, since):
+        # The repository is made private, and run B starts and ends while
+        # run A lists: B reads the new flag and stores it.
+        server.repos[REPO]["private"] = True
+        newer = service.ingest_repo(project, REPO, gh=github.GitHub(TOKEN, opener=server),
+                                    store=store, bus=bus, now=NOW)
+        assert newer.private is True and dynamo.meta(PR)["private"] is True
+        return listing(repo, since)
+
+    gh.commits_since = flip_then_list
+    older = _run(world)  # run A read the repository while it was public
+    assert older.status == "ok" and older.private is False
+    assert dynamo.meta(PR)["private"] is True
+    view = read.activity_view(project, store, approver=False, now=NOW)
+    assert view["recent"] == [] and view["hidden_repos"] == 1
+    assert view["repos"] == [{"repo": "", "visibility": "private"}]
+    assert REPO not in json.dumps(view)
+
+
 def test_a_public_repo_that_becomes_unreadable_fails_closed(world):
     server, dynamo, _, _, store, _ = world
     project = registry.Project("lachesis", "Lachesis", (REPO,))
@@ -1035,7 +1178,7 @@ def test_the_anonymous_lane_shows_a_private_repo_only_as_counts(mixed):
     assert view["scan_label"] == "deterministic scan" and view["window_days"] == 30
     assert summary["repos"] == [
         {"repo": "upgradedev/elenchos-loop", "visibility": "public",
-         "last_activity_at": "2026-10-18T00:00:00Z", "ingest_status": "ok"},
+         "last_activity_at": "2026-10-18T00:00:00Z", "ingest_status": "ok", "stalled_runs": 0},
         {"repo": "", "visibility": "private"},
     ]
     assert summary["visibility"] == "mixed"

@@ -8,11 +8,20 @@ Keys: pk ``project_repo`` ("<project key>#<owner>/<name>"), sk ``sk``.
   so a re-listed commit is never written twice. Its ``ttl`` is the
   commit time plus TTL_DAYS, or the ingest time plus TTL_DAYS for a
   commit dated after the ingest (``future_dated``: a committer date
-  anyone can set), so such a row never outlives the window.
+  anyone can set), so such a row expires a window after it was written.
+  The repository row remembers at most service.MAX_FUTURE such commits;
+  one it cannot remember is listed again, so its row is written again
+  after it expires, and every run that sees more of them than the cap
+  is reported failed (the ingest alarm then names the repository).
 - The repository row has sk "#meta": the GitHub ``private`` flag, the
-  ingest cursor, the last activity time and the window counts. "#" sorts
-  before every digit, so every commit-row read is a Query with
-  sk > the window floor, which never returns it.
+  ingest cursor, the last activity time, the window counts and
+  ``stalled_runs``. "#" sorts before every digit, so every commit-row
+  read is a Query with sk above the window floor, which never returns it.
+
+Reads: the window counts read every row above the window floor, future
+dated or not. The page of recent commits stops at dated_ceiling(now), so
+a commit dated in the future never pushes a real one off the page;
+``future`` lists those rows apart.
 
 Stored per commit: the project, repository, sha, commit time, actor login
 and git name, actor kind, co-author agents, subject line, the changed
@@ -75,6 +84,12 @@ def plain(value: Any) -> Any:
 def window_floor(now: float) -> str:
     """The lowest sk inside the window: commits older than this are out."""
     return domain.iso_of(now - WINDOW_S)
+
+
+def dated_ceiling(now: float) -> str:
+    """The highest sk of a commit not dated in the future (is_future):
+    "~" sorts after every hex digit of a sha."""
+    return domain.iso_of(now + SKEW_S) + "#~"
 
 
 def item_of(activity: domain.Activity, now: float) -> dict[str, Any]:
@@ -201,14 +216,23 @@ class ActivityStore:
         newest_first: bool,
         limit: int,
         attributes: Iterable[str] | None = None,
+        ceil: str | None = None,
     ) -> tuple[list[dict[str, Any]], bool]:
-        """Commit rows of one repository with sk > floor, at most ``limit``;
-        the second value is True when more rows were left unread."""
+        """Commit rows of one repository with sk > floor (and sk <= ceil
+        when given), at most ``limit``; the second value is True when more
+        rows were left unread."""
+        condition = "#pk = :pk AND #sk > :floor"
+        values = {":pk": project_repo, ":floor": floor}
+        if ceil is not None:
+            # No commit sk equals a bare timestamp floor, so BETWEEN's
+            # inclusive low end reads the same rows as > floor.
+            condition = "#pk = :pk AND #sk BETWEEN :floor AND :ceil"
+            values[":ceil"] = ceil
         kwargs: dict[str, Any] = {
             "TableName": self.table,
-            "KeyConditionExpression": "#pk = :pk AND #sk > :floor",
+            "KeyConditionExpression": condition,
             "ExpressionAttributeNames": {"#pk": "project_repo", "#sk": "sk"},
-            "ExpressionAttributeValues": {":pk": project_repo, ":floor": floor},
+            "ExpressionAttributeValues": values,
             "ScanIndexForward": not newest_first,
             "Limit": min(limit, 500),
         }
@@ -241,12 +265,29 @@ class ActivityStore:
     def recent(
         self, project_repo: str, now: float, limit: int, attributes: Iterable[str]
     ) -> list[dict[str, Any]]:
-        """The newest rows, only the named attributes (never the file list,
-        so a page of large commits stays small)."""
+        """The newest rows not dated in the future, only the named
+        attributes (never the file list, so a page of large commits stays
+        small). A row dated past dated_ceiling(now) is left to ``future``,
+        so forged committer dates never fill the page."""
         rows, _ = self._query(
             project_repo,
             window_floor(now),
             newest_first=True,
+            limit=limit,
+            attributes=tuple(attributes),
+            ceil=dated_ceiling(now),
+        )
+        return rows
+
+    def future(
+        self, project_repo: str, now: float, limit: int, attributes: Iterable[str]
+    ) -> list[dict[str, Any]]:
+        """The rows dated past dated_ceiling(now), the nearest first, at
+        most ``limit``, only the named attributes."""
+        rows, _ = self._query(
+            project_repo,
+            dated_ceiling(now),
+            newest_first=False,
             limit=limit,
             attributes=tuple(attributes),
         )
