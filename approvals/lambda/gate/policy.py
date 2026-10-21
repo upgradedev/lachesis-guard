@@ -22,7 +22,8 @@ scan.SCAN_CHARS, a path was cut or holds control characters (format
 characters such as bidi overrides and zero-width marks included), the
 scan's budget for the pull request ran out, or GitHub returned no diff for a
 file that adds lines. A binary file (no additions, no patch) is checked
-by its path only. What was not read is never called clean.
+by its path only; its content is never read. Apart from binary files,
+what was not read is never called clean.
 
 The gate passes only when no change has a finding; otherwise a person
 decides. This is the deterministic scan's verdict, labelled as such: a
@@ -31,10 +32,11 @@ never in place of it.
 
 The card a person decides on lists the flagged changes (path, rules and
 fixed reasons, never a matched line) and goes only to the approver lane.
-Paths on the card are shown with control characters escaped (shown()),
-so a file name cannot forge a line of the card, and the card stops
-listing changes before it passes CARD_MAX_BYTES as stored, so a pull
-request of long non-ASCII paths still fits its DynamoDB row. The
+Paths and the base branch on the card are shown with control characters
+escaped (shown()), so a file name cannot forge a line of the card. The
+card stops listing changes before it passes CARD_MAX_BYTES as stored, so
+a pull request of long non-ASCII paths still fits its DynamoDB row, and
+the approver queue lists only its first lines (common.queue_card). The
 summary GET /gate/{id} answers with holds counts only: no path, no
 reason, no excerpt.
 """
@@ -59,6 +61,9 @@ MAX_BODY_BYTES = 4096
 FILE_PAGES = 3
 MAX_FILES = FILE_PAGES * 100
 MAX_PATH_CHARS = 400
+# The base branch name as the card and the queue show it (escaped by
+# shown()); the run id (gate_id) holds the whole name.
+MAX_REF_CHARS = 256
 # Flagged changes the card lists by name; the rest are counted.
 CARD_CHANGES = 20
 # The card's reason and changed_files as stored (json.dumps with the
@@ -133,6 +138,9 @@ class PullRequest:
     head_sha: str
     changes: tuple[Change, ...]
     files_truncated: bool = False
+    # GitHub's base branch name, cut to MAX_REF_CHARS: GitHub lists the
+    # files against it, so two runs of one head are told apart by it.
+    base_ref: str = ""
 
 
 @dataclass(frozen=True)
@@ -248,10 +256,12 @@ def from_github(
     files: list[Any],
     complete: bool,
     changed_files: Any = None,
+    base_ref: Any = "",
 ) -> PullRequest:
     """The pull request as GitHub lists it. ``head_sha`` is GitHub's own
-    head. ``complete`` False, more than MAX_FILES entries, or a
-    ``changed_files`` count above the files read marks the list cut."""
+    head and ``base_ref`` its base branch. ``complete`` False, more than
+    MAX_FILES entries, or a ``changed_files`` count above the files read
+    marks the list cut."""
     entries = [entry for entry in files if isinstance(entry, dict)]
     kept = entries[:MAX_FILES]
     return PullRequest(
@@ -262,6 +272,7 @@ def from_github(
         files_truncated=(
             not complete or len(entries) > MAX_FILES or _number(changed_files) > len(kept)
         ),
+        base_ref=base_ref[:MAX_REF_CHARS] if isinstance(base_ref, str) else "",
     )
 
 
@@ -360,15 +371,17 @@ def card(
     """The approver card of a held gate run. ``reason`` is plain text: the
     console shows it as is. It names paths, so it is never on an
     anonymous route. ``risk`` and ``confidence`` stay empty: the pause is
-    the deterministic scan's, not a Decider verdict. At most CARD_CHANGES
-    flagged changes are listed, fewer when the next one would take the
-    stored reason and changed_files past CARD_MAX_BYTES; the rest are
-    counted."""
+    the deterministic scan's, not a Decider verdict. The first line names
+    the head and the base branch (escaped by shown()), so two runs of one
+    head against two bases are told apart. At most CARD_CHANGES flagged
+    changes are listed, fewer when the next one would take the stored
+    reason and changed_files past CARD_MAX_BYTES; the rest are counted."""
     flagged = result.flagged
     lines = [
         (
             f"Merge gate: pull request #{pull.pr_number} in {pull.repository} ({project}), "
-            f"head {pull.head_sha[:12]}."
+            f"head {pull.head_sha[:12]}"
+            + (f" into {shown(pull.base_ref)}." if pull.base_ref else ".")
         ),
         (
             f"The {LABEL} flagged {len(flagged)} of {len(result.verdicts)} changed files; "

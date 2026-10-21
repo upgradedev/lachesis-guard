@@ -20,7 +20,10 @@ The rules, each a finding of its own:
   its added lines passed SCAN_COMMIT_CHARS (from the first file past the
   budget on, files are checked by path only) or because GitHub listed
   more files than the ingest read (domain.build adds that one). It flags
-  the commit: what was not read is not called clean.
+  the commit. A file without a patch (binary, or too large for GitHub to
+  return one) is checked by its path only and its content is never read,
+  and the added lines of one file past SCAN_CHARS are not read (see
+  below); apart from those two, what was not read is not called clean.
 
 A renamed file is checked by its new path and by the path it had, so a
 workflow moved out of .github/workflows/ (which turns it off) or a file

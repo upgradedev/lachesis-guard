@@ -22,8 +22,10 @@ Routes (HTTP API, see infra/stacks/approvals.py):
 B7b, the merge gate: POST /gate/pulls and GET /gate/{id} are served by
 gate_api.py behind the GitHub Actions OIDC authorizer, not here. A gate
 run is decided here, on the approver routes: GET /approvals lists its
-PENDING rows beside the approval lane's, GET /approvals/{id} and its
-/events read it, and POST /approvals/{id}/decision records the decision
+PENDING rows beside the approval lane's, each with its head and base
+branch and its card cut to the first lines (the body is capped, see
+_queue), GET /approvals/{id} and its /events read it with the full
+card, and POST /approvals/{id}/decision records the decision
 and dispatches no resume, because a gate run has no agent behind it.
 The /try routes never read a gate run (their lane check is "try").
 
@@ -273,6 +275,44 @@ def _dispatch_resume(approval_id: str) -> None:
 
 # The lanes the approver routes read and decide (B7b adds the gate).
 APPROVER_LANES = ("approval", domain.GATE)
+# GET /approvals answers with at most this many bytes of body. Lambda's
+# synchronous response limit, 6 MB, is on the whole envelope, which
+# escapes the body's quotes and backslashes once more, so the body stays
+# far below it. QUEUE_COUNT_BYTES is kept for the gate_rows_omitted key.
+QUEUE_MAX_BYTES = 1_000_000
+QUEUE_COUNT_BYTES = 64
+
+
+def _queue(rows: list[dict]) -> dict:
+    """The approver queue's body. A gate run's card is listed in its
+    queue form (common.queue_card: the first lines of its reason, no
+    paths list); GET /approvals/{id} answers with the full card. An
+    approval-lane card is listed whole, since the queue row reads its
+    arguments. If the body would still pass QUEUE_MAX_BYTES, gate rows
+    are left out from the end, never an approval-lane row, and counted
+    in gate_rows_omitted."""
+    views = []
+    for row in rows:
+        view = common.public_view(row)
+        if view["lane"] == domain.GATE:
+            view["card"] = common.queue_card(view["card"])
+        views.append(view)
+    size = len(json.dumps({"approvals": views}))
+    dropped: set[int] = set()
+    for index in reversed(range(len(views))):
+        if size <= QUEUE_MAX_BYTES - QUEUE_COUNT_BYTES:
+            break
+        if views[index]["lane"] == domain.GATE:
+            # The row and the ", " that joined it to the list.
+            size -= len(json.dumps(views[index])) + 2
+            dropped.add(index)
+    body: dict = {
+        "approvals": [view for index, view in enumerate(views) if index not in dropped]
+    }
+    if dropped:
+        body["gate_rows_omitted"] = len(dropped)
+        print(json.dumps({"queue_gate_rows_omitted": len(dropped)}))
+    return body
 
 
 def _ledger(approval_id: str, lane: str | tuple[str, ...], not_found: str) -> dict:
@@ -419,13 +459,14 @@ def handler(event, _context):
 
     if route == "GET /approvals":
         # One limit per lane: gate rows (up to 200 per repository a day)
-        # can never push the approval lane's Confirm pauses off the queue.
+        # cannot push the approval lane's Confirm pauses off the queue,
+        # and the body cap (_queue) leaves out gate rows only.
         rows = [
             row
             for lane in APPROVER_LANES
             for row in common.list_by_status_in_lanes("PENDING", (lane,), limit=50)
         ]
-        return _response(200, {"approvals": [common.public_view(row) for row in rows]})
+        return _response(200, _queue(rows))
 
     if route == "GET /approvals/projects":
         return _projects(approver=True)

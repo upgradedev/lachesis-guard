@@ -6,6 +6,13 @@ name: lachesis-gate
 # at most 10 minutes. It succeeds on PASSED or APPROVED and fails on
 # DECLINED or EXPIRED. Nothing is configured on a developer's machine.
 #
+# A throttled (429) or unavailable (503, or no answer) POST is asked again
+# with a jittered backoff, each wait at most 60 s, until 10 minutes have
+# passed. The route throttle is shared by every caller, and any GitHub
+# account can mint a token with this audience, so while the gate is
+# advisory an outside caller can still exhaust the shared route throttle
+# and make this job fail.
+#
 # The job sends no file list: the gate reads the pull request and its
 # changed files from GitHub itself, with its own read-only token, and
 # checks that the token comes from this workflow file at this pull
@@ -48,7 +55,8 @@ jobs:
   gate:
     if: vars.LACHESIS_GATE_URL != '' && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Up to 10 minutes of asking again, then up to 10 minutes of polling.
+    timeout-minutes: 25
     # Not a required check yet: a failure here must not block other work.
     continue-on-error: true
     env:
@@ -107,17 +115,27 @@ jobs:
           }
 
           # A throttled (429) or unavailable (503, or no answer) gate is asked
-          # again with backoff before the job gives up.
-          for wait in 5 15 30 60 0; do
+          # again until the deadline: each wait is drawn between half and all
+          # of a ceiling that doubles from 5 s up to 60 s, and never runs past
+          # the deadline.
+          # retry-begin
+          post_deadline=$(( $(date +%s) + 600 ))
+          ceiling=5
+          while :; do
             call POST /gate/pulls gate-request.json
             case "$CODE" in
               429|503|000) ;;
               *) break ;;
             esac
-            if [ "$wait" -eq 0 ]; then break; fi
-            echo "The gate answered HTTP ${CODE}; asking again in ${wait} s."
-            sleep "$wait"
+            left=$(( post_deadline - $(date +%s) ))
+            if [ "$left" -le 0 ]; then break; fi
+            pause=$(( ceiling / 2 + RANDOM % (ceiling - ceiling / 2 + 1) ))
+            pause=$(( pause > left ? left : pause ))
+            echo "The gate answered HTTP ${CODE}; asking again in ${pause} s."
+            sleep "$pause"
+            ceiling=$(( ceiling * 2 > 60 ? 60 : ceiling * 2 ))
           done
+          # retry-end
           if [ "$CODE" != "200" ] && [ "$CODE" != "202" ]; then
             echo "The gate refused the request: HTTP ${CODE} $(jq -r '.error // ""' gate-response.json 2>/dev/null || true)"
             exit 1

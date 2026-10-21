@@ -355,7 +355,61 @@ def public_view(item: dict) -> dict:
     }
     if lane == "gate":
         # B7b: the head a gate run is for, cut to 12 characters, so the
-        # queue tells an older head's card from the live head's. A gate
-        # run is only on the approver routes.
+        # queue tells an older head's card from the live head's, and the
+        # base branch it runs against (stored escaped), so a retarget's
+        # second run of the same head is told apart too. A gate run is
+        # only on the approver routes.
         view["head"] = str(item.get("head_sha", ""))[:12]
+        view["base"] = str(item.get("base_ref", ""))[:64]
+    return view
+
+
+# GET /approvals lists a gate run's card cut (B7b): a gate card can hold
+# up to gate.policy.CARD_MAX_BYTES of paths, so twenty of them would pass
+# Lambda's 6 MB response limit and fail the whole queue. The queue row
+# reads no path from it; GET /approvals/{id} keeps the full card.
+QUEUE_REASON_BYTES = 2048
+QUEUE_CUT_MARK = "[Cut for the queue: the full card is on this run's detail view.]"
+
+
+def _stored_bytes(text: str) -> int:
+    """The bytes ``text`` takes in a JSON response (json.dumps with the
+    default ensure_ascii, quotes included)."""
+    return len(json.dumps(text))
+
+
+def _fit(text: str, budget: int) -> str:
+    """The longest start of ``text`` that takes at most ``budget`` bytes
+    in a JSON response, quotes not counted."""
+    used = 0
+    for index, ch in enumerate(text):
+        used += _stored_bytes(ch) - 2
+        if used > budget:
+            return text[:index]
+    return text
+
+
+def queue_card(card: dict) -> dict:
+    """A public card as the queue list carries it: no changed_files or
+    prior_steps, and a reason over QUEUE_REASON_BYTES (as stored JSON)
+    cut to its first whole lines within it, then QUEUE_CUT_MARK. The
+    first line is always kept, cut by characters if it is alone too
+    long, so a gate card still starts with its "Merge gate: " header."""
+    view = {key: value for key, value in card.items()
+            if key not in {"changed_files", "prior_steps"}}
+    reason = view.get("reason")
+    if not isinstance(reason, str) or _stored_bytes(reason) <= QUEUE_REASON_BYTES:
+        return view
+    budget = QUEUE_REASON_BYTES - _stored_bytes(QUEUE_CUT_MARK)
+    kept: list[str] = []
+    for line in reason.split("\n"):
+        # Each line's two quote bytes stand for the "\n" that joins it.
+        cost = _stored_bytes(line)
+        if cost > budget:
+            if not kept:
+                kept.append(_fit(line, budget - 2))
+            break
+        kept.append(line)
+        budget -= cost
+    view["reason"] = "\n".join([*kept, QUEUE_CUT_MARK])
     return view

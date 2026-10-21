@@ -405,13 +405,16 @@ class Run:
         """A new merge-gate run (B7b), still in memory and STARTING. The
         caller moves it on with pass_gate() or hold_gate() before the one
         commit that writes it, so the row is never seen in STARTING.
-        ``gate`` holds the repository, the pull request, its head sha and
-        the verdict summary GET /gate/{id} answers with."""
+        ``gate`` holds the repository, the pull request, its head sha, its
+        base branch (base_ref, already escaped for display: the run id
+        holds the branch itself) and the verdict summary GET /gate/{id}
+        answers with."""
         run = cls.request(approval_id, session_id, GATE, now, ttl_seconds, project=project)
         run.row.update(
             repository=str(gate.get("repository", "")),
             pr_number=_int(gate.get("pr_number")),
             head_sha=str(gate.get("head_sha", "")),
+            base_ref=str(gate.get("base_ref", "")),
             gate=json.dumps(gate.get("summary") or {}, sort_keys=True),
             ttl=int(now) + GATE_ROW_TTL_SECONDS,
         )

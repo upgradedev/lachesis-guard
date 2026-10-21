@@ -1318,13 +1318,13 @@ def test_console_try_start_race_keeps_polling():
     assert "handle = later(tick, 2000)" in js
     assert "on404(out); return;" in js and "on404(); return;" in js
     html = _console("index.html")
-    assert "app.js?v=20261021h" in html
+    assert "app.js?v=20261021i" in html
 
 
 def test_the_console_decides_a_gate_run_without_promising_an_agent():
     js = _console("app.js")
     html = _console("index.html")
-    assert "app.js?v=20261021h" in html
+    assert "app.js?v=20261021i" in html
     # The detail view hands the lane on; the decision path for any lane
     # but try is the approver route.
     assert 'decisionCard(v, gate ? "gate" : "approval", () => ctl.kick())' in js

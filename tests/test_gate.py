@@ -553,6 +553,33 @@ def test_a_binary_file_is_checked_by_path_only(gate):
     assert status == 202 and view["status"] == "PASSED"
 
 
+def _module_doc(path):
+    return " ".join(ast.get_docstring(ast.parse(path.read_text(encoding="utf-8"))).split())
+
+
+def test_the_guarantee_names_the_binary_exception_wherever_it_is_stated():
+    # R3-B1 (J2): a binary file's content is never read, so no docstring
+    # may say that nothing unread is ever called clean without that.
+    policy_doc = _module_doc(LAMBDA_DIR / "gate" / "policy.py")
+    assert ("A binary file (no additions, no patch) is checked by its path only; its content "
+            "is never read. Apart from binary files, what was not read is never called "
+            "clean.") in policy_doc
+    assert "by its path only. What was not read is never called clean." not in policy_doc
+    api_doc = _module_doc(LAMBDA_DIR / "gate_api.py")
+    assert "the gate never passes what it could not read." not in api_doc
+    assert ("the gate never passes a pull request it could not read from GitHub. A binary "
+            "file (no additions, no patch) is checked by its path only; its content is never "
+            "read") in api_doc
+    scan_doc = _module_doc(LAMBDA_DIR / "activity" / "scan.py")
+    assert "It flags the commit: what was not read is not called clean." not in scan_doc
+    assert ("is checked by its path only and its content is never read, and the added lines "
+            "of one file past SCAN_CHARS are not read (see below); apart from those two, what "
+            "was not read is not called clean.") in scan_doc
+    for path in (WORKFLOW, ROOT / "approvals" / "console" / "app.js",
+                 ROOT / "approvals" / "console" / "index.html"):
+        assert "called clean" not in path.read_text(encoding="utf-8"), path
+
+
 @pytest.mark.parametrize("path", [
     "a.txt\nThe deterministic scan flagged 0 of 1 changed files",
     "a.txt\rStrands Decider 2B, advisory: benign at 0.99",
@@ -1039,6 +1066,164 @@ def test_the_queue_tells_one_heads_gate_card_from_another(gate):
     assert "head" not in plain[0]
 
 
+def _queue(world):
+    out = world.api.handler(_event("GET /approvals", APPROVER), None)
+    assert out["statusCode"] == 200
+    return out, json.loads(out["body"])
+
+
+def _detail(world, gate_id):
+    out = world.api.handler(_event("GET /approvals/{id}", APPROVER, params={"id": gate_id}),
+                            None)
+    assert out["statusCode"] == 200
+    return json.loads(out["body"])
+
+
+def test_two_runs_of_one_head_against_two_bases_are_told_apart(gate):
+    # R3-B3: a retarget opens a second run of the same head; the row, the
+    # card and the queue name the base, so the live card is told apart.
+    flagged = [_github_file(_change("infra/main.tf"))]
+    gate.github.put(REPO, 7, SHA, flagged)
+    status, first = _post(gate, _bare())
+    assert status == 202 and first["status"] == "PENDING"
+    gate.github.put(REPO, 7, SHA, flagged, base="release")
+    status, second = _post(gate, _bare())
+    assert status == 202 and second["status"] == "PENDING"
+    assert second["gate_id"] != first["gate_id"]
+    assert _row(gate, first["gate_id"])["base_ref"] == "main"
+    assert _row(gate, second["gate_id"])["base_ref"] == "release"
+    _, body = _queue(gate)
+    rows = {row["approval_id"]: row for row in body["approvals"]}
+    assert rows[first["gate_id"]]["head"] == rows[second["gate_id"]]["head"] == SHA[:12]
+    assert rows[first["gate_id"]]["base"] == "main"
+    assert rows[second["gate_id"]]["base"] == "release"
+    first_card, second_card = _card(gate, first), _card(gate, second)
+    assert first_card["reason"] != second_card["reason"]
+    assert first_card["reason"].split("\n")[0] == (
+        f"Merge gate: pull request #7 in {REPO} (Volcan), head {SHA[:12]} into main.")
+    assert second_card["reason"].split("\n")[0].endswith(f"head {SHA[:12]} into release.")
+    assert rows[second["gate_id"]]["card"]["reason"].startswith(
+        second_card["reason"].split("\n")[0])
+    detail = _detail(gate, second["gate_id"])
+    assert detail["base"] == "release" and detail["card"]["reason"] == second_card["reason"]
+    # GET /gate/{id} still answers counts only: no branch name.
+    assert "release" not in json.dumps(_get(gate, second["gate_id"])[1])
+
+
+def test_a_base_branch_name_is_escaped_on_the_card_and_in_the_queue(gate):
+    # A branch name may hold format characters, like a path (J9).
+    base = "main‮txt.gnp"
+    shown = "main\\u202etxt.gnp"
+    gate.github.put(REPO, 7, SHA, [_github_file(_change("infra/main.tf"))], base=base)
+    status, view = _post(gate, _bare())
+    assert status == 202 and view["status"] == "PENDING"
+    # The run id holds the branch itself.
+    policy = gate.gate_api.policy
+    assert view["gate_id"] == policy.gate_id(policy.parse(_bare()), 0, base)
+    header = _card(gate, view)["reason"].split("\n")[0]
+    assert "‮" not in header and header.endswith(f" into {shown}.")
+    assert _row(gate, view["gate_id"])["base_ref"] == shown
+    _, body = _queue(gate)
+    assert [row["base"] for row in body["approvals"]] == [shown]
+    # A long name is cut on the card and cut shorter in the queue row.
+    long_base = "b" * 300
+    gate.github.put(REPO, 7, SHA, [_github_file(_change("infra/main.tf"))], base=long_base)
+    _, long_view = _post(gate, _bare())
+    header = _card(gate, long_view)["reason"].split("\n")[0]
+    assert header.endswith(" into " + "b" * policy.MAX_REF_CHARS + ".")
+    assert _detail(gate, long_view["gate_id"])["base"] == "b" * 64
+
+
+def _large_card_files():
+    # The large-card probe of J8: 25 renames of long astral paths.
+    emoji = "\U0001F600"
+    return [_github_file(_change(emoji * 395 + f"{i}", "renamed",
+                                 previous_path=".github/workflows/infra/migrations/"
+                                 + emoji * 360 + f"{i}"))
+            for i in range(25)]
+
+
+def test_large_gate_cards_never_fail_the_approver_queue(gate):
+    # R3-B4: whole cards of about 300 KB each would pass Lambda's 6 MB
+    # response limit, and the whole queue would fail with them.
+    now = int(time.time())
+    confirm = {"reason": "write_file needs a person to approve it.", "tool": "write_file"}
+    gate.table.items["appr-confirm"] = {"approval_id": "appr-confirm", "status": "PENDING",
+                                        "lane": "approval", "created_ts": now - 60,
+                                        "card": json.dumps(confirm)}
+    files, ids = _large_card_files(), []
+    for i in range(22):
+        sha = format(i + 1, "040x")
+        gate.github.put(REPO, 7, sha, files)
+        status, view = _post(gate, _bare(sha))
+        assert status == 202 and view["status"] == "PENDING"
+        ids.append(view["gate_id"])
+    whole = sum(len(json.dumps(gate.common.public_view(_row(gate, i)))) for i in ids)
+    assert whole > 6 * 1024 * 1024
+    out, body = _queue(gate)
+    assert len(out["body"]) < 1_000_000 and len(json.dumps(out)) < 2_000_000
+    assert "gate_rows_omitted" not in body
+    rows = {row["approval_id"]: row for row in body["approvals"]}
+    assert set(rows) == {"appr-confirm", *ids}
+    assert rows["appr-confirm"]["card"] == confirm
+    mark = gate.common.QUEUE_CUT_MARK
+    for gate_id in ids:
+        card = rows[gate_id]["card"]
+        assert card["reason"].startswith("Merge gate: ") and card["reason"].endswith(mark)
+        assert len(json.dumps(card["reason"])) <= gate.common.QUEUE_REASON_BYTES
+        assert "changed_files" not in card and card["layer"] == "mergegate"
+        assert rows[gate_id]["head"] and rows[gate_id]["base"] == "main"
+    # The detail view still answers with the whole card.
+    stored = json.loads(_row(gate, ids[0])["card"])
+    detail = _detail(gate, ids[0])
+    assert detail["card"]["reason"] == stored["reason"]
+    assert detail["card"]["changed_files"] == stored["changed_files"]
+    assert len(json.dumps(detail["card"])) > 250_000
+
+
+def test_the_queue_body_cap_leaves_out_gate_rows_only(gate, monkeypatch, capsys):
+    now = int(time.time())
+    confirm = {"reason": "x" * 5000, "tool": "write_file"}
+    gate.table.items["appr-confirm"] = {"approval_id": "appr-confirm", "status": "PENDING",
+                                        "lane": "approval", "created_ts": now - 60,
+                                        "card": json.dumps(confirm)}
+    for i in range(5):
+        _post(gate, _body([_change("infra/main.tf")], sha=format(i + 1, "040x")))
+    _, full = _queue(gate)
+    assert "gate_rows_omitted" not in full and len(full["approvals"]) == 6
+    kept = full["approvals"][:3]
+    cap = len(json.dumps({"approvals": kept})) + gate.api.QUEUE_COUNT_BYTES
+    monkeypatch.setattr(gate.api, "QUEUE_MAX_BYTES", cap)
+    out, body = _queue(gate)
+    assert len(out["body"]) <= cap
+    assert body["approvals"] == kept and body["gate_rows_omitted"] == 3
+    assert [row["lane"] for row in kept] == ["approval", "gate", "gate"]
+    assert '"queue_gate_rows_omitted": 3' in capsys.readouterr().out
+    # Even a cap below the approval-lane row alone never leaves it out.
+    monkeypatch.setattr(gate.api, "QUEUE_MAX_BYTES", 100)
+    _, body = _queue(gate)
+    assert [row["approval_id"] for row in body["approvals"]] == ["appr-confirm"]
+    assert body["approvals"][0]["card"] == confirm and body["gate_rows_omitted"] == 5
+
+
+def test_a_queue_card_keeps_its_first_line_and_counts_stored_bytes(gate):
+    common = gate.common
+    small = {"reason": "Merge gate: a\nb", "tool": "merge_gate", "changed_files": ["a"],
+             "prior_steps": []}
+    assert common.queue_card(small) == {"reason": "Merge gate: a\nb", "tool": "merge_gate"}
+    # 2 KB of astral characters is about 24 KB as stored, so it is cut.
+    emoji = "\U0001F600"
+    card = {"reason": "Merge gate: x\n" + "\n".join(emoji * 40 for _ in range(10))}
+    cut = common.queue_card(card)["reason"]
+    assert len(json.dumps(cut)) <= common.QUEUE_REASON_BYTES
+    assert cut.startswith("Merge gate: x\n") and cut.endswith(common.QUEUE_CUT_MARK)
+    assert all(line == emoji * 40 for line in cut.split("\n")[1:-1])
+    # A first line alone over the budget is cut by characters, never dropped.
+    alone = common.queue_card({"reason": "Merge gate: " + emoji * 1000})["reason"]
+    assert alone.startswith("Merge gate: " + emoji) and alone.endswith(common.QUEUE_CUT_MARK)
+    assert len(json.dumps(alone)) <= common.QUEUE_REASON_BYTES
+
+
 def test_a_gate_token_cannot_use_the_approver_routes(gate):
     _, view = _post(gate, _body([_change("infra/main.tf")]))
     out = gate.api.handler(
@@ -1174,9 +1359,13 @@ def test_a_forged_path_gives_a_gate_row_no_pill_and_no_grounded_row(tmp_path):
 
 def test_the_console_marks_gate_rows_and_says_the_check_is_advisory():
     js = (ROOT / "approvals" / "console" / "app.js").read_text(encoding="utf-8")
-    # J11: the queue row names the head, so an older head's card is told apart.
-    bs = chr(92)  # the console writes the middle dot as an escape
-    assert f'(c.tool || "tool") + (v.head ? " {bs}u00B7 head " + v.head : t ? ' in js
+    # J11: the queue row names the head, so an older head's card is told
+    # apart, and (R3-B3) the base branch beside it, so a retarget's second
+    # run of the same head is told apart too.
+    dot = "·"  # the queue row writes the middle dot as itself, as the cases table does
+    assert (f'(c.tool || "tool") + (v.head ? " {dot} head " + v.head + (v.base ? '
+            f'" {dot} base " + v.base : "") : t ? " {dot} " + t : "")') in js
+    assert f'h("td", {{ "data-label": "Tool {dot} target" }},\n' in js.replace("\r\n", "\n")
     # J13: the detail view warns too, appended only for a gate run.
     assert ('if (card.tool || card.reason) { if (gate) body.append(h("p", { class: "lane-warn", '
             'text: "This merge-gate run can name a private repository and its file paths. '
@@ -1297,3 +1486,57 @@ def test_the_workflows_body_is_what_the_gate_parses(tmp_path):
     body = json.loads(out)
     assert policy.parse(body) == policy.Request(REPO, 7, SHA)
     assert len(out.encode()) < policy.MAX_BODY_BYTES
+
+
+def _retry_segment():
+    steps = "\n".join(step["run"] for step in _workflow()["jobs"]["gate"]["steps"])
+    return steps[steps.index("# retry-begin"):steps.index("# retry-end")]
+
+
+def test_the_workflow_asks_again_until_a_deadline_and_says_the_throttle_is_shared():
+    # R3-B2 (J6): no fixed list of five waits (about 110 s in all).
+    text = WORKFLOW.read_text(encoding="utf-8")
+    job = _workflow()["jobs"]["gate"]
+    segment = _retry_segment()
+    assert "for wait in" not in text
+    assert "post_deadline=$(( $(date +%s) + 600 ))" in segment
+    assert "RANDOM %" in segment and "> 60 ? 60 :" in segment
+    assert "pause=$(( pause > left ? left : pause ))" in segment
+    # Ten minutes of asking, then ten of polling, inside the job's timeout.
+    assert job["timeout-minutes"] == 25
+    header = " ".join(line.lstrip("# ") for line in text.split("\non:")[0].splitlines())
+    assert ("while the gate is advisory an outside caller can still exhaust the shared route "
+            "throttle and make this job fail.") in header
+
+
+_FAKE_CLOCK = """set -euo pipefail
+CLOCK=1000000
+TRIES=0
+SLEEPS=""
+ANSWERS=(%s)
+date() { echo "$CLOCK"; }
+sleep() { SLEEPS="$SLEEPS $1"; CLOCK=$(( CLOCK + $1 )); }
+call() { CODE="${ANSWERS[$TRIES]:-429}"; TRIES=$(( TRIES + 1 )); }
+%s
+echo "RESULT $CODE $TRIES $(( CLOCK - 1000000 ))$SLEEPS"
+"""
+
+
+def _run_retry(answers):
+    script = _FAKE_CLOCK % (" ".join(answers), _retry_segment())
+    out = subprocess.run([shutil.which("bash"), "-s"], input=script.encode(),
+                         capture_output=True, check=True).stdout.decode()
+    code, tries, spent, *sleeps = out.strip().splitlines()[-1].split()[1:]
+    return code, int(tries), int(spent), [int(s) for s in sleeps]
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash is not installed here")
+def test_a_throttled_post_is_asked_again_with_jitter_until_the_deadline():
+    for _ in range(3):  # the waits are random: run it more than once
+        code, tries, spent, sleeps = _run_retry([])
+        assert code == "429" and spent == 600 and tries == len(sleeps) + 1
+        assert tries > 5 and all(1 <= s <= 60 for s in sleeps)
+        assert 2 <= sleeps[0] <= 5 and max(sleeps) > 15
+    # The first answer that is not 429, 503 or no answer ends it.
+    assert _run_retry(["503", "000", "429", "202"])[:2] == ("202", 4)
+    assert _run_retry(["403"]) == ("403", 1, 0, [])

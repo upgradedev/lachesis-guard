@@ -462,8 +462,8 @@ function viewQueue() {
     let grp = new Set(rows.map(v => v.project || "Demo")).size > 1 ? null : (rows[0] || {}).project || "Demo"; // B7a: project headers only when the rows span projects
     rows.forEach(v => { if ((v.project || "Demo") !== grp) { grp = v.project || "Demo"; body.append(h("tr", { class: "grp" }, h("th", { colspan: "6", scope: "colgroup", text: "Project: " + grp }))); }
       const c = v.card || {}, p = parseReason(c.reason || ""), t = targetOf(p.args), exp = expiry(v), made = Date.parse(c.created_at) || (v.created_ts || 0) * 1000;
-      body.append(h("tr", {}, h("td", { "data-label": "Waiting", text: made ? age(made) : "" }),
-        h("td", { "data-label": "Tool \u00B7 target" }, h("a", { href: "#/a/" + encodeURIComponent(v.approval_id), text: (c.tool || "tool") + (v.head ? " \u00B7 head " + v.head : t ? " \u00B7 " + t : "") })),
+      body.append(h("tr", {}, h("td", { "data-label": "Waiting", text: made ? age(made) : "" }), h("td", { "data-label": "Tool · target" },
+        h("a", { href: "#/a/" + encodeURIComponent(v.approval_id), text: (c.tool || "tool") + (v.head ? " · head " + v.head + (v.base ? " · base " + v.base : "") : t ? " · " + t : "") })),
         h("td", { "data-label": "Why paused" }, rulePill(c, p)),
         h("td", { "data-label": "Score" }, scored(c) ? meter(c.confidence, p.threshold, true) : h("span", { class: "muted", text: v.lane === "gate" ? "scan hold" : "no score" })),
         h("td", { "data-label": "Layer", text: LAYER[c.layer] || c.layer || "" }),

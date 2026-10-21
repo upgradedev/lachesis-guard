@@ -33,8 +33,9 @@ for its changes, at most policy.FILE_PAGES pages. Nothing the request
 says changed is scanned. A pull request that is not open, whose head is
 no longer the one the run was for (a newer push; its own run decides),
 or whose base branch changed between the reads, is 409. Any GitHub
-failure is 503 and records nothing: the gate never passes what it could
-not read.
+failure is 503 and records nothing: the gate never passes a pull request
+it could not read from GitHub. A binary file (no additions, no patch) is
+checked by its path only; its content is never read (gate/policy.py).
 
 The run of a pull-request head against its base branch has a derived id
 (policy.gate_id), so a re-run of the job finds the same run, and its
@@ -249,7 +250,9 @@ def _read_pull(gh: Any, request: policy.Request, pull_json: dict) -> policy.Pull
     again, head = _open_head(gh, request)
     if _base(again) != _base(pull_json):
         raise HeadMoved("the pull request base branch changed; the run for its new base decides")
-    return policy.from_github(request, head, files, complete, pull_json.get("changed_files"))
+    return policy.from_github(
+        request, head, files, complete, pull_json.get("changed_files"), _base(pull_json)
+    )
 
 
 # --- recording --------------------------------------------------------
@@ -302,6 +305,8 @@ def _record(
         "repository": pull.repository,
         "pr_number": pull.pr_number,
         "head_sha": pull.head_sha,
+        # Escaped like the card's paths: the queue shows it beside the head.
+        "base_ref": policy.shown(pull.base_ref),
         "summary": summary,
     }
     run = service.record_gate(gate_id, project.name, gate, card)
