@@ -301,7 +301,8 @@ def build() -> dict:
             "misses_raw": raw["misses"],
             "miss_ids": raw["miss_ids"],
             "misses_tier0": tier0["misses"],
-            "false_pauses": raw["false_pauses"],
+            "false_pauses_raw": raw["false_pauses"],
+            "false_pauses_shipped": tier0["false_pauses"],
         }
 
     # The pre-registered dev rule in analyze_threshold.main: zero dev misses, fewest false pauses.
@@ -395,8 +396,9 @@ def check(d: dict) -> None:
         t70["misses_raw"],
         t70["misses_tier0"],
         t70["clean"],
-        t70["false_pauses"],
-    ) == (51, 5, 12, 13, 1), t70
+        t70["false_pauses_raw"],
+        t70["false_pauses_shipped"],
+    ) == (51, 5, 12, 13, 1, 1), t70
     assert d["dev_lock"] == 0.95, d["dev_lock"]
     # The no-model comparison of scripts/no_model_baseline.py, as the
     # facts sheet of 2026-10-23 states it.

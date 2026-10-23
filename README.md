@@ -297,10 +297,10 @@ The detailed record below keeps the chosen threshold, confidence errors, paired 
 
 </details>
 
-<details>
-<summary>Threshold, calibration, seam benchmark, transfer suite and offline replay</summary>
-
 ## Threshold
+
+<details>
+<summary>Expand the calibration and 51-call seam benchmark</summary>
 
 The policy asks a person whenever Decider's confidence falls below 0.70, the chosen operating point. The calibration behind it follows, with its shortfall.
 
@@ -343,7 +343,12 @@ Against the no-model rule, Decider changed whether a call ran on 3 of the 51. `t
 
 Lachesis's verdict mix on the 51 is 42 confirm, 8 proceed, 1 deny and 0 guide. Guide fired 0 times on the 128 too, so on these rows the grounding answer changed no verdict. The 8 proceeds are the 5 tier-0 reads plus `t05`, `t06` and `t18` (the `lachesis_verdict` column of `evaluation/baseline_2026-10-13.jsonl`). So a rule fitted after the fact, pre-checks and then "search and `list_paths` run", ties Lachesis on all 51. On this small adversarial set a rule with no model is as safe and slightly noisier.
 
+</details>
+
 ### The 128-case transfer suite
+
+<details>
+<summary>Expand the paired splits, comparisons and limits</summary>
 
 128 further synthetic cases sit in paired domain-transfer splits, dev (`acme_billing`) and test (`globex_orders`), in `evaluation/expanded_cases.jsonl`. They were scored on the CI CPU runner (run 38893093595; rows in `evaluation/expanded_cpu_2026-10-16.jsonl`). Each split has 64 cases: 51 governed, 37 of them a harm class, and 13 clean. A governed case is one a person should see. The splits are paired: the test split is the dev split with its surface names swapped (64 of 64 pairs share the tool and both labels), so the two splits show one finding twice, not two findings. The table uses the shipped routing (tier-0 reads, then Decider):
 
@@ -364,7 +369,12 @@ The class is often wrong, and the gate absorbs most of it. Of the 98 calls this 
 
 At 0.80 Lachesis pauses as many clean calls as the no-model rule and lets no harm-class call run. So 0.80 is the strict setting and 0.70 the friction-reducing one. An operator who can afford the pauses runs `TriageHandler(threshold=0.80)`. Config writes are the named weak class. `scripts/analyze_threshold.py` also prints the raw Decider-only sweep, with no tier-0 reads.
 
+</details>
+
 ### Replay
+
+<details>
+<summary>Expand the offline replay commands and expected output</summary>
 
 None of these needs a model or an AWS account:
 
@@ -387,10 +397,10 @@ python scripts/measure_threshold.py --out threshold-results.jsonl
 
 </details>
 
-<details>
-<summary>Latency and cost: device-labelled measurements and ESTIMATE arithmetic</summary>
-
 ## Latency and cost
+
+<details>
+<summary>Expand the device-labelled measurements and ESTIMATE arithmetic</summary>
 
 On the hosted `ml.g4dn.xlarge` endpoint the 50-case probe gave a median of 718 ms and a p95 of 722 ms (n=45, first call excluded), with verdict parity 50 of 50 against the CPU rows (`evaluation/sagemaker_g4dn_2026-10-16.jsonl`). In the agent loop a warm triage took 865 to 1157 ms (n=4: the filmed run's three and one from a second run that morning; [docs/evidence/FILMED_RUN_2026-10-23.md](docs/evidence/FILMED_RUN_2026-10-23.md)). The SDK classifier answered in 1,142 ms median at the same seam. So hosted latency is at parity. The hosted endpoint runs `ml.g4dn.xlarge` because the `ml.g5.xlarge` pool stalled in eu-west-1 on 2026-10-16; the earlier GPU rows stay labelled by device (`evaluation/gpu_threshold_2026-10-13.jsonl`, EC2 `g5.xlarge` median 193 ms; `evaluation/sagemaker_2026-10-15.jsonl`, `ml.g5.xlarge` median 167 ms).
 
@@ -406,10 +416,10 @@ Why SageMaker and not Bedrock: strands-decider serves the model as is, behind a 
 
 </details>
 
-<details>
-<summary>After the decision: audit, failure handling and public demo ceilings</summary>
-
 ## After the decision: audit and failure handling
+
+<details>
+<summary>Expand the audit path and failure handling</summary>
 
 Of the four verdicts, only a pause becomes an event. Proceed, Guide and Deny leave none, so nothing below can see a call that ran when it should have paused.
 
@@ -469,7 +479,12 @@ flowchart LR
   `RemovalPolicy.DESTROY` with no point-in-time recovery, in one region (eu-west-1). Of the
   tables and buckets the stacks manage, only the audit bucket survives a destroy.
 
+</details>
+
 ### Ceilings, and what you see at each
+
+<details>
+<summary>Expand the capacity limits and the steps to take</summary>
 
 If a public run will not start or a card has no score, find its row below and wait for the time in the fourth column.
 
@@ -485,10 +500,10 @@ On the approvals lane an approver can still decide a fail-closed card; only the 
 
 </details>
 
-<details>
-<summary>Run the Bedrock demo and resume a paused session</summary>
-
 ## Run the demo
+
+<details>
+<summary>Expand the Bedrock demo and session resume instructions</summary>
 
 Needs: AWS credentials that can call Bedrock, a Decider server at `STRANDS_DECIDER_URL`, and the
 virtual environment from the [Quickstart](#quickstart) with pytest added. The agent's `run_tests`
