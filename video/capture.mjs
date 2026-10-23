@@ -88,7 +88,9 @@ try {
     // decided its buttons are disabled, so a stale card never matches.
     const approve = page.locator('.s4 button:has-text("Approve and run"):not([disabled])').first();
     const finished = page.locator("#steps .step-h", { hasText: "Finished" });
-    const stopped = page.locator("#steps li.stopped");
+    // Only an outcome row means the run ended badly; a decided pause also
+    // renders as li.stopped, so match the outcome headings, not the class.
+    const stopped = page.locator("#steps li.stopped .step-h", { hasText: /Run failed|Expired|without running|Merge check/u });
     await Promise.race([
       approve.waitFor({ state: "visible", timeout: 180_000 }),
       finished.waitFor({ state: "visible", timeout: 180_000 }),
