@@ -80,9 +80,8 @@ async function api(path, opts = {}) {
     return { status: res.status, body: body || {} };
   } catch (e) { return { status: 0, body: {} }; }
 }
-function errText(out) { // a bare 429 is the API Gateway route throttle (POST /try: 0.2 per second, burst 2, all callers together); the daily caps answer 429 with their own error text
+function errText(out) {
   if (out.status === 0) return "Could not complete: the network request failed. Check your connection and try again.";
-  if (out.status === 429 && !(out.body && out.body.error)) return "Could not complete: too many requests at once (HTTP 429). The API rate-limits all visitors together, and new demo runs start at about one every 5 seconds. Wait a few seconds and try again. A refused start does not use one of your 5 daily runs.";
   return "Could not complete: " + ((out.body && out.body.error) || "HTTP " + out.status) + ".";
 }
 function netFail(n) {
@@ -192,8 +191,8 @@ function inspectCase(c, thr = "0.70") {
     h("p", { class: "quote", text: "User: “" + c.user + "”" }),
     h("div", { class: "filter-bar", role: "toolbar", "aria-label": "Line" }, THRESHOLDS.map(t => h("button", { class: "chip" + (t === thr ? " chip--active" : ""),
       type: "button", "aria-pressed": String(t === thr), text: "line " + t, onclick: () => inspectCase(c, t) }))),
-    c.layer === "tier0" ? h("p", { class: "muted small", text: "Tier-0 safe read: the handler lets it proceed before Decider is asked. The calibration run still scored it; that score decided nothing." }) : null,
-    meter(c.conf, parseFloat(thr), false),
+    c.layer === "tier0" ? h("p", { class: "muted small", text: "Tier-0 safe read: the handler lets it proceed before Decider is asked. The evaluation run still scored it; that score decided nothing." }) : null,
+    c.layer === "tier0" ? meter(c.conf, null, false) : meter(c.conf, parseFloat(thr), false),
     kv([["Verdict at " + thr, h("span", {}, h("strong", { text: rule + " " }), vChip(verdict))], ["Rule", RULE_TEXT[rule]],
       ["Decider class", c.risk.replace(/_/g, " ")], ["Labelled class", c.label_risk.replace(/_/g, " ")],
       ["Grounded", (c.grounded ? "yes" : "no") + " (labelled " + (c.label_grounded ? "yes" : "no") + ")"],
@@ -222,15 +221,15 @@ function renderCases(filter) {
   const shown = list.filter(c => (explorer.filter === "all" || groupOf(c) === explorer.filter) &&
     (!q || (c.id + " " + c.tool + " " + c.target + " " + c.user).toLowerCase().includes(q)));
   $("#cases-count").textContent = shown.length + " of " + list.length + " cases · " + SRC[explorer.suite];
-  const tbody = $("#cases-table tbody"); tbody.textContent = "";
-  shown.forEach(c => { const [rule, verdict] = c.at["0.70"], t0 = c.layer === "tier0", ask = (td, v) => t0 ? h("td", td, h("span", { class: "small", text: "not asked" })) : h("td", td, v); tbody.append(
-    h("tr", { class: t0 ? "row--t0" : null, tabindex: "0", onclick: () => inspectCase(c), onkeydown: e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); inspectCase(c); } } },
+  const tbody = $("#cases-table tbody"); tbody.textContent = ""; if (!shown.length) tbody.append(h("tr", {}, h("td", { colspan: "7", class: "muted" }, "No case matches this search. ", q ? h("button", { class: "linkbtn", type: "button", text: "Clear the search", onclick: () => { explorer.q = ""; $("#case-search").value = ""; renderCases(); } }) : null)));
+  shown.forEach(c => { const [rule, verdict] = c.at["0.70"], t0 = c.layer === "tier0", ask = (td, v) => t0 ? h("td", td, h("span", { class: "muted small", text: "not asked" })) : h("td", td, v); tbody.append(
+    h("tr", { tabindex: "0", onclick: () => inspectCase(c), onkeydown: e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); inspectCase(c); } } },
       h("td", { "data-label": "Case" }, h("code", { text: c.id })),
       h("td", { "data-label": "Tool · target" }, h("strong", { text: c.tool }), " ", h("span", { class: "muted", text: c.target })),
       ask({ "data-label": "Decider class" }, spaced(c.risk)), // a tier-0 read never reaches Decider, so no meter sits under the line beside its Proceed
       ask({ "data-label": "Confidence" }, t0 ? null : meter(c.conf, LINE, true)),
       ask({ "data-label": "Grounded" }, c.grounded ? "yes" : "no"),
-      h("td", { "data-label": "Rule & verdict" }, h("strong", { text: rule + " " }), vChip(verdict)),
+      h("td", { "data-label": "Rule & verdict" }, h("strong", { text: rule + " " }), vChip(verdict), c.needs_person && verdict === "Proceed" ? h("span", { class: "err small", text: " ran (missed)" }) : null),
       h("td", { "data-label": "SDK classifier" }, h("span", { class: /missed/.test(sdkText(c)) ? "err small" : "muted small", text: sdkText(c) })))); });
 }
 function renderThrSim(thr = "0.70") {
@@ -254,17 +253,17 @@ function renderMetrics() {
     return h("div", { class: "bar-row" }, h("span", { text: label }), h("div", { class: "meter" }, fill), h("strong", { class: "num", text: n + " / " + of })); };
   box.append(h("div", { class: "tiles" },
     tile("Destructive writes that ran", B.lachesis_ran.length + " / " + B.destructive, "SDK classifier: " + B.sdk_ran.length + " / " + B.destructive + " (" + B.sdk_ran.join(", ") + ") · no model: " + (N.destructive_paused[1] - N.destructive_paused[0]) + " / " + N.destructive_paused[1]),
-    tile("Escalations caught", B.lachesis_caught + " / " + B.gold, "It also paused " + B.lachesis_paused_clean + " of " + B.clean + " clean calls (" + B.calls + "-call baseline). No model: " + frac(N.caught) + " caught, " + frac(N.clean_paused) + " clean paused. SDK classifier: " + B.sdk_caught + " of " + B.gold + " caught, " + B.sdk_paused_clean + " of " + B.clean + " clean paused."),
-    tile("Hosted triage latency", Math.round(G.median_ms) + " ms", "median · p95 " + Math.round(G.p95_ms) + " ms · n=" + G.n + " · parity " + G.parity + "/" + G.of),
+    tile("Escalations caught", B.lachesis_caught + " / " + B.gold, "It also paused " + B.lachesis_paused_clean + " of " + B.clean + " clean calls (" + B.calls + "-call baseline). No model: " + frac(N.caught) + " caught, " + frac(N.clean_paused) + " clean paused. SDK classifier: " + B.sdk_caught + " of " + B.gold + " caught (judged catches " + (B.sdk_caught - B.sdk_no_reason.length) + " to " + B.sdk_caught + "), " + B.sdk_paused_clean + " of " + B.clean + " clean paused."),
+    tile("Hosted triage latency", Math.round(G.median_ms) + " ms", "50-case probe median · p95 " + Math.round(G.p95_ms) + " ms · n=" + G.n + " · parity " + G.parity + "/" + G.of + " · in the agent loop 865 to 1157 ms (docs/evidence/FILMED_RUN_2026-10-23.md)"),
     tile("Risk answers right", A.risk_ok + " / " + A.scored, "grounding " + A.grounded_ok + " / " + A.scored + " · " + A.mistakes + " mistakes, highest " + A.worst_mistake.toFixed(2) + ", none at 0.70 or above")),
     h("div", { class: "grid-2" },
       h("div", { class: "panel" }, h("div", { class: "panel-head" }, h("h2", { text: "51-call baseline: the SDK classifier and a rule with no model" })),
         bar("Escalations caught, Lachesis", B.lachesis_caught, B.gold, "ok"), bar("Escalations caught, SDK", B.sdk_caught, B.gold, "warn"), bar("Escalations caught, no model", N.caught[0], N.caught[1], "ok"),
         bar("Clean calls paused, Lachesis (the cost)", B.lachesis_paused_clean, B.clean, "warn"), bar("Clean calls paused, SDK", B.sdk_paused_clean, B.clean, "accent"), bar("Clean calls paused, no model", N.clean_paused[0], N.clean_paused[1], "warn"),
-        h("p", { class: "muted small", text: "evaluation/baseline_2026-10-13.jsonl; SDK median " + B.sdk_median_ms + " ms per call. The SDK let " + B.sdk_ran.join(", ") + " run. No model means the same pre-checks, then a person for every other call. On this small adversarial set it is as safe as Lachesis and slightly noisier; Decider's value shows on the 128-case suite." })),
+        h("p", { class: "muted small", text: "evaluation/baseline_2026-10-13.jsonl; SDK median " + B.sdk_median_ms + " ms per call. The SDK let " + B.sdk_ran.join(", ") + " run. " + B.sdk_no_reason.length + " of its " + B.sdk_caught + " escalations (" + B.sdk_no_reason.join(", ") + ") carry no stated reason, so its judged catches are " + (B.sdk_caught - B.sdk_no_reason.length) + " to " + B.sdk_caught + ". No model means the same pre-checks, then a person for every other call. On this small adversarial set it is as safe as Lachesis and slightly noisier; Decider's value shows on the 128-case suite." })),
       h("div", { class: "panel" }, h("div", { class: "panel-head" }, h("h2", { text: "128-case suite, line 0.70: what Decider buys" })),
         kv([["Clean calls paused", "Lachesis " + frac(L.clean_paused) + " · no model " + frac(Z.clean_paused)], ["Harm-class calls that ran", "Lachesis " + frac(L.harm_class_proceeded) + " (" + L.harm_ids.join(", ") + ", scored benign) · no model " + frac(Z.harm_class_proceeded)],
-          ["Governed calls that ran", "Lachesis " + frac(L.governed_proceeded) + " · no model " + frac(Z.governed_proceeded) + " (read_file calls, by the read rule)"], ["Decider alone", T.misses_raw + " of " + T.governed + " governed calls proceed (" + T.miss_ids.join(", ") + ")"], ["Dev split", "Lachesis " + frac(S["0.70"].dev.lachesis.clean_paused) + " clean paused, " + frac(S["0.70"].dev.lachesis.harm_class_proceeded) + " harm-class ran (" + S["0.70"].dev.lachesis.harm_ids.join(", ") + ")"],
+          ["Governed calls that ran", "Lachesis " + frac(L.governed_proceeded) + " · no model " + frac(Z.governed_proceeded) + ". Both run the " + Z.governed_proceeded[0] + " read_file calls by the read rule; Lachesis also ran " + T.miss_ids.filter(id => (findCase(id) || {}).layer !== "tier0").join(", ")], ["Decider alone", T.misses_raw + " of " + T.governed + " governed calls proceed (" + T.miss_ids.join(", ") + ")"], ["Dev split", "Lachesis " + frac(S["0.70"].dev.lachesis.clean_paused) + " clean paused, " + frac(S["0.70"].dev.lachesis.harm_class_proceeded) + " harm-class ran (" + S["0.70"].dev.lachesis.harm_ids.join(", ") + ")"],
           ["At 0.80, the strict line", "Lachesis " + frac(S["0.80"].test.lachesis.clean_paused) + " clean paused, " + frac(S["0.80"].test.lachesis.harm_class_proceeded) + " harm-class ran"], ["Operating point", "0.70, chosen; the pre-registered dev rule would lock " + DATA.dev_lock.toFixed(2)]]),
         h("p", { class: "muted small", text: "Test split unless marked. evaluation/expanded_cpu_2026-10-16.jsonl, shipped routing · every figure on this page: " + DATA.generated_by + ", replaying " + DATA.no_model.generated_by }))));
 }
@@ -275,13 +274,13 @@ function decisionCard(view, lane, onDecided) {
   const tool = card.tool || "tool", exp = expiry(view), cold = card.layer === "unavailable", made = Date.parse(card.created_at), paused = isFinite(made) ? made : view.created_ts ? view.created_ts * 1000 : NaN; // paused: the retry hint adds 10 minutes
   const canDecide = view.status === "PENDING" && !(lane === "try" && cold);
   const head = h("div", { class: "s4-head" }, h("h3", { text: tool + (target ? " on " + target : "") }),
-    exp && view.status === "PENDING" ? h("span", { class: "countdown", "data-exp": exp }) : null);
+    exp && view.status === "PENDING" && !(lane === "try" && cold) ? h("span", { class: "countdown", "data-exp": exp }) : null);
   let alert = null;
   if (cold && lane === "try") {
     alert = h("div", { class: "alert alert--warning", role: "alert" }, h("h3", { text: "Decider did not answer (asleep or busy)" }),
       h("p", { text: "The GPU scales to zero when idle. This call paused fail-closed: no score, and the public demo cannot decide it. " +
-        "If the GPU was asleep, this run asked it to wake; that took about 9 minutes when measured on 2026-10-23, not promised. " + (isFinite(paused) ? "Start another run after " + hhmm(paused + 600000) + " UTC. " : "") +
-        "This pause expires at " + (exp ? hhmm(exp) : "the end of its window") + " UTC and is then treated as declined; nothing runs." }));
+        "If the GPU was asleep, this run asked it to wake; that took about 9 minutes when measured on 2026-10-23, not a promise. " + (isFinite(paused) ? "Start another run after " + hhmm(paused + 600000) + " UTC: a run started earlier can pause the same way, and it still uses one of today's 5 runs. " : "") +
+        "If Decider was only busy with another call, a run started once that call ends can be scored. This pause expires at " + (exp ? hhmm(exp) : "the end of its window") + " UTC and is then treated as declined; nothing runs." }));
   } else if (cold) {
     alert = h("div", { class: "alert alert--warning" }, h("p", { text: "Decider did not answer (asleep or busy), so this call paused fail-closed with no score. You decide it." }));
   }
@@ -377,7 +376,7 @@ function renderTry(v, ctl) {
   }
   if (card.tool) {
     const target = targetOf(p.args), item = h("li", { class: v.status === "PENDING" ? "paused" : "stopped" });
-    if (v.status !== "PENDING") item.append(h("div", { class: "step-h" }, card.tool + (target ? " \u00B7 " + target : ""), h("span", { class: "pill pill--warn", text: "Paused" })));
+    if (v.status !== "PENDING") item.append(h("div", { class: "step-h" }, card.tool + (target ? " \u00B7 " + target : ""), h("span", { class: "pill pill--warn", text: { APPROVED: "Approved", DONE: "Approved", DECLINED: "Declined", REFUSED_DONE: "Declined", RESUMING: "Decided", EXPIRED: "Expired" }[v.status] || "Paused" })));
     if (v.status === "PENDING") item.append(decisionCard(v, "try", () => ctl.kick()));
     else item.append(h("p", { class: "step-d", text: (AFTER[v.status] || v.status) + (v.decided_by_name === "try-visitor" ? " Decided on this page." : "") }));
     list.append(item);
@@ -409,7 +408,7 @@ function renderLedger(el, events) {
     h("ol", { class: "steps" }, events.map(e => { const t = Date.parse(e.at), facts = ledgerFacts(e);
       return h("li", { class: e.type === "RunFailed" ? "stopped" : e.type === "RunPaused" ? "paused" : "done" },
         h("div", { class: "step-h" }, h("code", { text: "#" + e.seq }), h("span", { text: e.type }), isFinite(t) ? h("span", { class: "muted", text: hhmmss(t) + " UTC" }) : null,
-          e.status ? h("span", { class: "pill", text: (STATUS[(el._gate ? "GATE_" : "") + e.status] || STATUS[e.status] || [e.status])[0] }) : null), facts ? h("p", { class: "step-d", text: facts }) : null); })));
+          e.status ? h("span", { class: "pill", text: (el.id === "run-ledger" && e.type === "RunPaused" && e.status === "PENDING" && e.layer === "unavailable" ? STATUS.COLD : STATUS[(el._gate ? "GATE_" : "") + e.status] || STATUS[e.status] || [e.status])[0] }) : null), facts ? h("p", { class: "step-d", text: facts }) : null); })));
 }
 function loadLedger(path, el, terminal) { // only the latest read per panel renders; a failed read at a terminal status retries once
   const g = gen, n = el._req = (el._req || 0) + 1;
@@ -421,7 +420,7 @@ function loadLedger(path, el, terminal) { // only the latest read per panel rend
 }
 function viewTry(token) {
   const run = $("#run"), msg = $("#try-msg");
-  msg.hidden = true; $("#try-start").disabled = false; $("#try-intro").hidden = !!token; $("#try-start").textContent = token ? "Start another run" : "Start the demo run";
+  msg.hidden = true; $("#try-start").disabled = false; $("#try-intro").hidden = !!token; $("#try-note").hidden = !!token; $("#try-start").textContent = token ? "Start another run" : "Start the demo run";
   const led = $("#run-ledger"); led.hidden = true; led.textContent = "";
   if (!token) { run.hidden = true; return; }
   run.hidden = false; $("#run-ref").textContent = token; $("#steps").textContent = ""; $("#run-status").textContent = "";
@@ -438,7 +437,7 @@ $("#try-start").addEventListener("click", async () => {
   const btn = $("#try-start"), msg = $("#try-msg"); btn.disabled = true; msg.hidden = true;
   const out = await api("/try", { method: "POST", body: "{}" });
   if (out.status === 202 && out.body.token) { store(s => s.setItem("lachesis_try_started", JSON.stringify({ token: out.body.token, t: Date.now() }))); location.hash = "#/try/" + encodeURIComponent(out.body.token); return; }
-  msg.hidden = false; msg.textContent = errText(out); btn.disabled = false;
+  msg.hidden = false; msg.textContent = out.status === 429 && !(out.body && out.body.error) ? "Could not complete: too many requests at once (HTTP 429). The API rate-limits all visitors together, and new demo runs start at about one every 5 seconds. Wait a few seconds and try again. A refused start does not use one of your 5 daily runs." : errText(out); btn.disabled = false; // a bare 429 is the POST /try route throttle (0.2 per second, burst 2, all callers together); the daily caps answer 429 with their own error text
 });
 
 function viewQueue() {
@@ -582,7 +581,7 @@ function fx(view) {
 
 let first = true;
 function route() {
-  clearTimers(); gen += 1; netFail(0);
+  clearTimers(); gen += 1; netFail(0); closeDrawer();
   const view = current(), p = parts();
   document.querySelectorAll("[data-view]").forEach(el => { el.hidden = el.dataset.view !== view; });
   document.querySelectorAll(".nav-item[data-nav]").forEach(a => {

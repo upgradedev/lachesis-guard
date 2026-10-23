@@ -72,7 +72,7 @@ button.chip { cursor: pointer; } button.chip:hover, .chip--active { color: var(-
 .table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .table th, .table td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
 .table th { color: var(--muted); font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: .05em; }
-.table--hover tbody tr { cursor: pointer; } .table--hover tbody tr:hover { background: var(--surface-2); } .table tr.row--t0 td { color: var(--muted); }
+.table--hover tbody tr { cursor: pointer; } .table--hover tbody tr:hover { background: var(--surface-2); }
 .flow { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
 .flow li { display: flex; flex-direction: column; gap: 4px; padding: 14px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; font-size: 13px; color: var(--muted); }
 .flow li strong { color: var(--text); font-size: 14px; }
