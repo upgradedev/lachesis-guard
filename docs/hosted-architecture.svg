@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="1080" viewBox="0 0 1280 1080" role="img" aria-labelledby="title description">
+<title id="title">Lachesis: hosted architecture</title>
+<desc id="description">A public visitor or approver reaches the CloudFront and S3 console. Cognito identifies approvers. API Gateway calls the approvals API and runner Lambda. Lambda stores run state and pause events in DynamoDB and invokes the Strands agent on AgentCore Runtime V2. The agent uses Amazon Bedrock and the SageMaker Decider endpoint. DynamoDB streams feed a publisher Lambda, EventBridge and Firehose, then the S3 audit lake and Athena.</desc>
+<defs>
+<linearGradient id="background" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0b1424"/><stop offset="1" stop-color="#14182d"/></linearGradient>
+<marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#8ea7c2" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></marker>
+<marker id="mint-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#91e8d6" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></marker>
+<marker id="violet-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#c0afff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></marker>
+</defs>
+<rect width="1280" height="1080" rx="22" fill="url(#background)"/>
+<g font-family="Arial, Helvetica, sans-serif">
+<text x="40" y="54" text-anchor="start" font-size="31" fill="#edf4ff" font-weight="600">Hosted architecture</text>
+<text x="40" y="88" text-anchor="start" font-size="21" fill="#a4b6cf" font-weight="400">The agent, the decision service and the pause-event audit path.</text>
+<path d="M640 190V205H300" fill="none" stroke="#728ba8" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M640 205H980" fill="none" stroke="#728ba8" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M300 205V240" fill="none" stroke="#728ba8" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M980 205V240" fill="none" stroke="#728ba8" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M300 325V350H640" fill="none" stroke="#728ba8" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M980 325V350H640" fill="none" stroke="#728ba8" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M640 350V385" fill="none" stroke="#728ba8" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M640 465V515" fill="none" stroke="#728ba8" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M640 595V630H300" fill="none" stroke="#728ba8" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M640 630H950" fill="none" stroke="#728ba8" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M300 630V665" fill="none" stroke="#728ba8" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M950 630V665" fill="none" stroke="#728ba8" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M300 750V805" fill="none" stroke="#728ba8" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M950 750V775H750" fill="none" stroke="#728ba8" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M950 775H1090" fill="none" stroke="#728ba8" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M750 775V805" fill="none" stroke="#728ba8" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M1090 775V805" fill="none" stroke="#728ba8" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M300 890V955" fill="none" stroke="#728ba8" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M520 997H620" fill="none" stroke="#728ba8" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<rect x="440" y="115" width="400" height="75" rx="14" fill="#132235" stroke="#728ba8" stroke-opacity=".55" stroke-width="1.5"/>
+<text x="640.0" y="160.5" text-anchor="middle" font-size="24" fill="#edf4ff" font-weight="600">Public visitor / approver</text>
+<rect x="80" y="240" width="440" height="85" rx="14" fill="#132235" stroke="#728ba8" stroke-opacity=".55" stroke-width="1.5"/>
+<text x="300.0" y="275" text-anchor="middle" font-size="23" fill="#edf4ff" font-weight="600">CloudFront + S3</text>
+<text x="300.0" y="304" text-anchor="middle" font-size="21" fill="#a4b6cf" font-weight="400">Approvals console</text>
+<rect x="760" y="240" width="440" height="85" rx="14" fill="#132235" stroke="#728ba8" stroke-opacity=".55" stroke-width="1.5"/>
+<text x="980.0" y="275" text-anchor="middle" font-size="23" fill="#edf4ff" font-weight="600">Cognito</text>
+<text x="980.0" y="304" text-anchor="middle" font-size="21" fill="#a4b6cf" font-weight="400">Approvers group</text>
+<rect x="440" y="385" width="400" height="80" rx="14" fill="#132235" stroke="#728ba8" stroke-opacity=".55" stroke-width="1.5"/>
+<text x="640.0" y="433.0" text-anchor="middle" font-size="24" fill="#edf4ff" font-weight="600">API Gateway HTTP API</text>
+<rect x="440" y="515" width="400" height="80" rx="14" fill="#132235" stroke="#728ba8" stroke-opacity=".55" stroke-width="1.5"/>
+<text x="640.0" y="550" text-anchor="middle" font-size="24" fill="#edf4ff" font-weight="600">Lambda</text>
+<text x="640.0" y="579" text-anchor="middle" font-size="21" fill="#a4b6cf" font-weight="400">Approvals API + runner</text>
+<rect x="80" y="665" width="440" height="85" rx="14" fill="#132235" stroke="#728ba8" stroke-opacity=".55" stroke-width="1.5"/>
+<text x="300.0" y="700" text-anchor="middle" font-size="24" fill="#edf4ff" font-weight="600">DynamoDB</text>
+<text x="300.0" y="729" text-anchor="middle" font-size="21" fill="#a4b6cf" font-weight="400">Run state + pause events</text>
+<rect x="700" y="665" width="500" height="85" rx="14" fill="#12302f" stroke="#91e8d6" stroke-opacity=".55" stroke-width="1.5"/>
+<text x="950.0" y="700" text-anchor="middle" font-size="24" fill="#edf4ff" font-weight="600">AgentCore Runtime V2</text>
+<text x="950.0" y="729" text-anchor="middle" font-size="21" fill="#a4b6cf" font-weight="400">Strands agent + Lachesis</text>
+<rect x="80" y="805" width="440" height="85" rx="14" fill="#132235" stroke="#728ba8" stroke-opacity=".55" stroke-width="1.5"/>
+<text x="300.0" y="840" text-anchor="middle" font-size="23" fill="#edf4ff" font-weight="600">DynamoDB stream</text>
+<text x="300.0" y="869" text-anchor="middle" font-size="21" fill="#a4b6cf" font-weight="400">Publisher Lambda</text>
+<rect x="620" y="805" width="260" height="85" rx="14" fill="#12302f" stroke="#91e8d6" stroke-opacity=".55" stroke-width="1.5"/>
+<text x="750.0" y="840" text-anchor="middle" font-size="22" fill="#edf4ff" font-weight="600">Amazon Bedrock</text>
+<text x="750.0" y="869" text-anchor="middle" font-size="19" fill="#a4b6cf" font-weight="400">Generative model</text>
+<rect x="940" y="805" width="300" height="85" rx="14" fill="#28253e" stroke="#c0afff" stroke-opacity=".55" stroke-width="1.5"/>
+<text x="1090.0" y="840" text-anchor="middle" font-size="23" fill="#edf4ff" font-weight="600">SageMaker</text>
+<text x="1090.0" y="869" text-anchor="middle" font-size="21" fill="#a4b6cf" font-weight="400">Strands Decider 2B</text>
+<rect x="80" y="955" width="440" height="85" rx="14" fill="#132235" stroke="#728ba8" stroke-opacity=".55" stroke-width="1.5"/>
+<text x="300.0" y="1005.5" text-anchor="middle" font-size="24" fill="#edf4ff" font-weight="600">EventBridge + Firehose</text>
+<rect x="620" y="955" width="620" height="85" rx="14" fill="#132235" stroke="#728ba8" stroke-opacity=".55" stroke-width="1.5"/>
+<text x="930.0" y="1005.5" text-anchor="middle" font-size="24" fill="#edf4ff" font-weight="600">S3 audit lake + Athena</text>
+</g>
+</svg>

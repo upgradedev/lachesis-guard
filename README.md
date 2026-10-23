@@ -58,6 +58,11 @@ The rule numbers are the ones the console, the article and the video cite.
 
 **The model is never the gate.** Decider only measures; the code decides. If Decider does not answer, the call pauses with "the Decider did not answer, so a person decides".
 
+![Decision flow: pre-checks, Decider and the Python policy route a tool call; approval permits execution and the result returns to the agent.](docs/decision-flow.svg)
+
+<details>
+<summary>Diagram source (Mermaid)</summary>
+
 ```mermaid
 flowchart TD
     A["Bedrock agent proposes a tool call"] --> B{"Lachesis pre-checks"}
@@ -79,6 +84,8 @@ flowchart TD
     E --> R["Tool result returned to agent"]
     R --> A
 ```
+
+</details>
 
 <details>
 <summary>Who uses it and how it compares with the existing gates</summary>
@@ -177,6 +184,11 @@ Next steps, each with what it needs:
 
 The hosted agent runs on Amazon Bedrock AgentCore in `eu-west-1`; Strands Decider serves from a SageMaker GPU endpoint that scales to zero. The console shows a proposed call before a person decides it. Proceed, Guide and Deny leave no event in the hosted pause ledger.
 
+![Hosted architecture: console and approval API, the Strands agent on AgentCore, Bedrock and SageMaker, and the pause-event audit path.](docs/hosted-architecture.svg)
+
+<details>
+<summary>Diagram source (Mermaid)</summary>
+
 ```mermaid
 flowchart TB
     V["Public visitor / approver"] --> UI["CloudFront + S3 console"]
@@ -192,6 +204,8 @@ flowchart TB
     PUB --> BUS["EventBridge + Firehose"]
     BUS --> LAKE["S3 audit lake + Athena"]
 ```
+
+</details>
 
 <details>
 <summary>Hosted and local paths, cold starts, concurrency and older benchmark limits</summary>
