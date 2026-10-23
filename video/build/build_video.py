@@ -9,15 +9,17 @@ split by sentence in proportion to its length inside that beat's own audio windo
 they cannot drift from the voice.
 
 A beat can instead be a card: {"card": "tour.txt"} renders that committed text file
-as a plain terminal-style card in a monospace font, held for the beat's audio. Line
+as a plain terminal-style card in a monospace font, held for the beat's audio. The
+lines can also sit inline in beats.json, as {"card": ["title", "line", ...]}. Line
 one is the title; every other line is drawn verbatim, with each verdict word and its
-bracketed score picked out in colour. Nothing in a card comes from the capture.
+bracketed score picked out in colour. An empty line is a spacer. Nothing in a card
+comes from the capture.
 
 Inputs (all under ROOT):
   capture/production.webm, capture/markers.json   from video/capture.mjs in CI
   media/narration/timing.json and the per-beat mp3   from kit/generate-narration.py
   beats.json   beat id -> [start marker, end marker] (or a number of seconds after start),
-               or {"card": "<file>.txt"} for a card beat
+               or {"card": "<file>.txt"} or {"card": [lines]} for a card beat
   CARD_FONT, CARD_FONT_BOLD   monospace font files for cards (DejaVu Sans Mono by default)
 Output: out/lachesis-demo.mp4 and out/receipt.json
 """
@@ -102,12 +104,22 @@ def layers(line: str) -> list[tuple[str, str]]:
     return [(CARD_TEXT, "".join(plain))] + [(c, "".join(t)) for c, t in coloured.items()]
 
 
-def render_card(name: str, seg: pathlib.Path, frames: int) -> dict:
-    """A terminal-style card from a committed text file: line one is the title, the
-    rest are drawn verbatim at the largest size that fits inside the margins."""
-    if not re.fullmatch(r"[a-z0-9_-]+\.txt", name):
-        sys.exit(f"card {name!r} is not a plain .txt file name")
-    lines = [line.rstrip() for line in (ROOT / name).read_text(encoding="utf-8").splitlines()]
+def card_source(sid: str, spec: object) -> tuple[str, list[str]]:
+    """A card's name and lines: a committed .txt file, or lines inline in beats.json."""
+    if isinstance(spec, list):
+        if not all(isinstance(line, str) for line in spec):
+            sys.exit(f"card for {sid} must be a list of strings")
+        return f"beats.json:{sid}", [line.rstrip() for line in spec]
+    if not isinstance(spec, str) or not re.fullmatch(r"[a-z0-9_-]+\.txt", spec):
+        sys.exit(f"card {spec!r} is not a plain .txt file name")
+    text = (ROOT / spec).read_text(encoding="utf-8")
+    return spec, [line.rstrip() for line in text.splitlines()]
+
+
+def render_card(name: str, lines: list[str], seg: pathlib.Path, frames: int) -> dict:
+    """A terminal-style card: line one is the title, the rest are drawn verbatim at
+    the largest size that fits inside the margins. An empty line only adds space."""
+    lines = list(lines)
     while lines and not lines[-1]:
         lines.pop()
     if len(lines) < 2:
@@ -134,7 +146,8 @@ def render_card(name: str, seg: pathlib.Path, frames: int) -> dict:
     for n, line in enumerate(body):
         y = rule + step * (n + 1)
         for k, (colour, text) in enumerate(layers(line)):
-            texts.append((f"{seg.stem}-{n}-{k}.txt", text, "card-mono.ttf", body_px, colour, y))
+            if text.strip():
+                texts.append((f"{seg.stem}-{n}-{k}.txt", text, "card-mono.ttf", body_px, colour, y))
     for file, text, font, px, colour, y in texts:
         (SEG / file).write_text(text, encoding="utf-8")
         vf.append(f"drawtext=fontfile={font}:textfile={file}:expansion=none:fontsize={px}:"
@@ -174,8 +187,8 @@ def main() -> None:
         card = None
         if isinstance(beats[sid], dict):
             # A card beat: rendered text, no capture footage, held for the whole beat.
-            a, b = "card", beats[sid]["card"]
-            card = render_card(b, seg, frames)
+            a, (b, lines) = "card", card_source(sid, beats[sid]["card"])
+            card = render_card(b, lines, seg, frames)
             start, window, speed = 0.0, hold, 1.0
             if card["widest_px"] > card["room_px"]:
                 problems.append(f"card {b}: widest line {card['widest_px']} px "

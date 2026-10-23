@@ -1,6 +1,6 @@
 {
   "schemaVersion": "archon.submission-video-timing/v1",
-  "totalSeconds": 174.612,
+  "totalSeconds": 173.73,
   "scenes": [
     {
       "id": "hook",
@@ -26,8 +26,8 @@
     {
       "id": "tests",
       "audio": "04-tests.mp3",
-      "durationSeconds": 11.796,
-      "holdSeconds": 12.446,
+      "durationSeconds": 13.235,
+      "holdSeconds": 13.885,
       "startSeconds": 54.891
     },
     {
@@ -35,42 +35,42 @@
       "audio": "05-ledger.mp3",
       "durationSeconds": 8.777,
       "holdSeconds": 9.427,
-      "startSeconds": 67.337
+      "startSeconds": 68.777
     },
     {
       "id": "policy",
       "audio": "06-policy.mp3",
       "durationSeconds": 23.127,
       "holdSeconds": 23.777,
-      "startSeconds": 76.764
+      "startSeconds": 78.204
     },
     {
       "id": "tour",
       "audio": "07-tour.mp3",
-      "durationSeconds": 14.768,
-      "holdSeconds": 15.418,
-      "startSeconds": 100.541
+      "durationSeconds": 14.675,
+      "holdSeconds": 15.325,
+      "startSeconds": 101.981
     },
     {
       "id": "metrics",
       "audio": "08-metrics.mp3",
-      "durationSeconds": 26.331,
-      "holdSeconds": 26.981,
-      "startSeconds": 115.959
+      "durationSeconds": 24.102,
+      "holdSeconds": 24.752,
+      "startSeconds": 117.306
     },
     {
       "id": "architecture",
       "audio": "09-architecture.mp3",
       "durationSeconds": 14.443,
       "holdSeconds": 15.093,
-      "startSeconds": 142.941
+      "startSeconds": 142.058
     },
     {
       "id": "close",
       "audio": "10-close.mp3",
       "durationSeconds": 15.929,
       "holdSeconds": 16.579,
-      "startSeconds": 158.034
+      "startSeconds": 157.151
     }
   ]
 }

@@ -27,8 +27,8 @@
     },
     {
       "id": "tests",
-      "captionText": "The test run scores 0.28. Unsure again, so R1 asks. Each score took about a second on a SageMaker GPU. Approved, the agent finishes.",
-      "speechText": "The test run scores zero point two eight. Unsure again, so R one asks. Each score took about a second on a SageMaker G P U. Approved, the agent finishes."
+      "captionText": "The test run scores 0.28, and the class is wrong again. Unsure: R1 pauses. Each score took about a second on a SageMaker GPU. Approved, the agent finishes.",
+      "speechText": "The test run scores zero point two eight, and the class is wrong again. Unsure: R one pauses. Each score took about a second on a SageMaker G P U. Approved, the agent finishes."
     },
     {
       "id": "ledger",
@@ -42,13 +42,13 @@
     },
     {
       "id": "tour",
-      "captionText": "The same pattern file, on the pinned model in CI. Four calls, four verdicts, each with its confidence: proceed, guide, confirm, deny. A rule that pauses everything cannot do that.",
-      "speechText": "The same pattern file, on the pinned model in C I. Four calls, four verdicts, each with its confidence: proceed, guide, confirm, deny. A rule that pauses everything cannot do that."
+      "captionText": "The standalone pattern file, on the pinned model in CI. Four calls, four verdicts, each with its confidence: proceed, guide, confirm, deny. A rule that pauses everything cannot do that.",
+      "speechText": "The standalone pattern file, on the pinned model in C I. Four calls, four verdicts, each with its confidence: proceed, guide, confirm, deny. A rule that pauses everything cannot do that."
     },
     {
       "id": "metrics",
-      "captionText": "What the model adds: a rule with no model is at least as safe but pauses most clean calls. At 0.70, the chosen operating point, Decider let 12 of 13 clean test calls run. That rule paused 7. The price: two config writes misread as benign. And the SDK classifier let 3 destructive writes run, where Lachesis paused all 8.",
-      "speechText": "What the model adds: a rule with no model is at least as safe but pauses most clean calls. At zero point seven oh, the chosen operating point, Decider let twelve of thirteen clean test calls run. That rule paused seven. The price: two config writes misread as benign. And the S D K classifier let three destructive writes run, where Lachesis paused all eight."
+      "captionText": "A rule with no model paused 7 of 13 clean test calls. At 0.70, the chosen operating point, Decider cut that to 1. The price: three calls ran that the rule paused, two of them config writes misread as benign. On the 51-call set, the SDK classifier let 3 of 8 destructive writes run. Lachesis paused all 8.",
+      "speechText": "A rule with no model paused seven of thirteen clean test calls. At zero point seven oh, the chosen operating point, Decider cut that to one. The price: three calls ran that the rule paused, two of them config writes misread as benign. On the fifty-one call set, the S D K classifier let three of eight destructive writes run. Lachesis paused all eight."
     },
     {
       "id": "architecture",

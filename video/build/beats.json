@@ -34,8 +34,17 @@
   "architecture",
   16.0
  ],
- "close": [
-  "close",
-  11.8
- ]
+ "close": {
+  "card": [
+   "the reusable pattern · patterns/guardrails/triage.py",
+   "from strands import Agent",
+   "from triage import TriageHandler",
+   "agent = Agent(model=..., tools=[...], interventions=[TriageHandler()])",
+   "",
+   "repo     https://github.com/upgradedev/lachesis-guard",
+   "console  https://d2nm49ao7e8z4z.cloudfront.net",
+   "replay   python scripts/no_model_baseline.py",
+   "footage  console build ff75eb4, recorded before the wording fixes in PR #77"
+  ]
+ }
 }
