@@ -240,8 +240,8 @@ function renderThrSim(thr = "0.70") {
     kv([["Governed calls that proceed", a.misses.length + " of " + a.governed], ["Clean calls paused", a.false_pauses.length + " of " + a.clean]]),
     a.misses.length ? h("p", { class: "small" }, "Proceeding: ", a.misses.map(id => [caseBtn(id), findCase(id) && findCase(id).layer === "tier0" ? " (tier-0 read) " : " (Decider) "])) : null,
     h("h3", { text: "128-case suite, test split, CPU rows" }),
-    kv([["Governed proceed, Decider only", b.misses_raw + " of " + b.governed], ["Governed proceed, with tier-0 reads", b.misses_tier0 + " of " + b.governed],
-      ["Clean calls paused", b.false_pauses + " of " + b.clean]]),
+    kv([["Governed proceed, Decider only", b.misses_raw + " of " + b.governed], ["Governed proceed, shipped routing", b.misses_tier0 + " of " + b.governed],
+      ["Clean calls paused, Decider only", b.false_pauses_raw + " of " + b.clean], ["Clean calls paused, shipped routing", b.false_pauses_shipped + " of " + b.clean]]),
     h("p", { class: "muted small", text: "0.70 is the chosen operating point. " + calibText() + " On the 128-case dev split the pre-registered rule would lock " + DATA.dev_lock.toFixed(2) + ". Figures from " + DATA.generated_by + "." }));
 }
 function calibText() { const c = DATA.calib50; return c ? "On the 50-case fit split, " + c.fit_accepted + " calls cleared it and " + c.fit_right + " were right, but only " + c.fit_decider + " of them reach Decider under the shipped routing, short of the rule's own minimum of " + c.min_accepted + ". Held out: " + c.held_right + " of " + c.held_accepted + " right." : ""; }
@@ -265,6 +265,7 @@ function renderMetrics() {
         kv([["Clean calls paused", "Lachesis " + frac(L.clean_paused) + " · no model " + frac(Z.clean_paused)], ["Harm-class calls that ran", "Lachesis " + frac(L.harm_class_proceeded) + " (" + L.harm_ids.join(", ") + ", scored benign) · no model " + frac(Z.harm_class_proceeded)],
           ["Governed calls that ran", "Lachesis " + frac(L.governed_proceeded) + " · no model " + frac(Z.governed_proceeded) + ". Both run the " + Z.governed_proceeded[0] + " read_file calls by the read rule; Lachesis also ran " + T.miss_ids.filter(id => (findCase(id) || {}).layer !== "tier0").join(", ")], ["Decider alone", T.misses_raw + " of " + T.governed + " governed calls proceed (" + T.miss_ids.join(", ") + ")"], ["Dev split", "Lachesis " + frac(S["0.70"].dev.lachesis.clean_paused) + " clean paused, " + frac(S["0.70"].dev.lachesis.harm_class_proceeded) + " harm-class ran (" + S["0.70"].dev.lachesis.harm_ids.join(", ") + ")"],
           ["At 0.80, the strict line", "Lachesis " + frac(S["0.80"].test.lachesis.clean_paused) + " clean paused, " + frac(S["0.80"].test.lachesis.harm_class_proceeded) + " harm-class ran"], ["Operating point", "0.70, chosen; the pre-registered dev rule would lock " + DATA.dev_lock.toFixed(2)]]),
+        h("p", { class: "muted small", text: "All six clean calls Decider lets run per split use one dictated write_file template. The splits are paired; a tool-name rule fitted after the fact matches or beats this suite." }),
         h("p", { class: "muted small", text: "Test split unless marked. evaluation/expanded_cpu_2026-10-16.jsonl, shipped routing · every figure on this page: " + DATA.generated_by + ", replaying " + DATA.no_model.generated_by }))));
 }
 

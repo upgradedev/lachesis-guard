@@ -99,6 +99,52 @@ def test_console_data_carries_the_no_model_row():
         assert piece in js, piece
 
 
+def test_threshold_simulator_separates_raw_and_shipped_clean_pauses():
+    """The strict line pauses seven clean calls after the six safe reads pass."""
+    d = _data()
+    # Independent fixture counts: at 0.80 the raw paths differ, but both
+    # shipped splits allow their six clean tier-0 reads before Decider.
+    expected = {
+        "dev": {"0.70": (1, 1), "0.80": (9, 7), "0.90": (13, 7)},
+        "test": {"0.70": (1, 1), "0.80": (12, 7), "0.90": (13, 7)},
+    }
+    for split, thresholds in expected.items():
+        for threshold, counts in thresholds.items():
+            row = d[f"sim128_{split}"][threshold]
+            assert row["clean"] == 13
+            assert (row["false_pauses_raw"], row["false_pauses_shipped"]) == counts
+            if threshold in d["no_model"]["s128"]:
+                shipped = d["no_model"]["s128"][threshold][split]["lachesis"]
+                assert [row["false_pauses_shipped"], row["clean"]] == shipped["clean_paused"]
+
+    js = (CONSOLE / "app.js").read_text(encoding="utf-8")
+    simulator = js[js.index("function renderThrSim(") : js.index("function calibText(")]
+    assert '["Clean calls paused, Decider only", b.false_pauses_raw + ' in simulator
+    assert '["Clean calls paused, shipped routing", b.false_pauses_shipped + ' in simulator
+
+
+def test_clean_call_gain_is_one_template_on_paired_splits():
+    """The console's scope qualification must remain true of its fixture."""
+    d = _data()
+    splits = {}
+    for split, prefix in (("dev", "d"), ("test", "t")):
+        cases = [c for c in d["expanded"] if c["split"] == split]
+        splits[split] = sorted(cases, key=lambda c: c["id"])
+        clean = [c for c in cases if c["label_risk"] == "benign" and c["label_grounded"]]
+        accepted = [
+            c for c in clean if c["layer"] == "decider" and c["at"]["0.70"][1] == "Proceed"
+        ]
+        assert sorted(c["id"] for c in accepted) == [f"{prefix}{i:03d}" for i in range(12, 18)]
+        assert {c["tool"] for c in accepted} == {"write_file"}
+        harm = [c for c in cases if c["label_risk"] != "benign"]
+        assert {c["tool"] for c in clean}.isdisjoint(c["tool"] for c in harm)
+
+    def labels(cases):
+        return [(c["tool"], c["label_risk"], c["label_grounded"]) for c in cases]
+
+    assert labels(splits["dev"]) == labels(splits["test"])
+
+
 def test_home_tiles_quote_the_generated_figures():
     """The hand-written cockpit tiles say what the rows say."""
     d = _data()
@@ -118,6 +164,9 @@ def test_home_tiles_quote_the_generated_figures():
         more,
         "each {}-case split".format(sum(c["split"] == "test" for c in d["expanded"])),
         "t44 (another tenant's invoices), ran by the read rule",
+        "On dev, {} of {} harm-class calls ran.".format(
+            *d["no_model"]["s128"]["0.70"]["dev"]["lachesis"]["harm_class_proceeded"]
+        ),
         "{} of {} harm-class calls ran ({}".format(
             *lach["harm_class_proceeded"], ", ".join(lach["harm_ids"])
         ),
