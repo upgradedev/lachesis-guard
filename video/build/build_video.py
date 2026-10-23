@@ -57,6 +57,16 @@ def sentences(text: str) -> list[str]:
     return [p for p in parts if p]
 
 
+def ref(r: str | float, at: dict[str, float]) -> float:
+    """A marker name, a marker with an offset ("finished+4" or "pause3-1"), or seconds."""
+    if not isinstance(r, str):
+        return float(r)
+    m = re.fullmatch(r"([a-z0-9]+)([+-][0-9.]+)?", r)
+    if not m or m.group(1) not in at:
+        sys.exit(f"unknown marker reference {r!r}")
+    return at[m.group(1)] + float(m.group(2) or 0)
+
+
 def main() -> None:
     OUT.mkdir(exist_ok=True)
     SEG.mkdir(exist_ok=True)
@@ -80,8 +90,8 @@ def main() -> None:
         frames = round(float(scene["holdSeconds"]) * FPS)
         hold = frames / FPS
         a, b = beats[sid]
-        start = at[a] if isinstance(a, str) else float(a)
-        end = at[b] if isinstance(b, str) else start + float(b)
+        start = ref(a, at)
+        end = ref(b, at) if isinstance(b, str) else start + float(b)
         end = min(end, capture_total)
         window = max(0.04, end - start)
         # Longer than the beat: compress the waiting, capped. Shorter: play it a little
@@ -118,7 +128,7 @@ def main() -> None:
         for n, (s, e, text) in enumerate(srt, 1):
             f.write(f"{n}\n{srt_time(s)} --> {srt_time(e)}\n{text}\n\n")
     font = os.environ.get("CAPTION_FONT", "DejaVu Sans")
-    style = (f"FontName={font},FontSize=12,PrimaryColour=&H00FFFFFF,BackColour=&H99000000,"
+    style = (f"FontName={font},FontSize=11,PrimaryColour=&H00FFFFFF,BackColour=&H99000000,"
              "BorderStyle=4,Outline=0,Shadow=0,MarginV=22,MarginL=60,MarginR=60")
     final = OUT / "lachesis-demo.mp4"
     sh(["ffmpeg", "-y", "-v", "error", "-i", "video.mp4", "-i", "audio.wav",
