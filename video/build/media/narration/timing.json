@@ -1,69 +1,76 @@
 {
   "schemaVersion": "archon.submission-video-timing/v1",
-  "totalSeconds": 150.51,
+  "totalSeconds": 174.612,
   "scenes": [
     {
       "id": "hook",
       "audio": "01-hook.mp3",
-      "durationSeconds": 20.944,
-      "holdSeconds": 21.594,
+      "durationSeconds": 20.898,
+      "holdSeconds": 21.548,
       "startSeconds": 0.0
     },
     {
       "id": "first-pause",
       "audio": "02-first-pause.mp3",
-      "durationSeconds": 15.79,
-      "holdSeconds": 16.44,
-      "startSeconds": 21.594
+      "durationSeconds": 17.369,
+      "holdSeconds": 18.019,
+      "startSeconds": 21.548
     },
     {
       "id": "delete",
       "audio": "03-delete.mp3",
       "durationSeconds": 14.675,
       "holdSeconds": 15.325,
-      "startSeconds": 38.034
+      "startSeconds": 39.566
     },
     {
       "id": "tests",
       "audio": "04-tests.mp3",
       "durationSeconds": 11.796,
       "holdSeconds": 12.446,
-      "startSeconds": 53.359
+      "startSeconds": 54.891
     },
     {
       "id": "ledger",
       "audio": "05-ledger.mp3",
       "durationSeconds": 8.777,
       "holdSeconds": 9.427,
-      "startSeconds": 65.805
+      "startSeconds": 67.337
     },
     {
       "id": "policy",
       "audio": "06-policy.mp3",
       "durationSeconds": 23.127,
       "holdSeconds": 23.777,
-      "startSeconds": 75.232
+      "startSeconds": 76.764
+    },
+    {
+      "id": "tour",
+      "audio": "07-tour.mp3",
+      "durationSeconds": 14.768,
+      "holdSeconds": 15.418,
+      "startSeconds": 100.541
     },
     {
       "id": "metrics",
-      "audio": "07-metrics.mp3",
-      "durationSeconds": 21.409,
-      "holdSeconds": 22.059,
-      "startSeconds": 99.009
+      "audio": "08-metrics.mp3",
+      "durationSeconds": 26.331,
+      "holdSeconds": 26.981,
+      "startSeconds": 115.959
     },
     {
       "id": "architecture",
-      "audio": "08-architecture.mp3",
+      "audio": "09-architecture.mp3",
       "durationSeconds": 14.443,
       "holdSeconds": 15.093,
-      "startSeconds": 121.068
+      "startSeconds": 142.941
     },
     {
       "id": "close",
-      "audio": "09-close.mp3",
-      "durationSeconds": 13.7,
-      "holdSeconds": 14.35,
-      "startSeconds": 136.161
+      "audio": "10-close.mp3",
+      "durationSeconds": 15.929,
+      "holdSeconds": 16.579,
+      "startSeconds": 158.034
     }
   ]
 }

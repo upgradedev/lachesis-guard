@@ -12,13 +12,13 @@
   "segments": [
     {
       "id": "hook",
-      "captionText": "Lachesis stops every tool call an Amazon Bedrock agent proposes, before it runs. Strands Decider 2B answers two typed questions: the risk class, and whether every argument is grounded. Plain Python, not the model, then decides: proceed, guide, confirm or deny.",
-      "speechText": "Lachesis stops every tool call an Amazon Bedrock agent proposes, before it runs. Strands Decider 2B answers two typed questions: the risk class, and whether every argument is grounded. Plain Python, not the model, then decides: proceed, guide, confirm, or deny."
+      "captionText": "Lachesis checks every tool call an Amazon Bedrock agent proposes, before it runs. Strands Decider 2B answers two typed questions: the risk class, and whether every argument is grounded. Plain Python, not the model, then decides: proceed, guide, confirm or deny.",
+      "speechText": "Lachesis checks every tool call an Amazon Bedrock agent proposes, before it runs. Strands Decider 2B answers two typed questions: the risk class, and whether every argument is grounded. Plain Python, not the model, then decides: proceed, guide, confirm, or deny."
     },
     {
       "id": "first-pause",
-      "captionText": "This is the live public console. One click starts a Strands agent on Amazon Bedrock AgentCore. Its first write is scored a destructive write at 0.40, below the 0.70 line, so rule R1 pauses the agent loop for a person.",
-      "speechText": "This is the live public console. One click starts a Strands agent on Amazon Bedrock AgentCore. Its first write is scored a destructive write at zero point four oh, below the zero point seven oh line, so rule R one pauses the agent loop for a person."
+      "captionText": "One click on the live console starts a Strands agent on Bedrock AgentCore. Its first write is a harmless note, but Decider is unsure at 0.40 and its class is wrong. Unsure means a person decides: R1 pauses the loop.",
+      "speechText": "One click on the live console starts a Strands agent on Bedrock AgentCore. Its first write is a harmless note, but Decider is unsure at zero point four oh and its class is wrong. Unsure means a person decides: R one pauses the loop."
     },
     {
       "id": "delete",
@@ -27,8 +27,8 @@
     },
     {
       "id": "tests",
-      "captionText": "The test run scores 0.28 and pauses under R1. Each score came back from Decider on a SageMaker GPU in about a second. Approved, the agent finishes the run.",
-      "speechText": "The test run scores zero point two eight, and pauses under R one. Each score came back from Decider on a SageMaker G P U in about a second. Approved, the agent finishes the run."
+      "captionText": "The test run scores 0.28. Unsure again, so R1 asks. Each score took about a second on a SageMaker GPU. Approved, the agent finishes.",
+      "speechText": "The test run scores zero point two eight. Unsure again, so R one asks. Each score took about a second on a SageMaker G P U. Approved, the agent finishes."
     },
     {
       "id": "ledger",
@@ -41,9 +41,14 @@
       "speechText": "Decider never acts. This table does, and the first match wins. Below zero point seven oh: confirm. Exfiltration: deny. Destructive: confirm. Not grounded: guide the model to ask. Credential-shaped arguments are stopped before the model is even asked."
     },
     {
+      "id": "tour",
+      "captionText": "The same pattern file, on the pinned model in CI. Four calls, four verdicts, each with its confidence: proceed, guide, confirm, deny. A rule that pauses everything cannot do that.",
+      "speechText": "The same pattern file, on the pinned model in C I. Four calls, four verdicts, each with its confidence: proceed, guide, confirm, deny. A rule that pauses everything cannot do that."
+    },
+    {
       "id": "metrics",
-      "captionText": "The line was measured on our own traffic, not chosen. On a 51-call benchmark Lachesis paused all 8 destructive writes, where the SDK's built-in LLM classifier let 3 of 8 run. It caught 38 of 43 calls that should reach a person; the classifier caught 34.",
-      "speechText": "The line was measured on our own traffic, not chosen. On a fifty-one call benchmark, Lachesis paused all eight destructive writes, where the S D K's built-in L L M classifier let three of eight run. It caught thirty-eight of forty-three calls that should reach a person. The classifier caught thirty-four."
+      "captionText": "What the model adds: a rule with no model is at least as safe but pauses most clean calls. At 0.70, the chosen operating point, Decider let 12 of 13 clean test calls run. That rule paused 7. The price: two config writes misread as benign. And the SDK classifier let 3 destructive writes run, where Lachesis paused all 8.",
+      "speechText": "What the model adds: a rule with no model is at least as safe but pauses most clean calls. At zero point seven oh, the chosen operating point, Decider let twelve of thirteen clean test calls run. That rule paused seven. The price: two config writes misread as benign. And the S D K classifier let three destructive writes run, where Lachesis paused all eight."
     },
     {
       "id": "architecture",
@@ -52,8 +57,8 @@
     },
     {
       "id": "close",
-      "captionText": "The reusable pattern is one file in patterns/guardrails: the typed questions, the policy table, and three lines to wire it into your agent. Lachesis: triage before the tool runs.",
-      "speechText": "The reusable pattern is one file in the patterns guardrails folder: the typed questions, the policy table, and three lines to wire it into your agent. Lachesis: triage before the tool runs."
+      "captionText": "The reusable pattern is one file in patterns/guardrails: the typed questions, the policy table, and three lines to wire it into your agent. Lachesis: let a 2B model say I'm not sure, and let a person decide.",
+      "speechText": "The reusable pattern is one file in the patterns guardrails folder: the typed questions, the policy table, and three lines to wire it into your agent. Lachesis: let a two B model say I'm not sure, and let a person decide."
     }
   ]
 }
