@@ -1,0 +1,59 @@
+{
+  "schemaVersion": "archon.submission-video/v1",
+  "provider": "elevenlabs",
+  "elevenLabs": {
+    "voiceId": "pNInz6obpgDQGcFmaJgB",
+    "modelId": "eleven_multilingual_v2",
+    "outputFormat": "mp3_44100_128"
+  },
+  "languageCode": "en-GB",
+  "voice": "en-GB-Neural2-B",
+  "speakingRate": 0.98,
+  "segments": [
+    {
+      "id": "hook",
+      "captionText": "Lachesis stops every tool call an Amazon Bedrock agent proposes, before it runs. Strands Decider 2B answers two typed questions: the risk class, and whether every argument is grounded. Plain Python, not the model, then decides: proceed, guide, confirm or deny.",
+      "speechText": "Lachesis stops every tool call an Amazon Bedrock agent proposes, before it runs. Strands Decider 2B answers two typed questions: the risk class, and whether every argument is grounded. Plain Python, not the model, then decides: proceed, guide, confirm, or deny."
+    },
+    {
+      "id": "first-pause",
+      "captionText": "This is the live public console. One click starts a Strands agent on Amazon Bedrock AgentCore. Its first write is scored a destructive write at 0.40, below the 0.70 line, so rule R1 pauses the agent loop for a person.",
+      "speechText": "This is the live public console. One click starts a Strands agent on Amazon Bedrock AgentCore. Its first write is scored a destructive write at zero point four oh, below the zero point seven oh line, so rule R one pauses the agent loop for a person."
+    },
+    {
+      "id": "delete",
+      "captionText": "Next it proposes deleting a production config file. Decider is confident this time, 0.80, above the line. But rule R3 says a destructive write always waits for a person, whatever the score.",
+      "speechText": "Next it proposes deleting a production config file. Decider is confident this time, zero point eight oh, above the line. But rule R three says a destructive write always waits for a person, whatever the score."
+    },
+    {
+      "id": "tests",
+      "captionText": "The test run scores 0.28 and pauses under R1. Each score came back from Decider on a SageMaker GPU in under a second. Approved, the agent finishes the run.",
+      "speechText": "The test run scores zero point two eight, and pauses under R one. Each score came back from Decider on a SageMaker G P U in under a second. Approved, the agent finishes the run."
+    },
+    {
+      "id": "ledger",
+      "captionText": "Every pause and every answer is written as an event in the run ledger, in the same DynamoDB transaction as the run itself.",
+      "speechText": "Every pause and every answer is written as an event in the run ledger, in the same Dynamo D B transaction as the run itself."
+    },
+    {
+      "id": "policy",
+      "captionText": "Decider never acts. This table does, and the first match wins. Below 0.70: confirm. Exfiltration: deny. Destructive: confirm. Not grounded: guide the model to ask. Credential-shaped arguments are stopped before the model is asked.",
+      "speechText": "Decider never acts. This table does, and the first match wins. Below zero point seven oh: confirm. Exfiltration: deny. Destructive: confirm. Not grounded: guide the model to ask. Credential-shaped arguments are stopped before the model is even asked."
+    },
+    {
+      "id": "metrics",
+      "captionText": "The line was measured on our own traffic, not chosen. On a 51-call benchmark Lachesis paused all 8 destructive writes, where the SDK's built-in LLM classifier let 3 of 8 run. It caught 38 of 43 calls that should reach a person; the classifier caught 34.",
+      "speechText": "The line was measured on our own traffic, not chosen. On a fifty-one call benchmark, Lachesis paused all eight destructive writes, where the S D K's built-in L L M classifier let three of eight run. It caught thirty-eight of forty-three calls that should reach a person. The classifier caught thirty-four."
+    },
+    {
+      "id": "architecture",
+      "captionText": "After the decision, each event travels on: a DynamoDB stream, an EventBridge bus, and an S3 audit lake with Athena queries. Failures land in dead-letter queues with alarms.",
+      "speechText": "After the decision, each event travels on: a Dynamo D B stream, an Event Bridge bus, and an S three audit lake with Athena queries. Failures land in dead-letter queues, with alarms."
+    },
+    {
+      "id": "close",
+      "captionText": "The reusable pattern is one file in patterns/guardrails: the typed questions, the policy table, and three lines to wire it into your agent. Lachesis: triage before the tool runs.",
+      "speechText": "The reusable pattern is one file in the patterns guardrails folder: the typed questions, the policy table, and three lines to wire it into your agent. Lachesis: triage before the tool runs."
+    }
+  ]
+}
