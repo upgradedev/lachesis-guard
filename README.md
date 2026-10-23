@@ -5,7 +5,7 @@
 [![Pattern Tour](https://github.com/upgradedev/lachesis-guard/actions/workflows/pattern-tour.yml/badge.svg)](https://github.com/upgradedev/lachesis-guard/actions/workflows/pattern-tour.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Lachesis checks every tool call before it runs, with Strands Decider 2B scoring the ones its pre-checks do not settle, so the agent pauses for a person instead of cleaning up.
+Lachesis checks every tool call before it runs. Strands Decider 2B scores the ones its pre-checks do not settle, so the agent pauses for a person instead of someone cleaning up after it.
 
 *Let a 2B model say "I'm not sure": Strands Decider triage before a Bedrock agent's tool runs*
 
@@ -18,7 +18,7 @@ The buyer is an on-call platform engineer who runs a coding agent on Amazon Bedr
 
 What Lachesis changes: Decider answers two typed questions in one forward pass, and plain Python owns the gate. Confident, grounded, benign calls run without a person. At the 0.70 line, clean-call pauses fall from 7 of 13 to 1 of 13 on each split of the 128-case suite. The price: 1 of 37 harm-class calls ran on the dev split, and 2 of 37 on the test split ([Threshold](#threshold)).
 
-Two people use it. An on-call platform engineer runs a coding agent behind Lachesis against staging. Before any write runs, they see a paused card in the Approvals console with the full proposed file, the risk class and the confidence. A release manager in the approvers group declines the 0.80 `delete_file` card: a `DecisionRecorded` event lands in the run's event log under their Cognito username, and `refunds_prod_config.py` stays.
+Two people use it. The engineer runs the agent behind Lachesis against staging. When a call pauses, they see a card in the Approvals console with the full proposed file and, when Decider answered, its risk class and confidence. On the approvals lane, a release manager in the approvers group declines a `delete_file` card like the filmed one (destructive_write at 0.80). A `DecisionRecorded` event lands in the run's event log under their Cognito username, and `refunds_prod_config.py` stays.
 
 Built for the Agent Experience Hackathon: Strands Decider on AWS Builder Center, pattern `#guardrails`.
 
@@ -42,7 +42,7 @@ Built for the Agent Experience Hackathon: Strands Decider on AWS Builder Center,
 - **The 51-call seam benchmark, three rows.** Lachesis caught 38 of 43 should-pause calls and paused 5 of 8 clean ones. No model caught 39 and paused 7 of 8. The SDK's `HumanInTheLoop` paused 1 of 8 clean but let 3 of 8 destructive writes run.
 - **Not a stub.** Pattern tour [run 39273986426](https://github.com/upgradedev/lachesis-guard/actions/runs/39273986426) puts the real model behind the standalone pattern file. It gets four different verdicts: proceed (benign at 0.83), guide (benign at 0.83, ungrounded), confirm (destructive_write at 0.87), deny (exfiltration at 0.84). `tests/integration/test_handler_live.py::test_plain_search_proceeds` asserts a real Proceed in `decider-live.yml` ([green run 39935129737](https://github.com/upgradedev/lachesis-guard/actions/runs/39935129737) on main).
 - **The filmed run.** [docs/evidence/FILMED_RUN_2026-10-23.md](docs/evidence/FILMED_RUN_2026-10-23.md): three pauses at 0.40, 0.80 and 0.28, each approved, then one test passed. Decider was unsure on the note and the test run, and wrong about their class. Unsure is exactly when the line hands the call to a person, so the wrong class never acted.
-- **Latency.** In the loop, warm, one triage took 865 to 1157 ms on `ml.g4dn.xlarge`. The 50-case probe on that endpoint gave a median of 718 ms and a p95 of 722 ms. The SDK classifier at the same seam: median 1,142 ms. Cost per 1,000 calls is about $0.70 on a CPU box, where the CI CPU median is 7.4 s per triage, against about $4.43 for the SDK classifier, both ESTIMATE.
+- **Latency.** In the loop, warm, one triage took 865 to 1157 ms on `ml.g4dn.xlarge`. The 50-case probe on that endpoint gave a median of 718 ms and a p95 of 722 ms. The SDK classifier at the same seam: median 1,142 ms. Cost per 1,000 calls is about $0.70 on the EC2 `t3.xlarge` CPU box, against about $4.43 for the SDK classifier, both ESTIMATE. The box figure is $0.1824 an hour, a price-list reading, at a 13.9 s median per call that reached Decider. That median is `lachesis_ms` over those 45 rows of `evaluation/baseline_2026-10-13.jsonl`.
 - **The reusable pattern.** [patterns/guardrails](patterns/guardrails/README.md) is one file to copy, with a second-agent transfer proof in [examples/second_agent](examples/second_agent/README.md).
 - **Hosted demo.** The approvals console is at https://d2nm49ao7e8z4z.cloudfront.net. On a cold visit the first call pauses fail-closed with no score, and that click wakes the GPU: about 9 minutes when measured on 2026-10-23, not a promise. The demo video is linked from the Builder Center article.
 - **How it was built.** Built with an AI coding assistant (Claude Code). Every number here reproduces from the committed rows with the command beside it, or names the run or reading it came from.
@@ -56,14 +56,16 @@ A reusable Strands `InterventionHandler` runs before every tool call. Two determ
 
 A policy table in plain Python (`src/lachesis/policy.py`) maps the answers to a verdict. First match wins:
 
-| Decider says | Lachesis returns |
-|---|---|
-| any class, confidence below 0.70 | `Confirm`: the agent loop pauses for a person |
-| exfiltration, confidently | `Deny`: the call is refused |
-| destructive write, untrusted input acted on, or confused deputy | `Confirm` |
-| a label it does not know | `Confirm` |
-| benign and confident, not grounded | `Guide`: the model asks the user instead of guessing |
-| benign, confident, grounded | `Proceed` |
+| Rule | Decider says | Lachesis returns |
+|---|---|---|
+| R1 | any class, confidence below 0.70 | `Confirm`: the agent loop pauses for a person |
+| R2 | exfiltration, confidently | `Deny`: the call is refused |
+| R3 | destructive write, untrusted input acted on, or confused deputy | `Confirm`, whatever the score |
+| R4 | a label it does not know | `Confirm` |
+| R5 | benign and confident, not grounded | `Guide`: the model asks the user instead of guessing |
+| R6 | benign, confident, grounded | `Proceed` |
+
+The rule numbers are the ones the console, the article and the video cite.
 
 **The model is never the gate.** Decider only measures; the code decides. If Decider does not answer, the call pauses with "the Decider did not answer, so a person decides".
 
@@ -87,25 +89,27 @@ The tour serves the pinned model on CPU and drives four scripted tool calls thro
 
 ### Before you start
 
-- Python 3.10 or newer (`requires-python = ">=3.10"` in `pyproject.toml`). CI runs the tour on 3.11 and the unit suite on 3.12.
+- Python 3.10 to 3.13. `torch==2.7.1` has no CPU wheel for 3.14. CI runs the tour on 3.11 and the unit suite on 3.12.
+- A POSIX shell: Linux, macOS, or WSL on Windows. CI runs the tour on Ubuntu.
 - A fresh virtual environment, active in both terminals.
 - 16 GB of RAM for the server. We serve on a 16 GB EC2 `t3.xlarge`; an 8 GB `t3.large` was OOM-killed while loading the model ([patterns/guardrails/README.md](patterns/guardrails/README.md)).
 - Network access on the first serve, which downloads the pinned model from the Hugging Face Hub.
+- Disk for the downloads. The torch CPU wheel alone is 176.0 MB in the tour run's log, and the model files come on top.
 - Two terminals, because the serve command stays in the foreground.
 
 ### Run the tour
 
 ```sh
 git clone https://github.com/upgradedev/lachesis-guard && cd lachesis-guard   # needs git
-python -m venv .venv && . .venv/bin/activate   # Python 3.10 or newer; on Windows: .venv\Scripts\activate
+python -m venv .venv && . .venv/bin/activate   # Python 3.10 to 3.13
 pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cpu   # venv active
 pip install strands-decider==0.1.0 transformers==5.19.0 strands-agents==1.61.1   # venv active
 strands-decider serve StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --device cpu --port 8099   # terminal 2, venv active, 16 GB RAM
-until curl -sf http://127.0.0.1:8099/health | grep -q ok; do sleep 5; done   # terminal 1: returns once the server is ready
+for i in $(seq 1 60); do curl -sf http://127.0.0.1:8099/health | grep -q ok && break; sleep 5; done   # terminal 1: waits up to 5 min
 python patterns/guardrails/example.py   # terminal 1, venv active, server ready
 ```
 
-`strands-agents==1.61.1` is the version the tour run below installed and the one `agent/Dockerfile` pins. The readiness line is the same `/health` check `.github/workflows/pattern-tour.yml` runs before its tour.
+`strands-agents==1.61.1` is the version the tour run below installed and the one `agent/Dockerfile` pins. The readiness line is the `/health` check `.github/workflows/pattern-tour.yml` runs before its tour: 60 tries, 5 s apart. CI also stops early if the server process dies. Here, if the loop runs out, read terminal 2; an 8 GB machine is OOM-killed while loading.
 
 Expected output, cut to the verdict lines (the tour also prints what each verdict means and the pause a person would see):
 
@@ -117,12 +121,12 @@ Expected output, cut to the verdict lines (the tour also prints what each verdic
 tour: proceed guide confirm deny in 37.6 s
 ```
 
-The closing line must start with `tour: proceed guide confirm deny`; CI fails without it. Timing from [run 39273986426](https://github.com/upgradedev/lachesis-guard/actions/runs/39273986426) on a GitHub-hosted runner: the installs took 38 s, the serve took 40 s until `/health` answered (model download included), and the tour took 37.6 s. The whole job took 2 min 1 s.
+The tour must print `tour: proceed guide confirm deny`; CI greps for it and fails without it. Timing from [run 39273986426](https://github.com/upgradedev/lachesis-guard/actions/runs/39273986426) on a GitHub-hosted runner: the installs took 38 s, the serve took 40 s until `/health` answered (model download included), and the tour took 37.6 s. The whole job took 2 min 1 s.
 
 Next steps, each with what it needs:
 
 - `python patterns/guardrails/example.py --agent`: needs the server above, AWS credentials that can call Bedrock, a region in the usual AWS variables, and `LACHESIS_EXAMPLE_MODEL` set to a Bedrock model id.
-- `python scripts/demo_agent.py --model <bedrock-model-id>`: needs AWS credentials that can call Bedrock and a Decider server at `STRANDS_DECIDER_URL` (default `http://127.0.0.1:8099`). See [Run the demo](#run-the-demo).
+- `python scripts/demo_agent.py --model <bedrock-model-id>`: needs `pip install pytest==8.3.4` in the venv, AWS credentials that can call Bedrock, and a Decider server at `STRANDS_DECIDER_URL` (default `http://127.0.0.1:8099`). See [Run the demo](#run-the-demo).
 - Your own agent: copy `patterns/guardrails/triage.py` and follow [patterns/guardrails/README.md](patterns/guardrails/README.md).
 
 ## Threshold
@@ -142,9 +146,9 @@ The policy asks a person whenever Decider's confidence falls below 0.70. 0.70 is
 
 The selection rule was committed in PR #5 on 2026-10-11, before CI run 38421303470. It takes the lowest line whose accepted fit cases number at least 10 at accuracy 0.95 or better. At 0.70, 12 fit cases are accepted and 12 are right; 8 of 8 held-out cases are right too, so 20 of 20 across all 50.
 
-The shortfall: only 9 of those 12 fit cases reach Decider under the shipped routing, because 3 are tier-0 reads. That is one short of the rule's own minimum of 10. So 0.70 is a chosen operating point, not a value the rule forced. On the 128-case suite below, the dev-split rule fixed in `scripts/analyze_threshold.py` (zero dev misses, then the fewest false pauses) would lock 0.95.
+The shortfall: only 9 of those 12 fit cases reach Decider under the shipped routing, because 3 are tier-0 reads. That is one short of the rule's own minimum of 10. So 0.70 is a chosen operating point, not a value the rule forced. On the 128-case suite below, the dev-split rule fixed in `scripts/analyze_threshold.py` (zero dev misses, then the fewest false pauses) would lock 0.95. At 0.95 the shipped handler matches the no-model row on each split: 9 of 51 governed calls ran, 0 of 37 harm-class, and 7 of 13 clean calls paused. From 0.80 up it pauses 7 of 13 clean calls, so the clean-call gain needs a line below 0.80.
 
-The misses. In the calibration run Decider answered all 50 and chose the wrong risk class 11 times, every time below 0.70 (highest 0.67). Under the shipped routing 5 file reads skip Decider. Of the 45 it scores, 10 were wrong and all 10 paused. Risk accuracy is 35 of 45 (0.778) and grounding 36 of 45. One skipped read, `t44` (another tenant's invoice data), proceeded by the read rule; Decider would have scored it 0.29 and paused it. Recompute these from `evaluation/gpu_threshold_2026-10-13.jsonl`, the committed rows of the same 50 cases.
+The misses. The rows of CI run 38421303470 are not committed. What is committed is the EC2 GPU rerun of the same 50 cases, `evaluation/gpu_threshold_2026-10-13.jsonl`. It changed no verdict and no risk class against the CPU box rows ([docs/evidence/GPU_2026-10-13.md](docs/evidence/GPU_2026-10-13.md)), and the table above and the counts here recompute from it. Decider answered all 50 and chose the wrong risk class 11 times, every time below 0.70 (highest 0.67). Under the shipped routing 5 file reads skip Decider. Of the 45 it scores, 10 were wrong and all 10 paused. Risk accuracy is 35 of 45 (0.778) and grounding 36 of 45. One skipped read, `t44` (another tenant's invoice data), proceeded by the read rule; Decider would have scored it 0.29 and paused it.
 
 The guardrail for reads is the path list, not the model. Any file outside the secret-path list, another tenant's data included, is read without asking.
 
@@ -190,7 +194,11 @@ None of these needs a model or an AWS account:
 ```sh
 python scripts/no_model_baseline.py
 python scripts/analyze_threshold.py evaluation/expanded_cpu_2026-10-16.jsonl
+python -c "import sys; sys.path[:0] = ['scripts']; import no_model_baseline as m; print(m.expanded_128(0.95))"
+python -c "import json; r = [json.loads(l) for l in open('evaluation/gpu_threshold_2026-10-13.jsonl')]; d = [x for x in r if x['layer'] == 'decider']; w = lambda s: sum(x['risk_pred'] != x['risk_label'] for x in s); print('wrong', w(r), 'of 50;', w(d), 'of', len(d), 'scored; grounding right', sum(x['grounded_pred'] == x['grounded_label'] for x in d))"
 ```
+
+The third line prints the 0.95 rows. The fourth prints `wrong 11 of 50; 10 of 45 scored; grounding right 36`.
 
 Re-measuring the calibration needs a Decider server; CI runs it as `decider-measure.yml` against `strands-decider serve StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --device cpu --port 8099`:
 
@@ -251,7 +259,8 @@ Hosted path (the judged demo, all in eu-west-1):
   copy was in service at 08:11:03, about 9 minutes later. That is one reading, not a promise.
   To skip the wait, `scripts/set_decider_warm.py`
   warms ahead of time. It also resets the copy request once if no copy has placed 10 minutes
-  after the instance comes up. On 2026-10-15 such a reset placed a stalled copy in 98 seconds
+  after the instance comes up. On 2026-10-15 a person made that reset by hand and the stalled
+  copy placed in 98 seconds; the script has made the reset itself since
   ([docs/evidence/GPU_2026-10-13.md](docs/evidence/GPU_2026-10-13.md)).
 - One forward pass at a time. `decider-image/adapter.py` answers a second concurrent call with
   HTTP 503 `decider busy`. The client does not retry, and the handler pauses that call
@@ -331,7 +340,8 @@ flowchart LR
   after the retries land on `lachesis-publisher-dlq`.
 - **The lake** (`infra/stacks/audit.py`). The rule `audit-all` sends each event to the Firehose
   stream `lachesis-audit`, which writes JSON lines to the audit bucket under
-  `events/dt=YYYY-MM-DD/`, buffering 60 s or 5 MB. Failed deliveries go to `lachesis-audit-dlq`.
+  `events/dt=YYYY-MM-DD/`, buffering 60 s or 5 MB. Events the rule cannot hand to Firehose go to
+  `lachesis-audit-dlq`; records Firehose cannot write land under `errors/` in the same bucket.
   The bucket is versioned, blocks public access, expires events after 90 days, and survives a
   stack destroy (`RemovalPolicy.RETAIN`). Deployed on 2026-10-23 by
   [iac run 39909301653](https://github.com/upgradedev/lachesis-guard/actions/runs/39909301653).
@@ -345,8 +355,8 @@ flowchart LR
   alarms on each new message and on depth, and a run that ends in `ERROR` raises the RunFailed
   alarm. The audit queue and Firehose's delivery freshness have their own alarms
   (`infra/stacks/audit.py`). `infra/stacks/observability.py` alarms on Decider no-capacity
-  failures, Decider p95 latency over five seconds, and Bedrock throttles. Every alarm goes to one
-  alerts topic.
+  failures, Decider p95 latency over five seconds, and Bedrock throttles. Every alarm except the
+  wake alarm, which drives the scaling policy, goes to one alerts topic (`lachesis-budget-alerts`).
 - **Expiry.** The sweeper (`approvals/lambda/sweeper.py`) closes a pause nobody decided as
   declined, so nothing runs.
 - **The process manager, dark** (`infra/stacks/run_workflow.py`, `approvals/lambda/workflow.py`).
@@ -361,8 +371,8 @@ flowchart LR
   `continue-on-error`, is not a required check, and is skipped while the repository variable
   `LACHESIS_GATE_URL` is unset. Today it blocks nothing.
 - **What a destroy loses.** `lachesis-approvals` and `lachesis-run-events` are
-  `RemovalPolicy.DESTROY` with no point-in-time recovery, in one region (eu-west-1). Only the
-  audit bucket survives a destroy.
+  `RemovalPolicy.DESTROY` with no point-in-time recovery, in one region (eu-west-1). Of the
+  tables and buckets the stacks manage, only the audit bucket survives a destroy.
 
 ### Ceilings, and what you see at each
 
@@ -372,7 +382,7 @@ If a public run will not start or a card has no score, find its row below and wa
 |---|---|---|---|---|
 | Public run caps | 5 runs per address and 100 overall, per day | HTTP 429: "daily demo cap reached for this address or overall; the counters reset at 00:00 UTC" | 00:00 UTC | `approvals/lambda/common.py` (`TRY_IP_DAILY_CAP`, `TRY_DAILY_CAP`), set in `infra/stacks/approvals.py`; message in `approvals/lambda/approval/domain.py` |
 | Start throttle | `POST /try` at 0.2 requests per second, burst 2, shared by every caller | HTTP 429 from API Gateway | a few seconds later | `infra/stacks/approvals.py` (route settings) |
-| Decider busy | one forward pass at a time, one copy at most | the call pauses fail-closed with no score: "the Decider did not answer, so a person decides"; the public lane cannot decide it | once the pass in flight ends; start a new run | `decider-image/adapter.py`, `infra/stacks/decider_ic.py` |
+| Decider busy | one forward pass at a time, one copy at most: at the 718 ms probe median, at most about 1.4 triages per second shared by every run (derived, not load-tested) | the call pauses fail-closed with no score: "the Decider did not answer, so a person decides"; the public lane cannot decide it | once the pass in flight ends; start a new run | `decider-image/adapter.py`, `infra/stacks/decider_ic.py` |
 | Decider cold | zero copies when idle | the first call pauses fail-closed with no score; the click asks the GPU to wake | a copy was in service about 9 minutes after the click when measured on 2026-10-23, not a promise; start a new run then | `infra/stacks/decider_ic.py` |
 | Pause expiry | 30 minutes (1800 s) | a countdown on the card, then the run shows as expired and treated as declined; nothing runs | at expiry | `approvals/lambda/common.py` (`APPROVAL_TTL_SECONDS`) |
 
@@ -381,9 +391,12 @@ On the approvals lane an approver can still decide a fail-closed card; only the 
 ## Run the demo
 
 Needs: AWS credentials that can call Bedrock, a Decider server at `STRANDS_DECIDER_URL`, and the
-virtual environment from the [Quickstart](#quickstart).
+virtual environment from the [Quickstart](#quickstart) with pytest added. The agent's `run_tests`
+tool runs the task's acceptance tests with `python -m pytest`, and `agent/Dockerfile` pins the same
+pytest.
 
 ```sh
+pip install pytest==8.3.4   # venv active
 python scripts/demo_agent.py --model <bedrock-model-id>
 ```
 
