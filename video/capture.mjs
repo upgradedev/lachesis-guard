@@ -4,7 +4,9 @@
 // and the architecture. Nothing on the page is staged: the run is a real
 // POST /try against the deployed stack, and every score on screen is the one
 // Decider returned. The only additions are a short ring drawn around a button
-// just before it is clicked, because the recording shows no mouse pointer.
+// just before it is clicked, because the recording shows no mouse pointer,
+// and hiding the two links to the repository's code host (header and footer),
+// because the video must not show third-party marks.
 //
 // It writes capture/production.webm, capture/markers.json (seconds from the
 // start of the recording for each moment the video cuts on, plus the text of
@@ -24,6 +26,14 @@ const context = await browser.newContext({
   deviceScaleFactor: 1,
   reducedMotion: "no-preference",
   recordVideo: { dir: path.join(out, "raw"), size: { width: 1920, height: 1080 } },
+});
+await context.addInitScript(() => {
+  const hide = () => {
+    const s = document.createElement("style");
+    s.textContent = 'a[href*="github.com"] { visibility: hidden !important; }';
+    document.head.appendChild(s);
+  };
+  if (document.head) hide(); else document.addEventListener("DOMContentLoaded", hide);
 });
 const page = await context.newPage();
 const t0 = Date.now();
