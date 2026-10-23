@@ -213,6 +213,9 @@ class RunPaused(DomainEvent):
     layer: str
     latency_ms: float | None
     expires_ts: int
+    # True when the pausing row is the handler's cached Confirm,
+    # re-issued on resume with no new model call (B3).
+    cached: bool = False
 
 
 @dataclass(frozen=True)
@@ -466,6 +469,7 @@ class Run:
                 layer=_text(card.get("layer", "")),
                 latency_ms=_number(card.get("latency_ms")),
                 expires_ts=_int(self.row.get("expires_ts")),
+                cached=card.get("cached") is True,
             )
         )
 

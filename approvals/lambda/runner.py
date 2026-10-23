@@ -90,7 +90,17 @@ def _pending_card(result: dict) -> dict:
     can show what Decider measured (F2). Used for the first pause and
     for every re-pause after a resume; the resume path used to rewrite
     the card with the reason only, which silently dropped the Decider
-    fields (found live, 2026-10-15)."""
+    fields (found live, 2026-10-15).
+
+    ``cached`` is True when the pausing row is the cached Confirm that
+    the handler re-issues on resume (no new model call). The domain
+    event RunPaused carries it, so the audit lake can leave a re-issued
+    verdict out of its counts of Decider verdicts. public_view cuts the
+    card to CARD_KEYS, so the flag never reaches the console.
+
+    Known limit: the pausing row is the last confirm or deny row of the
+    turn. When one turn holds a Confirm on one call and a later Deny on
+    another, the card describes the denied call."""
     import datetime
 
     interrupts = result.get("interrupts", [])
@@ -122,6 +132,7 @@ def _pending_card(result: dict) -> dict:
         "confidence": pausing.get("confidence"),
         "latency_ms": pausing.get("latency_ms"),
         "layer": pausing.get("layer", ""),
+        "cached": pausing.get("cached") is True,
         "prior_steps": prior_steps,
         "changed_files": list(result.get("changed_files") or []),
         "created_at": common.now_iso(),

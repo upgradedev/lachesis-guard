@@ -6,6 +6,11 @@ Stacks, deployed in this order through .github/workflows/iac.yml:
   LachesisAgent        the Strands agent on AgentCore Runtime V2
   LachesisApprovals    approval API, console, runner, sweeper
   LachesisObservability alarms and log retention for the above
+  LachesisAudit        audit lake (rule, Firehose, S3) and Insight (Glue,
+                       Athena); depends on no stack, deploys after
+                       LachesisApprovals because the rule sits on its bus,
+                       and after a redeploy of LachesisApprovals so the
+                       publisher relays lane, pause_seq and cached
 
 Everything is tagged app=lachesis-guard. Deploys run only from GitHub
 Actions through LachesisCiRole (OIDC); the role itself is created once
@@ -16,6 +21,7 @@ from __future__ import annotations
 
 import aws_cdk as cdk
 from aws_cdk import Tags
+from stacks.audit import AuditStack
 from stacks.foundation import FoundationStack
 
 try:
@@ -41,6 +47,10 @@ if HAVE_ALL_STACKS:
     ObservabilityStack(
         app, "LachesisObservability", env=env, foundation=foundation, decider=decider, agent=agent
     )
+# Imported and built outside the import guard: an ImportError in the
+# audit stack must fail the synth, and an ImportError in any other stack
+# must not silently drop LachesisAudit.
+AuditStack(app, "LachesisAudit", env=env)
 
 for stack in app.node.find_all():
     if isinstance(stack, cdk.Stack):

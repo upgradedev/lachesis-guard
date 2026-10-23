@@ -15,6 +15,7 @@ on:
           - deploy-agent
           - deploy-approvals
           - deploy-observability
+          - deploy-audit
           - destroy
         default: oidc-check
       confirm:
@@ -98,10 +99,17 @@ jobs:
         if: inputs.action == 'deploy-observability'
         working-directory: infra
         run: cdk deploy LachesisObservability --require-approval never
+      # Run deploy-approvals first: the publisher relays lane, pause_seq
+      # and cached only from that deploy on, and the time-to-decision and
+      # confidence queries return nothing for rows relayed earlier.
+      - name: Deploy audit
+        if: inputs.action == 'deploy-audit'
+        working-directory: infra
+        run: cdk deploy LachesisAudit --exclusively --require-approval never
       - name: Destroy (allow-listed Lachesis stacks only)
         if: inputs.action == 'destroy' && inputs.confirm == 'DESTROY'
         working-directory: infra
         run: |
-          for stack in LachesisApprovals LachesisAgent LachesisDeciderIc LachesisDecider LachesisObservability LachesisFoundation; do
+          for stack in LachesisAudit LachesisApprovals LachesisAgent LachesisDeciderIc LachesisDecider LachesisObservability LachesisFoundation; do
             cdk destroy "$stack" --force || true
           done
