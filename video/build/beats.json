@@ -1,0 +1,38 @@
+{
+ "hook": [
+  "cockpit",
+  "start"
+ ],
+ "first-pause": [
+  "start",
+  "approved1"
+ ],
+ "delete": [
+  "approved1",
+  "approved2"
+ ],
+ "tests": [
+  72.83,
+  23.69
+ ],
+ "ledger": [
+  100.34,
+  9.86
+ ],
+ "policy": [
+  111.77,
+  14.0
+ ],
+ "metrics": [
+  127.52,
+  23.2
+ ],
+ "architecture": [
+  152.41,
+  16.0
+ ],
+ "close": [
+  170.12,
+  11.8
+ ]
+}
