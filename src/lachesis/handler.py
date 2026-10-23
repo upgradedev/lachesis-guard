@@ -1,8 +1,10 @@
-"""The handler: a Strands InterventionHandler that scores every tool call.
+"""The handler: a Strands InterventionHandler that checks every tool call.
 
-``before_tool_call`` runs before Strands executes the tool. It renders the
-conversation plus the proposed call into a state, asks Decider both questions
-in one round trip, and returns the SDK action the policy verdict maps to:
+``before_tool_call`` runs before Strands executes the tool. A resumed pause,
+an exact repeat of a refused call, or a hit in the deterministic pre-checks
+(``prescan``) is settled without the model. Every other call is rendered,
+with the conversation, into a state; Decider answers both questions in one
+round trip, and the handler returns the SDK action the policy verdict maps to:
 
 - proceed -> Proceed: the call runs.
 - guide -> Guide: the model sees the feedback and typically asks the user.
@@ -11,9 +13,12 @@ in one round trip, and returns the SDK action the policy verdict maps to:
   handler touches.
 - deny -> Deny: the call is refused with the reason shown to the model.
 
-If the Decider server is down, the error propagates and the run stops: an
-agent that cannot be triaged does not run unguarded. ``on_error`` keeps the
-SDK default (throw), which is the fail-closed direction.
+If Decider does not answer (server down, GPU cold, no capacity), the error
+from the client is caught and the call fails closed to Confirm, logged with
+layer ``unavailable`` and no score: a person decides, and the call never runs
+on a guess. The run pauses; it does not stop. Any other error inside the
+handler propagates, because ``on_error`` keeps the SDK default (throw): the
+run stops rather than letting the call through unchecked.
 
 Pause binding: a Confirm verdict is cached under the call's toolUseId, in
 ``agent.state`` when the agent has one (it survives process death through the
@@ -178,7 +183,10 @@ def _neutralize(declined: str) -> Callable[[Any], None]:
 
 
 class LachesisHandler(InterventionHandler):
-    """Score every tool call for risk before it runs, with Decider 2B.
+    """Check every tool call before it runs; Decider 2B scores the rest.
+
+    The deterministic pre-checks settle what they can, and Decider scores
+    every call they do not settle.
 
     With ``audit_path`` set, each triage appends one JSON line there (tool,
     arguments as a sha256 hash, risk, confidence, verdict, layer, latency),

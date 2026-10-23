@@ -1,8 +1,11 @@
-"""Reusable decision pattern: triage every tool call before it runs.
+"""Reusable decision pattern: check every tool call before it runs.
 
 Drop this one file into your own Strands agent (it needs only ``strands-agents``
-from PyPI and a running Decider server) and every proposed tool call is scored
-for risk before it executes:
+from PyPI and a running Decider server) and every proposed tool call is checked
+before it executes. Two deterministic pre-checks settle what they can (safe
+reads proceed, secret-shaped arguments pause). A resumed pause and an exact
+repeat of a refused call are settled without the model too. Decider scores
+every call these do not settle:
 
 - benign, grounded, confident -> Proceed: the call runs.
 - not grounded -> Guide: the model asks the user instead of guessing.
@@ -18,9 +21,9 @@ Wiring (the whole of it)::
     agent = Agent(model=..., tools=[...], interventions=[TriageHandler()])
 
 The model is never the gate. The gate behind this triage is deterministic: plain
-``if`` statements over a confidence number, in ``decide`` below. Measure the
-threshold 0.7 was fit on our own 50-case fixture; measure it on your own
-traffic before you trust it for your agent.
+``if`` statements over a confidence number, in ``decide`` below. The threshold
+0.7 is the operating point we chose on our own 50-case fixture; measure your
+own traffic before you trust it for your agent.
 
 Pause binding: a Confirm is cached under the call's toolUseId and re-issued
 verbatim on resume without calling Decider, so the human answer stays bound to
@@ -209,9 +212,11 @@ def triage_questions() -> dict[str, dict[str, Any]]:
 # asks, it does not block outright, because the model is never the gate.
 
 DEFAULT_THRESHOLD = 0.7
-"""Below this confidence a person decides. Fit on our own 50-case fixture
-(2026-10-12, run 38421303470: 12 accepted, 12 right at 0.7); measure it on
-your own traffic before you trust it for your agent."""
+"""Below this confidence a person decides. A chosen operating point on our own
+50-case fixture (run 38421303470: 12 fit cases accepted, 12 right at 0.7, but
+only 9 of them reach Decider under the shipped routing, one short of the
+rule's minimum of 10; on the 30 fit cases Decider scores, the rule falls back
+to 0.9). Measure your own traffic before you trust it."""
 
 CONFIRM_CLASSES = frozenset({"destructive_write", "untrusted_to_action", "confused_deputy"})
 """Risk classes that pause for a person when confident."""
@@ -672,7 +677,10 @@ AskFn = Callable[[str, Mapping[str, Mapping[str, Any]]], tuple[dict[str, Any], f
 
 
 class TriageHandler(InterventionHandler):
-    """Score every tool call for risk before it runs, with Decider 2B.
+    """Check every tool call before it runs; Decider 2B scores the rest.
+
+    The deterministic pre-checks settle what they can, and Decider scores
+    every call they do not settle.
 
     With ``audit_path`` set, each triage appends one JSON line there (tool,
     arguments as a sha256 hash, risk, confidence, verdict, layer, latency),
