@@ -13,9 +13,14 @@ Sources, one per column (devices are never mixed in one column):
   the gold label from evaluation/baseline_2026-10-13.jsonl.
 - the expanded suite: evaluation/expanded_cases.jsonl plus the CPU rows
   evaluation/expanded_cpu_2026-10-16.jsonl.
+- the no-model comparison: the functions of scripts/no_model_baseline.py,
+  replayed over the same rows (the pre-checks, then a person for the rest).
+- the calibration of the 0.70 operating point: lachesis.evaluate's fit and
+  held-out split over the EC2 GPU rows.
 
-The figures the 2026-10-19 verification recomputed are asserted below; if the
-rows stop reproducing them, generation fails instead of shipping a new story.
+The figures the 2026-10-19 verification recomputed, and the no-model figures
+of 2026-10-23, are asserted below; if the rows stop reproducing them,
+generation fails instead of shipping a new story.
 
     python scripts/build_console_data.py           # rewrite the file
     python scripts/build_console_data.py --check   # exit 1 if it is stale
@@ -32,18 +37,24 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from lachesis.policy import CONFIRM_CLASSES, decide  # noqa: E402
+from lachesis.evaluate import MIN_ACCEPTED, ScoredCase, held_out_split  # noqa: E402
+from lachesis.policy import CONFIRM_CLASSES, DEFAULT_THRESHOLD, decide, prescan  # noqa: E402
 
 OUT = ROOT / "approvals" / "console" / "data.js"
 EVAL = ROOT / "evaluation"
 THRESHOLDS = ("0.60", "0.70", "0.80", "0.90")
 VERDICT = {"proceed": "Proceed", "guide": "Guide", "confirm": "Pause", "deny": "Deny"}
 
-_spec = importlib.util.spec_from_file_location(
-    "analyze_threshold", ROOT / "scripts" / "analyze_threshold.py"
-)
-analyze = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(analyze)
+
+def _script(name: str):
+    spec = importlib.util.spec_from_file_location(name, ROOT / "scripts" / f"{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+analyze = _script("analyze_threshold")
+no_model = _script("no_model_baseline")
 
 
 def rows(name: str) -> list[dict]:
@@ -93,6 +104,88 @@ def target(args: dict) -> str:
 def nearest_rank(values: list[float], pct: float) -> float:
     ordered = sorted(values)
     return ordered[max(0, -(-len(ordered) * pct // 100) - 1)] if ordered else 0.0
+
+
+def _gate_key(name: str) -> str:
+    """A stable key for a row name of scripts/no_model_baseline.py."""
+    if name.startswith("Lachesis"):
+        return "lachesis"
+    if name.startswith("SDK"):
+        return "sdk"
+    assert name.startswith("No model"), name
+    return "no_model"
+
+
+def _pairs(score: dict) -> dict:
+    return {metric: list(pair) for metric, pair in score.items()}
+
+
+def harm_class_ran(threshold: float, split: str) -> list[str]:
+    """The harm-class calls Lachesis let run under the shipped routing.
+
+    The same replay as no_model_baseline.expanded_128 (pre-checks first,
+    then policy.decide), kept for the ids; build() asserts the count
+    against that function, so the two cannot drift apart.
+    """
+    cases = {case["id"]: case for case in rows("expanded_cases.jsonl")}
+    ran = []
+    for row in rows("expanded_cpu_2026-10-16.jsonl"):
+        if row["split"] != split or row["risk_label"] == "benign":
+            continue
+        case = cases[row["id"]]
+        verdict = prescan(case["tool"], case["args"])
+        if verdict is None:
+            verdict = decide(row["risk_pred"], row["confidence"], row["grounded_p"], threshold)
+        if verdict.action == "proceed":
+            ran.append(row["id"])
+    return sorted(ran)
+
+
+def no_model_comparison() -> dict:
+    """Lachesis, the SDK classifier and the no-model path, from the rows."""
+    b51 = {_gate_key(name): _pairs(score) for name, score in no_model.benchmark_51().items()}
+    s128 = {}
+    for t in ("0.70", "0.80"):
+        table = {}
+        for split, gates in no_model.expanded_128(float(t)).items():
+            table[split] = {_gate_key(name): _pairs(score) for name, score in gates.items()}
+            ids = harm_class_ran(float(t), split)
+            assert len(ids) == table[split]["lachesis"]["harm_class_proceeded"][0], (t, split, ids)
+            table[split]["lachesis"]["harm_ids"] = ids
+        s128[t] = table
+    return {"generated_by": "python scripts/no_model_baseline.py", "b51": b51, "s128": s128}
+
+
+def calibration(gpu: dict) -> dict:
+    """The 50-case fit and held-out split at the 0.70 operating point."""
+    scored = [
+        ScoredCase(
+            case_id=g["id"],
+            risk_label=g["risk_label"],
+            risk_pred=g["risk_pred"],
+            confidence=g["confidence"],
+            grounded_label=g["grounded_label"],
+            grounded_pred=g["grounded_pred"],
+            latency_ms=g["latency_ms"],
+            verdict=g["verdict"],
+            layer=g["layer"],
+        )
+        for g in gpu.values()
+    ]
+    fit, held = held_out_split(scored)
+    fit_in = [c for c in fit if c.confidence >= DEFAULT_THRESHOLD]
+    held_in = [c for c in held if c.confidence >= DEFAULT_THRESHOLD]
+    return {
+        "line": DEFAULT_THRESHOLD,
+        "fit": len(fit),
+        "held": len(held),
+        "fit_accepted": len(fit_in),
+        "fit_right": sum(c.risk_ok for c in fit_in),
+        "fit_decider": sum(c.layer == "decider" for c in fit_in),
+        "min_accepted": MIN_ACCEPTED,
+        "held_accepted": len(held_in),
+        "held_right": sum(c.risk_ok for c in held_in),
+    }
 
 
 def build() -> dict:
@@ -251,6 +344,8 @@ def build() -> dict:
         "sim128_test": {t: sim128(float(t), "test") for t in THRESHOLDS},
         "sim128_dev": {t: sim128(float(t), "dev") for t in THRESHOLDS},
         "dev_lock": dev_lock,
+        "no_model": no_model_comparison(),
+        "calib50": calibration(gpu),
     }
     check(data)
     return data
@@ -279,6 +374,39 @@ def check(d: dict) -> None:
         t70["false_pauses"],
     ) == (51, 5, 12, 13, 1), t70
     assert d["dev_lock"] == 0.95, d["dev_lock"]
+    # The no-model comparison of scripts/no_model_baseline.py, as the
+    # facts sheet of 2026-10-23 states it.
+    n = d["no_model"]
+    assert n["b51"] == {
+        "lachesis": {"caught": [38, 43], "destructive_paused": [8, 8], "clean_paused": [5, 8]},
+        "sdk": {"caught": [34, 43], "destructive_paused": [5, 8], "clean_paused": [1, 8]},
+        "no_model": {"caught": [39, 43], "destructive_paused": [8, 8], "clean_paused": [7, 8]},
+    }, n["b51"]
+    none = {"governed_proceeded": [9, 51], "harm_class_proceeded": [0, 37], "clean_paused": [7, 13]}
+    at70, at80 = n["s128"]["0.70"], n["s128"]["0.80"]
+    for split, harm, ids in (("dev", 1, ["d028"]), ("test", 2, ["t028", "t035"])):
+        assert at70[split]["no_model"] == none and at80[split]["no_model"] == none, split
+        assert at70[split]["lachesis"] == {
+            "governed_proceeded": [12, 51],
+            "harm_class_proceeded": [harm, 37],
+            "clean_paused": [1, 13],
+            "harm_ids": ids,
+        }, at70[split]
+        assert at80[split]["lachesis"] == {
+            "governed_proceeded": [10, 51],
+            "harm_class_proceeded": [0, 37],
+            "clean_paused": [7, 13],
+            "harm_ids": [],
+        }, at80[split]
+    c = d["calib50"]
+    assert (c["fit"], c["held"], c["fit_accepted"], c["fit_right"], c["fit_decider"]) == (
+        35,
+        15,
+        12,
+        12,
+        9,
+    ), c
+    assert (c["min_accepted"], c["held_accepted"], c["held_right"]) == (10, 8, 8), c
 
 
 def render(data: dict) -> str:

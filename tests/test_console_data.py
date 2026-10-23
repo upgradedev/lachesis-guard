@@ -65,3 +65,76 @@ def test_console_data_rows_match_their_sources():
     d021 = next(c for c in data["expanded"] if c["id"] == "d021")
     assert d021["conf"] == 0.827 and d021["target"] == "refunds_prod_config.py"
     assert data["baseline"]["sdk_ran"] == ["t19", "t22", "t25"]
+
+
+def _data() -> dict:
+    text = (CONSOLE / "data.js").read_text(encoding="utf-8")
+    return json.loads(text[text.index("{") : text.rstrip().rindex(";")])
+
+
+def test_console_data_carries_the_no_model_row():
+    """The Metrics comparison has a no-model row, replayed from the rows."""
+    n = _data()["no_model"]
+    assert n["generated_by"] == "python scripts/no_model_baseline.py"
+    assert n["b51"]["no_model"] == {
+        "caught": [39, 43],
+        "destructive_paused": [8, 8],
+        "clean_paused": [7, 8],
+    }
+    assert n["b51"]["lachesis"]["clean_paused"] == [5, 8]
+    test70 = n["s128"]["0.70"]["test"]
+    assert test70["lachesis"]["clean_paused"] == [1, 13]
+    assert test70["no_model"]["clean_paused"] == [7, 13]
+    assert test70["lachesis"]["harm_class_proceeded"] == [2, 37]
+    assert test70["lachesis"]["harm_ids"] == ["t028", "t035"]
+    assert n["s128"]["0.80"]["test"]["lachesis"]["clean_paused"] == [7, 13]
+    calib = _data()["calib50"]
+    assert (calib["fit_accepted"], calib["fit_decider"], calib["min_accepted"]) == (12, 9, 10)
+    js = (CONSOLE / "app.js").read_text(encoding="utf-8")
+    for piece in (
+        "DATA.no_model",
+        '"Escalations caught, no model"',
+        '"Clean calls paused, no model"',
+    ):
+        assert piece in js, piece
+
+
+def test_home_tiles_quote_the_generated_figures():
+    """The hand-written cockpit tiles say what the rows say."""
+    d = _data()
+    html = (CONSOLE / "index.html").read_text(encoding="utf-8")
+    test70 = d["no_model"]["s128"]["0.70"]["test"]
+    lach, none = test70["lachesis"], test70["no_model"]
+    a = d["accuracy50"]
+    for piece in (
+        "Every tool call is checked before it runs.",
+        f"{lach['clean_paused'][0]} / {lach['clean_paused'][1]}",
+        f"against {none['clean_paused'][0]} of {none['clean_paused'][1]} with no model",
+        "{} of {} harm-class calls ran ({}".format(
+            *lach["harm_class_proceeded"], ", ".join(lach["harm_ids"])
+        ),
+        f"wrong class on {a['mistakes']} of the {a['scored']} calls it scored",
+        f"(highest {a['worst_mistake']:.2f})",
+        "A rule with no model also pauses {} of {}.".format(
+            *d["no_model"]["b51"]["no_model"]["destructive_paused"]
+        ),
+        "The chosen operating point",
+    ):
+        assert piece in html, piece
+
+
+def test_console_copy_avoids_the_flagged_claims():
+    """Judge panel 2026-10-23: no claim the committed rows contradict."""
+    files = {
+        name: (CONSOLE / name).read_text(encoding="utf-8") for name in ("index.html", "app.js")
+    }
+    files["data.js"] = (CONSOLE / "data.js").read_text(encoding="utf-8")
+    for name, text in files.items():
+        lowered = text.lower()
+        for claim in ("scores every", "stops every", "measured, not", "11 risk", "under a second"):
+            assert claim not in lowered, (name, claim)
+        assert chr(0x2013) not in text and chr(0x2014) not in text, name  # en and em dash
+    for name in ("index.html", "app.js"):
+        lowered = files[name].lower()
+        for word in ("leverage", "robust", "seamless", "comprehensive", "honest", "(default)"):
+            assert word not in lowered, (name, word)

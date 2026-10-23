@@ -48,7 +48,7 @@ main { min-width: 0; padding: 22px 26px 48px; outline: none; max-width: 1280px; 
 .page { display: grid; gap: 20px; }
 .cockpit-bar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-end; gap: 12px 24px; padding-bottom: 14px; border-bottom: 1px solid var(--border); }
 .eyebrow { font-size: 11.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--accent); margin: 0 0 4px; }
-.cta, .row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; } .row--end { justify-content: flex-end; }
+.cta, .row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; } .row--end { justify-content: flex-end; } .cta--col { flex-direction: column; align-items: flex-end; max-width: 460px; } .cta--col .note { margin: 0; }
 .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 38px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--border-strong); background: var(--surface-2); color: var(--text); cursor: pointer; text-decoration: none; font-weight: 600; font-size: 13.5px; white-space: nowrap; }
 .btn:disabled { opacity: .55; cursor: not-allowed; } .btn--lg { min-height: 44px; padding: 0 20px; font-size: 15px; }
 .btn--primary { background: var(--btn-primary); border-color: var(--btn-primary); color: var(--on-btn); }
@@ -72,7 +72,7 @@ button.chip { cursor: pointer; } button.chip:hover, .chip--active { color: var(-
 .table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .table th, .table td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
 .table th { color: var(--muted); font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: .05em; }
-.table--hover tbody tr { cursor: pointer; } .table--hover tbody tr:hover { background: var(--surface-2); }
+.table--hover tbody tr { cursor: pointer; } .table--hover tbody tr:hover { background: var(--surface-2); } .table tr.row--t0 td { color: var(--muted); }
 .flow { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
 .flow li { display: flex; flex-direction: column; gap: 4px; padding: 14px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; font-size: 13px; color: var(--muted); }
 .flow li strong { color: var(--text); font-size: 14px; }

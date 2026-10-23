@@ -6,7 +6,7 @@
 <meta name="color-scheme" content="dark light">
 <link rel="icon" href="data:,">
 <title>Lachesis Approvals Cockpit</title>
-<link rel="stylesheet" href="app.css?v=20261021a">
+<link rel="stylesheet" href="app.css?v=20261023a">
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -52,17 +52,17 @@
       <div class="cockpit-bar">
         <div>
           <p class="eyebrow">Strands Decider 2B · Amazon Bedrock AgentCore · #guardrails</p>
-          <h1 id="home-h" tabindex="-1">Every tool call is scored before it runs.</h1>
-          <p class="subline">The model is never the gate. Plain Python rules decide; risky calls pause for a person.</p>
+          <h1 id="home-h" tabindex="-1">Every tool call is checked before it runs.</h1>
+          <p class="subline">The model is never the gate. Deterministic pre-checks settle what they can, Decider scores the calls they leave open, and plain Python rules decide. Risky calls pause for a person.</p>
           <div class="pulse" aria-hidden="true"><b>Path of one call</b><span>Agent</span><span>Secret scan</span><span>Decider 2B</span><span>Policy</span><span class="pulse-end">Pause</span></div>
         </div>
         <div class="cta"><a class="btn btn--primary" href="#/try">Run Live Sandbox</a><a class="btn btn--ghost" href="#/policy" id="goto-how">Inspect Policy Rules</a></div>
       </div>
       <div class="tiles" role="region" aria-label="Measured KPIs">
-        <button class="tile" type="button" data-drill-filter="destructive_write"><span class="tile-k">Destructive Writes Paused</span><strong class="tile-v">8 / 8</strong><span class="tile-sub"><em class="chip chip--ok">0 of 8 ran</em> vs 3 of 8 on SDK classifier</span><span class="tile-link">Drill down (8 cases) &rarr;</span></button>
-        <button class="tile" type="button" data-goto="#/metrics"><span class="tile-k">Warm GPU Triage Latency</span><strong class="tile-v">718 ms</strong><span class="tile-sub">p95 722 ms · n=45 · 50/50 CPU parity</span><span class="tile-link">Open latency metrics &rarr;</span></button>
-        <button class="tile" type="button" data-goto="#/policy"><span class="tile-k">Deterministic Gate Line</span><strong class="tile-v">0.70</strong><span class="tile-sub">6 rules · all 10 risk mistakes on the 50-case set scored under it (highest 0.67)</span><span class="tile-link">Simulate thresholds &rarr;</span></button>
-        <button class="tile" type="button" data-goto="#/try"><span class="tile-k">Idle GPU Footprint</span><strong class="tile-v">0 GPUs</strong><span class="tile-sub">Scales 0 to 1 on SageMaker ($0/h idle)</span><span class="tile-link">Open Live Sandbox &rarr;</span></button>
+        <button class="tile" type="button" data-drill-filter="destructive_write"><span class="tile-k">Destructive Writes Paused</span><strong class="tile-v">8 / 8</strong><span class="tile-sub"><em class="chip chip--ok">0 of 8 ran</em> The SDK classifier let 3 of 8 run. A rule with no model also pauses 8 of 8.</span><span class="tile-link">Drill down (8 cases) &rarr;</span></button>
+        <button class="tile" type="button" data-goto="#/metrics"><span class="tile-k">What Decider Buys</span><strong class="tile-v">1 / 13</strong><span class="tile-sub">Clean calls paused at 0.70 on each 128-case split, against 7 of 13 with no model. The cost on test: 2 of 37 harm-class calls ran (t028, t035, both set_config).</span><span class="tile-link">Compare with no model &rarr;</span></button>
+        <button class="tile" type="button" data-goto="#/metrics"><span class="tile-k">Warm GPU Triage Latency</span><strong class="tile-v">718 ms</strong><span class="tile-sub">50-case probe: p95 722 ms, n=45, 50/50 CPU parity. In the agent loop: 865 to 1157 ms. The GPU scales to 0 when idle.</span><span class="tile-link">Open latency metrics &rarr;</span></button>
+        <button class="tile" type="button" data-goto="#/policy"><span class="tile-k">Deterministic Gate Line</span><strong class="tile-v">0.70</strong><span class="tile-sub">The chosen operating point, 6 rules. Decider chose the wrong class on 10 of the 45 calls it scored on the 50-case set, all under 0.70 (highest 0.67).</span><span class="tile-link">Simulate thresholds &rarr;</span></button>
       </div>
       <div class="panel">
         <div class="panel-head">
@@ -80,16 +80,15 @@
     <section data-view="try" class="page" aria-labelledby="try-h" hidden>
       <div class="cockpit-bar">
         <div><p class="eyebrow">Public Sandbox · Isolated AgentCore Session</p><h1 id="try-h" tabindex="-1">Live demo</h1><p class="subline">Three-step workspace scenario on Amazon Bedrock AgentCore. Up to 5 runs per address per day.</p></div>
-        <div class="cta"><button id="try-start" class="btn btn--primary btn--lg" type="button">Start the demo run</button></div>
+        <div class="cta cta--col"><p class="note"><span class="note-i" aria-hidden="true">i</span>The Decider GPU scales to zero. Asleep or busy, it gives no score: the first call pauses fail-closed and you cannot decide it here. A click wakes it. That took about 9 minutes when measured on 2026-10-23, not promised; a run started after that is scored.</p><button id="try-start" class="btn btn--primary btn--lg" type="button">Start the demo run</button></div>
       </div>
       <p id="try-msg" role="alert" class="err" hidden></p>
       <div id="try-intro">
         <div class="tiles tiles--3">
-          <div class="tile tile--static"><span class="tile-k">Beat 1 · Benign Write</span><strong class="tile-tool"><code>write_file</code> cleanup_notes.txt</strong><span class="tile-sub">Decider scores it; if benign and grounded, it runs.</span></div>
-          <div class="tile tile--static"><span class="tile-k">Beat 2 · Destructive Delete</span><strong class="tile-tool"><code>delete_file</code> refunds_prod_config.py</strong><span class="tile-sub">It pauses: a destructive write always waits for a person, and so does any call Decider scores under 0.70.</span></div>
-          <div class="tile tile--static"><span class="tile-k">Beat 3 · Human Decision</span><strong class="tile-tool"><code>run_tests</code> after decision</strong><span class="tile-sub">When the pause carries a Decider score, you approve or decline it here; the agent runs pytest or stands down.</span></div>
+          <div class="tile tile--static"><span class="tile-k">Beat 1 · Benign Write</span><strong class="tile-tool"><code>write_file</code> cleanup_notes.txt</strong><span class="tile-sub">Decider scores it. Benign, grounded and at 0.70 or above, it runs; under the line it pauses, whatever the class.</span></div>
+          <div class="tile tile--static"><span class="tile-k">Beat 2 · Destructive Delete</span><strong class="tile-tool"><code>delete_file</code> refunds_prod_config.py</strong><span class="tile-sub">A call Decider classes as a destructive write pauses for a person whatever the score (rule R3). Any call scored under 0.70 pauses too.</span></div>
+          <div class="tile tile--static"><span class="tile-k">Beat 3 · Human Decision</span><strong class="tile-tool"><code>run_tests</code> after decision</strong><span class="tile-sub">Decider scores this call too. You approve or decline each scored pause here; the agent runs pytest or stands down.</span></div>
         </div>
-        <p class="note"><span class="note-i" aria-hidden="true">i</span>The Decider GPU scales to zero. If it is asleep, the call still pauses fail-closed with no score, and you cannot decide it here.</p>
       </div>
       <div id="run" hidden>
         <div class="run-bar"><p id="run-status" class="status" aria-live="polite"></p><p class="ref">Run <code id="run-ref"></code> <button class="btn btn--small copy" type="button" data-copy>Copy link</button></p></div>
@@ -152,7 +151,7 @@
             <h2>Threshold Calibration Simulator</h2>
             <div class="filter-bar" id="thr-tabs" role="toolbar" aria-label="Select threshold">
               <button class="chip" type="button" data-thr="0.60">0.60</button>
-              <button class="chip chip--active" type="button" data-thr="0.70">0.70 (Default)</button>
+              <button class="chip chip--active" type="button" data-thr="0.70">0.70 (Chosen)</button>
               <button class="chip" type="button" data-thr="0.80">0.80 (Strict)</button>
               <button class="chip" type="button" data-thr="0.90">0.90</button>
             </div>
@@ -163,7 +162,7 @@
     </section>
 
     <section data-view="metrics" class="page" aria-labelledby="metrics-h" hidden>
-      <div class="cockpit-bar"><div><p class="eyebrow">Committed Evaluation Artifacts · Reproducible JSONL</p><h1 id="metrics-h" tabindex="-1">Metrics &amp; Benchmarks</h1><p class="subline">From the 51-call SDK baseline, the 50-case hosted g4dn probe and the 128-case expanded suite. Every figure is generated from the committed rows.</p></div></div>
+      <div class="cockpit-bar"><div><p class="eyebrow">Committed Evaluation Artifacts · Reproducible JSONL</p><h1 id="metrics-h" tabindex="-1">Metrics &amp; Benchmarks</h1><p class="subline">From the 51-call SDK baseline, the 50-case hosted g4dn probe and the 128-case expanded suite, each beside a rule with no model: the same pre-checks, then a person for every other call. Every figure is generated from the committed rows.</p></div></div>
       <div id="metrics-body"></div>
     </section>
 
@@ -223,7 +222,7 @@
 </dialog>
 <noscript><p class="page">This console needs JavaScript.</p></noscript>
 <script src="config.js"></script>
-<script src="data.js?v=20261020"></script>
-<script src="app.js?v=20261021i"></script>
+<script src="data.js?v=20261023a"></script>
+<script src="app.js?v=20261023a"></script>
 </body>
 </html>
