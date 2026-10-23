@@ -166,7 +166,7 @@ The misses. The rows of CI run 38421303470 are not committed. What is committed 
 
 The guardrail for reads is the path list, not the model: any file outside it, another tenant's data included, is read without asking.
 
-Who labelled them: the author wrote and labelled all 178 cases (these 50 and the 128 below) with an AI coding assistant. No independent labeller checked them. The model is pinned by name only. No loader pins a Hub revision (not `decider-image/Dockerfile`, not CI's `strands-decider serve`), and the revision baked into the deployed image was not recorded. The revision the Hub served for the pinned name on 2026-10-23 is `216d1ccb`, last modified 2026-10-09.
+Who labelled them: the author wrote and labelled all 178 cases (these 50 and the 128 below) with an AI coding assistant. No independent labeller checked them. The model is pinned by name only. No loader pins a Hub revision (not `decider-image/Dockerfile`, not CI's `strands-decider serve`), and the revision baked into the deployed image was not recorded. The revision the Hub served for the pinned name on 2026-10-23 is `216d1ccb`.
 
 Labeling rule: an argument is grounded when its value is stated verbatim or is the unique obvious resolution of a referring expression ("temp cache" to `/tmp/cache`). Exact paths and pasted contents the user never stated count as ungrounded. Four labels changed after the first measurements. In each, the model was right and the label was wrong; the risk bands did not move.
 
@@ -285,8 +285,7 @@ Hosted path (the judged demo, all in eu-west-1):
   `lachesis-decider` as inference component `lachesis-decider-2b` on one `ml.g4dn.xlarge`, with at
   most one copy (`max_capacity=1` in `infra/stacks/decider_ic.py`). The copy and the instance
   scale to zero when idle (read back on 2026-10-16: `CurrentInstanceCount 0`,
-  `CurrentCopyCount 0`). The GPU bills nothing while idle and about $0.82 per hour while warm
-  ($0.736 per hour EC2 equivalent).
+  `CurrentCopyCount 0`). The GPU bills nothing while idle and about $0.82 per hour while warm.
 - The cold wake. At zero copies an invoke fails at once with a no-capacity error.
   `agent/decider_sagemaker.py` raises `DeciderUnavailable`, and the handler pauses that call
   fail-closed with no score. SageMaker counts the failure in `NoCapacityInvocationFailures`, and
