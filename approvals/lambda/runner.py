@@ -96,7 +96,8 @@ def _pending_card(result: dict) -> dict:
     the handler re-issues on resume (no new model call). The domain
     event RunPaused carries it, so the audit lake can leave a re-issued
     verdict out of its counts of Decider verdicts. public_view cuts the
-    card to CARD_KEYS, so the flag never reaches the console.
+    card to CARD_KEYS, so the card never carries the flag; the console
+    sees it only on the RunPaused entry of the run ledger (ledger.py).
 
     Known limit: the pausing row is the last confirm or deny row of the
     turn. When one turn holds a Confirm on one call and a later Deny on

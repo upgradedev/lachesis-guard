@@ -8,6 +8,15 @@ Routes (HTTP API, see infra/stacks/approvals.py):
 - POST /try                  no auth: starts the canned demo run, returns
                              the unguessable approval id as its token
 - GET  /try/{token}          no auth: that run's public view only
+- GET  /try/{token}/events   no auth: that run's ledger (B5), try lane only
+- GET  /approvals/{id}/events  approvers group only: an approval-lane
+                             run's ledger (B5)
+
+A ledger is the run's rows of lachesis-run-events cut to the whitelist
+of ledger.py (seq, type, at, status, and the run and triage fields the
+publisher relays), never arguments, prompts, tokens, addresses or the
+Cognito sub. Each ledger route checks the lane on the run row first, so
+a /try token never reads an approval-lane run and the reverse.
 
 Authorization is checked here from the JWT claims the HTTP API's JWT
 authorizer already validated: membership in the `approvers` group.
@@ -36,6 +45,7 @@ import re
 
 import boto3
 import common
+import ledger
 from approval import domain, service
 
 RUNNER_ARN = os.environ.get("RUNNER_ARN", "")
@@ -153,6 +163,25 @@ def _dispatch_resume(approval_id: str) -> None:
         print(json.dumps({"resume_hand_off_failed": approval_id, "error": type(exc).__name__}))
 
 
+def _ledger(approval_id: str, lane: str, not_found: str) -> dict:
+    """The run's ledger, after the lane check on the run row: an invalid
+    id, an unknown run or a run of the other lane is 404 and the event log
+    is never read. A failed read, of the run row or of the log, is 503,
+    never an unhandled error; only the exception type name is logged."""
+    if not _valid_id(approval_id):
+        return _response(404, {"error": not_found})
+    try:
+        item = common.get(approval_id)
+        # A row without a lane predates /try and is an approval-lane run.
+        if item is None or item.get("lane", "approval") != lane:
+            return _response(404, {"error": not_found})
+        events = ledger.read(approval_id)
+    except Exception as exc:
+        print(json.dumps({"ledger_read_failed": type(exc).__name__}))
+        return _response(503, {"error": "the run ledger could not be read"})
+    return _response(200, {"events": events})
+
+
 def _decision(event: dict) -> tuple[str | None, dict | None]:
     """The decision in the body, or an error response."""
     body = _parse_body(event)
@@ -190,6 +219,9 @@ def handler(event, _context):
         if item is None or item.get("lane") != "try":
             return _response(404, {"error": "unknown token"})
         return _response(200, common.public_view(item))
+
+    if route == "GET /try/{token}/events":
+        return _ledger(params.get("token", ""), "try", "unknown token")
 
     if route == "POST /try/{token}/decision":
         token = params.get("token", "")
@@ -233,6 +265,9 @@ def handler(event, _context):
         if item is None or item.get("lane", "approval") != "approval":
             return _response(404, {"error": "unknown approval"})
         return _response(200, common.public_view(item))
+
+    if route == "GET /approvals/{id}/events":
+        return _ledger(params.get("id", ""), "approval", "unknown approval")
 
     if route == "POST /approvals/{id}/decision":
         approval_id = params.get("id", "")

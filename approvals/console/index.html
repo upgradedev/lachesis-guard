@@ -6,7 +6,7 @@
 <meta name="color-scheme" content="dark light">
 <link rel="icon" href="data:,">
 <title>Lachesis Approvals Cockpit</title>
-<link rel="stylesheet" href="app.css?v=20261020b">
+<link rel="stylesheet" href="app.css?v=20261020c">
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -34,6 +34,7 @@
       <a class="nav-item" data-nav="queue" href="#/queue"><span class="nav-ico" aria-hidden="true">&#9888;</span><span>Approvals Queue</span><em id="queue-badge" class="nav-badge" hidden>0</em></a>
       <a class="nav-item" data-nav="policy" href="#/policy"><span class="nav-ico" aria-hidden="true">&#9878;</span><span>Policy &amp; Rules</span><em class="nav-badge">R1-R6</em></a>
       <a class="nav-item" data-nav="metrics" href="#/metrics"><span class="nav-ico" aria-hidden="true">&#9636;</span><span>Metrics &amp; Eval</span><em class="nav-badge">178</em></a>
+      <a class="nav-item" data-nav="architecture" href="#/architecture"><span class="nav-ico" aria-hidden="true">&#9671;</span><span>Architecture</span></a>
     </nav>
     <div class="side-foot">
       <div class="side-kv"><span>Decider</span><strong>2B Qwen3.5</strong></div>
@@ -93,6 +94,7 @@
         <div class="run-bar"><p id="run-status" class="status" aria-live="polite"></p><p class="ref">Run <code id="run-ref"></code> <button class="btn btn--small copy" type="button" data-copy>Copy link</button></p></div>
         <ol id="steps" class="steps"></ol>
         <p class="muted small">Steps arrive when the agent pauses and when it finishes; this page does not stream.</p>
+        <section id="run-ledger" class="panel ledger" aria-label="Run ledger" hidden></section>
       </div>
     </section>
 
@@ -114,6 +116,7 @@
       <h1 id="detail-h" tabindex="-1">Paused call</h1>
       <p id="detail-status" class="status" aria-live="polite"></p>
       <div id="detail-body"></div>
+      <section id="detail-ledger" class="panel ledger" aria-label="Run ledger" hidden></section>
     </section>
 
     <section data-view="policy" class="page" aria-labelledby="policy-h" hidden>
@@ -156,6 +159,40 @@
       <div class="cockpit-bar"><div><p class="eyebrow">Committed Evaluation Artifacts · Reproducible JSONL</p><h1 id="metrics-h" tabindex="-1">Metrics &amp; Benchmarks</h1><p class="subline">From the 51-call SDK baseline, the 50-case hosted g4dn probe and the 128-case expanded suite. Every figure is generated from the committed rows.</p></div></div>
       <div id="metrics-body"></div>
     </section>
+
+    <section data-view="architecture" class="page" aria-labelledby="arch-h" hidden>
+      <div class="cockpit-bar"><div><p class="eyebrow">Decision Fabric · Design View</p><h1 id="arch-h" tabindex="-1">How one tool call travels</h1><p class="subline">The design as the code in this repository defines it, plus one planned part, marked as planned. This is a diagram, not a live status page.</p></div></div>
+      <div class="arch">
+        <div class="arch-lane"><h2>Before the tool runs: the synchronous decision</h2>
+          <ol class="arch-row">
+            <li class="arch-node"><strong>Agent</strong><span class="arch-svc">Amazon Bedrock AgentCore Runtime</span><span>Runs the Strands agent and proposes each tool call.</span></li>
+            <li class="arch-node"><strong>Lachesis intervention</strong><span class="arch-svc">Strands InterventionHandler</span><span>Runs the deterministic pre-checks first (safe reads, the secret scan, repeats of a refusal); for every other call it asks Decider two typed questions, then plain Python rules return Proceed, Guide, Confirm or Deny.</span></li>
+            <li class="arch-node"><strong>Decider</strong><span class="arch-svc">Strands Decider 2B on Amazon SageMaker</span><span>Answers the risk class and the grounding question, each with a confidence.</span></li>
+          </ol>
+        </div>
+        <div class="arch-lane"><h2>A Confirm pauses the run for a person</h2>
+          <ol class="arch-row">
+            <li class="arch-node"><strong>Approvals API</strong><span class="arch-svc">Amazon API Gateway HTTP API and AWS Lambda</span><span>Records the decision on a paused call and hands start and resume to the runner Lambda, which invokes the agent and records each pause.</span></li>
+            <li class="arch-node"><strong>Unit of Work</strong><span class="arch-svc">Amazon DynamoDB TransactWriteItems</span><span>Writes the run aggregate (lachesis-approvals) and its events (lachesis-run-events) in one transaction.</span></li>
+          </ol>
+        </div>
+        <div class="arch-lane"><h2>After the commit: the event-driven trail</h2>
+          <ol class="arch-row">
+            <li class="arch-node"><strong>Stream publisher</strong><span class="arch-svc">AWS Lambda on DynamoDB Streams</span><span>Relays each new event, with a whitelisted detail, to the bus.</span></li>
+            <li class="arch-node"><strong>Event bus</strong><span class="arch-svc">Amazon EventBridge, lachesis-events</span><span>Routes run events to the audit rule.</span></li>
+            <li class="arch-node"><strong>Audit delivery</strong><span class="arch-svc">Amazon Data Firehose to Amazon S3</span><span>Writes every event as JSON lines to the audit bucket.</span></li>
+            <li class="arch-node"><strong>Insight</strong><span class="arch-svc">AWS Glue and Amazon Athena</span><span>Holds the table schema and answers the audit queries.</span></li>
+          </ol>
+        </div>
+        <div class="arch-lane"><h2>When something fails</h2>
+          <ul class="arch-row arch-row--plain">
+            <li class="arch-node"><strong>Dead-letter queues</strong><span class="arch-svc">Amazon SQS</span><span>Keep what the runner, the publisher and the audit rule could not deliver.</span></li>
+            <li class="arch-node"><strong>Alarms</strong><span class="arch-svc">Amazon CloudWatch to Amazon SNS</span><span>Notify the alerts topic on a failed run, a dead-lettered message or late delivery.</span></li>
+            <li class="arch-node arch-node--planned"><strong>Approval workflow</strong><span class="arch-svc">AWS Step Functions</span><span>Would own the wait for a person and the resume.</span><em class="chip chip--warn">Planned: behind a flag, not yet live</em></li>
+          </ul>
+        </div>
+      </div>
+    </section>
   </main>
 
   <aside id="drawer" class="drawer" aria-labelledby="drawer-h" hidden>
@@ -180,6 +217,6 @@
 <noscript><p class="page">This console needs JavaScript.</p></noscript>
 <script src="config.js"></script>
 <script src="data.js?v=20261020"></script>
-<script src="app.js?v=20261020c"></script>
+<script src="app.js?v=20261020e"></script>
 </body>
 </html>

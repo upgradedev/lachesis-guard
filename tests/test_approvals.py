@@ -147,6 +147,8 @@ class FakeDynamo:
         self.tables = {APPROVALS: {}, EVENTS: {}}
         self.transactions = []
         self.inject = []  # reason-code lists to fail the next calls with
+        self.queries = []  # every query on the event log (the run ledger)
+        self.returned = []  # every item those queries handed back
 
     @staticmethod
     def _key(table, key):
@@ -203,6 +205,47 @@ class FakeDynamo:
                 )
                 self.tables[table][key] = item
         return {}
+
+    def query(self, TableName, KeyConditionExpression, **kwargs):  # noqa: N803
+        """lachesis-run-events by partition key, the way ledger.read asks:
+        seq ascending, at most Limit rows a page, resuming after
+        ExclusiveStartKey, a LastEvaluatedKey whenever a page is full,
+        and only the projected attributes: a top-level name copies that
+        attribute, a nested path (#d.#f0) copies that one key of the map,
+        and a bare map beside one of its own paths, or an unused name, is
+        rejected, the way DynamoDB rejects them."""
+        assert TableName == EVENTS and KeyConditionExpression == "#pk = :id"
+        self.queries.append(copy.deepcopy(kwargs))
+        names = kwargs["ExpressionAttributeNames"]
+        approval_id = kwargs["ExpressionAttributeValues"][":id"]
+        rows = self.events_of(approval_id)
+        start = kwargs.get("ExclusiveStartKey")
+        if start is not None:
+            rows = [row for row in rows if int(row["seq"]) > int(start["seq"])]
+        limit = kwargs.get("Limit")
+        page = rows[:limit] if limit is not None else rows
+        parts = [part.strip() for part in kwargs["ProjectionExpression"].split(",")]
+        paths = [tuple(names[name] for name in part.split(".")) for part in parts]
+        tops = {path[0] for path in paths if len(path) == 1}
+        used = {name for part in parts for name in part.split(".")} | {"#pk"}
+        if set(names) - used or any(len(path) > 1 and path[0] in tops for path in paths):
+            raise ClientError({"Error": {"Code": "ValidationException"}}, "Query")
+        items = []
+        for row in page:
+            item = {}
+            for top, *rest in paths:
+                if top not in row:
+                    continue
+                if not rest:
+                    item[top] = row[top]
+                elif isinstance(row[top], dict) and rest[0] in row[top]:
+                    item.setdefault(top, {})[rest[0]] = row[top][rest[0]]
+            items.append(item)
+        self.returned.extend(copy.deepcopy(items))
+        response = {"Items": [_as_read(copy.deepcopy(item)) for item in items]}
+        if limit is not None and len(page) == limit:
+            response["LastEvaluatedKey"] = {"approval_id": approval_id, "seq": page[-1]["seq"]}
+        return response
 
     def events_of(self, approval_id):
         rows = [row for (aid, _), row in self.tables[EVENTS].items() if aid == approval_id]
@@ -266,6 +309,9 @@ def modules(monkeypatch):
     table = FakeTable(dynamo)
     for name in [n for n in sys.modules if n == "approval" or n.startswith("approval.")]:
         monkeypatch.delitem(sys.modules, name)
+    # ledger imports `common` too: drop a copy bound to an earlier instance.
+    if "ledger" in sys.modules:
+        monkeypatch.delitem(sys.modules, "ledger")
     spec = importlib.util.spec_from_file_location("common", LAMBDA_DIR / "common.py")
     common = importlib.util.module_from_spec(spec)
     # The approval package imports `common`: it must be this instance.
@@ -279,6 +325,7 @@ def modules(monkeypatch):
         monkeypatch.setitem(sys.modules, name, module)
         spec.loader.exec_module(module)
         assert module.common is common
+    assert sys.modules["api"].ledger.common is common
     work = sys.modules["approval.uow"]
     assert work.common is common
     # No real pause between contention retries, and no real Lambda call
@@ -632,6 +679,10 @@ def test_send_card_escapes_html_and_skips_when_unset(modules, monkeypatch):
 
 CONSOLE_DIR = Path(__file__).resolve().parents[1] / "approvals" / "console"
 CONSOLE_FILES = ("index.html", "app.css", "app.js")
+# The line budget of the three hand-written console files. 900 until B5;
+# raised for the run ledger and the Architecture view by the owner's
+# directive of 2026-10-20 ("I want the full platform now"), never past 1100.
+CONSOLE_LINE_BUDGET = 1000
 
 
 def _console(name: str) -> str:
@@ -648,12 +699,14 @@ def test_console_split_and_budget():
     assert '<link rel="icon" href="data:,">' in html
     for landmark in ("<header", "<aside", "<main", "<footer", "<dialog", "<form"):
         assert landmark in html
-    for view in ("home", "try", "queue", "detail", "policy", "metrics"):
+    for view in ("home", "try", "queue", "detail", "policy", "metrics", "architecture"):
         assert f'data-view="{view}"' in html
     for elem in ('class="sidebar"', 'id="cases-table"', 'id="thr-tabs"', 'id="drawer"'):
         assert elem in html
     total = sum(len(_console(name).splitlines()) for name in CONSOLE_FILES)
-    assert total <= 900, total
+    # Raised from 900 for B5 (run ledger and Architecture view) under the
+    # owner's full-platform directive of 2026-10-20; at most 1100.
+    assert total <= CONSOLE_LINE_BUDGET, total
 
 
 
@@ -1263,7 +1316,7 @@ def test_console_try_start_race_keeps_polling():
     assert "handle = later(tick, 2000)" in js
     assert "on404(out); return;" in js and "on404(); return;" in js
     html = _console("index.html")
-    assert "app.js?v=20261020c" in html
+    assert "app.js?v=20261020e" in html
 
 
 def test_console_hides_previous_approver_on_a_fresh_pause():
@@ -2154,6 +2207,8 @@ def test_ids_of_the_wrong_shape_are_404_before_any_read(modules, monkeypatch, ba
             "unknown token",
         ),
         (_event("GET /approvals/{id}", APPROVER, None, {"id": bad}), "unknown approval"),
+        (_event("GET /try/{token}/events", {}, None, {"token": bad}), "unknown token"),
+        (_event("GET /approvals/{id}/events", APPROVER, None, {"id": bad}), "unknown approval"),
         (
             _event("POST /approvals/{id}/decision", APPROVER, {"decision": "approve"}, {"id": bad}),
             "unknown approval",
@@ -2164,6 +2219,7 @@ def test_ids_of_the_wrong_shape_are_404_before_any_read(modules, monkeypatch, ba
         assert out["statusCode"] == 404, (event["routeKey"], bad)
         assert json.loads(out["body"]) == {"error": message}
     assert table.reads == [] and item_reads == [] and table.dynamo.transactions == []
+    assert table.dynamo.queries == []
 
 
 def test_real_ids_have_the_checked_shape(modules):
@@ -2285,3 +2341,340 @@ def test_approver_queue_still_reads_newest_first(modules):
     rows = json.loads(out["body"])["approvals"]
     assert [row["approval_id"] for row in rows] == ["appr-new", "appr-old"]
     assert table.queries[-1]["ScanIndexForward"] is False
+
+
+# ---------------------------------------------------------------------------
+# Slice B5: the run ledger (GET /try/{token}/events, GET /approvals/{id}/
+# events) and the console views that show it, plus the Architecture view.
+# ---------------------------------------------------------------------------
+
+LEDGER_FIELDS = (
+    "seq", "type", "at", "status", "lane", "pause_seq",
+    "tool", "layer", "risk", "confidence", "latency_ms", "cached",
+)
+LEDGER_KEYS = set(LEDGER_FIELDS)
+
+
+def _ledger(api, route, params, claims=None):
+    out = api.handler(_event(route, claims or {}, None, params), None)
+    return out["statusCode"], out["body"]
+
+
+def _try_run_paused_then_decided(common, api, runner, monkeypatch):
+    monkeypatch.setattr(api, "_invoke_runner", lambda payload, asynchronous: {})
+    token = json.loads(_post_try(api, "198.51.100.9")["body"])["token"]
+    monkeypatch.setattr(common, "invoke_agent", lambda s, p, **kw: PAUSE_PAYLOAD)
+    assert runner.start("p", token, context=_Lambda("req-ledger-9"))["status"] == "interrupt"
+    decide = _event("POST /try/{token}/decision", {}, {"decision": "approve"}, {"token": token})
+    assert api.handler(decide, None)["statusCode"] == 202
+    return token
+
+
+def test_try_ledger_returns_the_whitelisted_events_in_order(modules, monkeypatch):
+    common, api, runner, table = modules
+    token = _try_run_paused_then_decided(common, api, runner, monkeypatch)
+    status, raw = _ledger(api, "GET /try/{token}/events", {"token": token})
+    assert status == 200
+    events = json.loads(raw)["events"]
+    assert [e["type"] for e in events] == [
+        "RunRequested", "RunClaimed", "RunPaused", "DecisionRecorded"
+    ]
+    assert [e["seq"] for e in events] == [1, 2, 3, 4]
+    assert all(type(e["seq"]) is int for e in events)
+    assert [e["status"] for e in events] == ["STARTING", "STARTING", "PENDING", "APPROVED"]
+    for event in events:
+        assert set(event) <= LEDGER_KEYS, set(event) - LEDGER_KEYS
+        assert isinstance(event["at"], str) and event["at"]
+    assert events[0]["lane"] == "try"
+    paused = events[2]
+    assert paused["tool"] == "delete_file" and paused["layer"] == "decider"
+    assert paused["risk"] == "destructive_write" and paused["cached"] is False
+    assert paused["confidence"] == 0.31 and type(paused["confidence"]) is float
+    assert paused["latency_ms"] == 187.4 and paused["pause_seq"] == 1
+    assert "verdict" not in paused  # no event carries one
+    # Never the token, the runner's request id, the visitor marker, the
+    # interrupt id, the arguments or the row's own bookkeeping.
+    for leak in (token, "req-ledger-9", "try-visitor", "int-secret-7", "prod_secret",
+                 "event_id", "run_version", "ttl", "decided_by_name", "request_id",
+                 "198.51.100.9", "expires_ts"):
+        assert leak not in raw, leak
+    # One consistent query, projected to the four top-level attributes it
+    # reads and, inside data, to the whitelisted keys only.
+    [query] = table.dynamo.queries
+    assert query["ConsistentRead"] is True and query["ScanIndexForward"] is True
+    names = query["ExpressionAttributeNames"]
+    projected = {
+        ".".join(names[name] for name in part.strip().split("."))
+        for part in query["ProjectionExpression"].split(",")
+    }
+    data_keys = LEDGER_FIELDS[4:]
+    assert projected == {"seq", "event_type", "status", "at"} | {
+        f"data.{key}" for key in data_keys
+    }
+    # The rest of data never leaves DynamoDB for this function.
+    assert table.dynamo.returned
+    for item in table.dynamo.returned:
+        assert set(item) <= {"seq", "event_type", "status", "at", "data"}
+        assert set(item.get("data", {})) <= set(data_keys), item
+
+
+def test_approval_ledger_needs_an_approver_and_hides_who_decided(modules, monkeypatch):
+    common, api, runner, table = modules
+    monkeypatch.setattr(api, "_invoke_runner", lambda payload, asynchronous: {})
+    start = api.handler(_event("POST /approvals/start", APPROVER, {}), None)
+    approval_id = json.loads(start["body"])["approval_id"]
+    monkeypatch.setattr(common, "invoke_agent", lambda s, p, **kw: PAUSE_PAYLOAD)
+    started = runner.start("p", approval_id, context=_Lambda("req-ledger-a"))
+    assert started["status"] == "interrupt"
+    assert _decide(api, APPROVER, "decline", approval_id)["statusCode"] == 202
+
+    seen = []
+    original = api.ledger.public_event
+
+    def spy(row):
+        seen.append(copy.deepcopy(row))
+        return original(row)
+
+    monkeypatch.setattr(api.ledger, "public_event", spy)
+    params = {"id": approval_id}
+    assert _ledger(api, "GET /approvals/{id}/events", params, PLAIN_USER)[0] == 403
+    assert _ledger(api, "GET /approvals/{id}/events", params)[0] == 403
+    status, raw = _ledger(api, "GET /approvals/{id}/events", params, APPROVER)
+    assert status == 200
+    events = json.loads(raw)["events"]
+    assert [e["type"] for e in events][-1] == "DecisionRecorded"
+    assert events[-1]["status"] == "DECLINED" and events[0]["lane"] == "approval"
+    for event in events:
+        assert set(event) <= LEDGER_KEYS
+    for leak in (approval_id, "sub-1", "owner", "req-ledger-a", "decline"):
+        assert leak not in raw, leak
+    # The stored DecisionRecorded row does name the approver; the query
+    # never hands that key, or the runner's request id, to this function.
+    stored = [row.get("data", {}) for row in table.dynamo.events_of(approval_id)]
+    assert any("decided_by_name" in data for data in stored)
+    assert any("request_id" in data for data in stored)
+    assert seen and len(seen) == len(events)
+    for row in seen:
+        for key in ("decided_by_name", "request_id", "answer", "cause", "expires_ts"):
+            assert key not in row.get("data", {}), key
+        assert "approval_id" not in row and "event_id" not in row
+
+
+def test_ledger_lanes_are_isolated_and_unknown_runs_are_404(modules, monkeypatch):
+    common, api, runner, table = modules
+    token = _try_run_paused_then_decided(common, api, runner, monkeypatch)
+    _seed_starting("appr-ledger-real", lane="approval")
+    table.dynamo.queries.clear()
+    cases = (
+        ("GET /approvals/{id}/events", {"id": token}, APPROVER, "unknown approval"),
+        ("GET /try/{token}/events", {"token": "appr-ledger-real"}, None, "unknown token"),
+        ("GET /try/{token}/events", {"token": "appr-ledger-missing"}, None, "unknown token"),
+        ("GET /approvals/{id}/events", {"id": "appr-ledger-missing"}, APPROVER,
+         "unknown approval"),
+    )
+    for route, params, claims, message in cases:
+        status, raw = _ledger(api, route, params, claims)
+        assert status == 404, (route, params)
+        assert json.loads(raw) == {"error": message}
+    # The lane is checked on the run row before the event log is read.
+    assert table.dynamo.queries == []
+
+
+def test_ledger_reads_every_page_up_to_the_cap(modules, monkeypatch):
+    common, api, runner, table = modules
+    token = _try_run_paused_then_decided(common, api, runner, monkeypatch)
+    monkeypatch.setattr(api.ledger, "PAGE_SIZE", 3)
+    events = json.loads(_ledger(api, "GET /try/{token}/events", {"token": token})[1])["events"]
+    assert [e["seq"] for e in events] == [1, 2, 3, 4]
+    queries = table.dynamo.queries
+    assert len(queries) == 2 and "ExclusiveStartKey" not in queries[0]
+    assert int(queries[1]["ExclusiveStartKey"]["seq"]) == 3
+    table.dynamo.queries.clear()
+    monkeypatch.setattr(api.ledger, "PAGE_SIZE", 1)
+    monkeypatch.setattr(api.ledger, "MAX_EVENTS", 2)
+    events = json.loads(_ledger(api, "GET /try/{token}/events", {"token": token})[1])["events"]
+    assert [e["seq"] for e in events] == [1, 2] and len(table.dynamo.queries) == 2
+
+
+def test_a_failed_ledger_read_is_503_without_detail(modules, monkeypatch, capsys):
+    common, api, runner, table = modules
+    _seed_starting("appr-ledger-down", lane="try")
+
+    def broken(**kwargs):
+        raise ClientError(
+            {"Error": {"Code": "ThrottlingException", "Message": "appr-ledger-down detail"}},
+            "Query",
+        )
+
+    monkeypatch.setattr(table.dynamo, "query", broken)
+    status, raw = _ledger(api, "GET /try/{token}/events", {"token": "appr-ledger-down"})
+    assert status == 503
+    assert json.loads(raw) == {"error": "the run ledger could not be read"}
+    logged = capsys.readouterr().out
+    assert "ClientError" in logged and "appr-ledger-down" not in logged
+
+    # A failed read of the run row is 503 too, on both lanes, and the
+    # event log is never read.
+    _seed_starting("appr-ledger-row", lane="approval")
+    table.dynamo.queries.clear()
+
+    def row_down(**kwargs):
+        raise ClientError(
+            {"Error": {"Code": "ProvisionedThroughputExceededException",
+                       "Message": "appr-ledger-row detail"}},
+            "GetItem",
+        )
+
+    monkeypatch.setattr(table, "get_item", row_down)
+    for route, params, claims in (
+        ("GET /try/{token}/events", {"token": "appr-ledger-down"}, None),
+        ("GET /approvals/{id}/events", {"id": "appr-ledger-row"}, APPROVER),
+    ):
+        status, raw = _ledger(api, route, params, claims)
+        assert status == 503, route
+        assert json.loads(raw) == {"error": "the run ledger could not be read"}
+    logged = capsys.readouterr().out
+    assert logged.count("ClientError") == 2 and "appr-ledger" not in logged
+
+
+def test_ledger_entry_drops_bad_fields_and_unknown_rows(modules):
+    _, api, _, _ = modules
+    public_event = api.ledger.public_event
+    row = {
+        "approval_id": "appr-x", "seq": Decimal(5), "event_type": "RunPaused",
+        "status": "PENDING", "at": "2026-10-20T10:00:00+00:00", "ttl": Decimal(9),
+        "data": {
+            "tool": ["not", "text"], "layer": "decider", "confidence": Decimal("NaN"),
+            "latency_ms": None, "risk": "benign", "cached": "yes", "pause_seq": Decimal(1),
+            "expires_ts": Decimal(99), "decided_by_name": "owner",
+        },
+    }
+    assert public_event(row) == {
+        "seq": 5, "type": "RunPaused", "status": "PENDING",
+        "at": "2026-10-20T10:00:00+00:00", "layer": "decider", "risk": "benign",
+        "pause_seq": 1,
+    }
+    assert public_event({**row, "event_type": "RunDeleted"}) is None
+    assert public_event({**row, "seq": Decimal("1.5")}) is None
+    assert public_event({**row, "seq": Decimal(0)}) is None
+    assert public_event({**row, "seq": True}) is None
+    # The ledger's whitelist is the publisher's, plus nothing.
+    assert api.ledger.FIELDS == LEDGER_FIELDS
+
+
+def test_stack_routes_and_grants_the_ledger_exactly():
+    """infra/stacks/approvals.py cannot be synthesized here (no CDK); the
+    routes tuple and the event-log grants are read from its source."""
+    import ast
+
+    stack = Path(__file__).resolve().parents[1] / "infra" / "stacks" / "approvals.py"
+    source = stack.read_text(encoding="utf-8")
+    routes = None
+    for node in ast.walk(ast.parse(source)):
+        if (
+            isinstance(node, ast.Assign)
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "routes"
+        ):
+            routes = ast.literal_eval(node.value)
+    assert routes is not None
+    assert ("GET /try/{token}/events", "NONE") in routes
+    assert ("GET /approvals/{id}/events", "JWT") in routes
+    assert len(routes) == len(set(routes)) == 9
+    # The handler serves exactly the routes the API declares.
+    api_source = (LAMBDA_DIR / "api.py").read_text(encoding="utf-8")
+    for route_key, _ in routes:
+        assert f'route == "{route_key}"' in api_source, route_key
+    grants = re.findall(r"events_table\.grant\((\w+), ([^)]*)\)", source)
+    assert sorted(grants) == [("api_fn", '"dynamodb:Query"'), ("fn", '"dynamodb:PutItem"')]
+    assert "events_table.grant_read" not in source and "grant_full_access" not in source
+    # The anonymous ledger route has its own stage throttle beside POST /try.
+    settings = source[source.index('"RouteSettings",'):source.index("for route_resource in")]
+    assert '"POST /try": {"ThrottlingRateLimit": 0.2, "ThrottlingBurstLimit": 2}' in settings
+    assert '"GET /try/{token}/events": {' in settings
+    assert '"ThrottlingRateLimit": 10,' in settings
+    assert '"ThrottlingBurstLimit": 20,' in settings
+
+
+def _section(html: str, view: str) -> str:
+    start = html.index(f'<section data-view="{view}"')
+    return html[start:html.index("\n    </section>", start)]
+
+
+def test_console_architecture_view_is_static_and_numberless():
+    html = _console("index.html")
+    assert 'data-nav="architecture" href="#/architecture"' in html
+    nav = html[html.index('data-nav="architecture"'):]
+    assert "nav-badge" not in nav[:nav.index("</a>")]
+    arch = _section(html, "architecture")
+    for service in (
+        "Amazon Bedrock AgentCore Runtime", "Strands Decider 2B on Amazon SageMaker",
+        "Strands InterventionHandler", "Amazon API Gateway HTTP API and AWS Lambda",
+        "Amazon DynamoDB TransactWriteItems", "lachesis-approvals", "lachesis-run-events",
+        "AWS Lambda on DynamoDB Streams", "Amazon EventBridge",
+        "Amazon Data Firehose to Amazon S3", "AWS Glue and Amazon Athena", "Amazon SQS",
+        "Amazon CloudWatch to Amazon SNS", "AWS Step Functions",
+    ):
+        assert service in arch, service
+    assert "Planned: behind a flag, not yet live" in arch
+    assert "not a live status page" in arch and "plus one planned part, marked as planned" in arch
+    # A deterministic catch never reads as Decider work, and the runner,
+    # not the API, invokes the agent and records the pause.
+    assert "Runs the deterministic pre-checks first" in arch
+    assert "for every other call it asks Decider two typed questions" in arch
+    assert "runner Lambda, which invokes the agent and records each pause" in arch
+    # Every node names its service and its one job.
+    nodes = arch.split('<li class="arch-node')[1:]
+    assert len(nodes) == 12
+    for node in nodes:
+        assert '<span class="arch-svc">' in node and node.count("<span>") == 1
+    # No numbers on this view: only the digits inside known names.
+    stripped = arch.replace("Decider 2B", "").replace("Amazon S3", "")
+    assert not re.search(r"\d", re.sub(r"<[^>]+>", "", stripped))
+    assert "<script" not in arch and "<svg" not in arch
+    js = _console("app.js")
+    assert 'p[0] === "architecture" ? "architecture"' in js
+    assert ".arch-node" in js[js.index("function fx(view)"):]
+
+
+def test_console_run_ledger_renders_beside_the_step_timeline():
+    html = _console("index.html")
+    run = html[html.index('<div id="run" hidden>'):html.index('<section data-view="queue"')]
+    assert run.index('<ol id="steps"') < run.index('<section id="run-ledger"')
+    detail = _section(html, "detail")
+    assert detail.index('<div id="detail-body"></div>') < detail.index(
+        '<section id="detail-ledger"'
+    )
+    js = _console("app.js")
+    block = js[js.index("function ledgerFacts(e)"):js.index("function viewTry(token)")]
+    # The ledger never touches the step timeline or the decision card,
+    # and every value reaches the DOM through h(), that is textContent.
+    assert "#steps" not in block and "#detail-body" not in block
+    assert "innerHTML" not in block and 'el.textContent = ""' in block
+    for fact in ('"tool "', '"layer "', '"verdict "', '"confidence "', "re-issued pause"):
+        assert fact in block, fact
+    # A score only on a Decider row, through scored(): a fail-closed,
+    # secret-scan or refusal row carries a placeholder confidence (0.0 or
+    # 1.0) that is never a Decider score, and reads "no Decider score".
+    facts = block[:block.index("function renderLedger")]
+    gate, other = facts.index("if (scored(e)) {"), facts.index("} else if (e.layer)")
+    assert gate < facts.index('"confidence "') < other
+    assert gate < facts.index('" ms"') < other
+    assert 'else if (e.layer) facts.push("no Decider score");' in facts
+    assert "typeof e.confidence" not in facts
+    # Empty hides it; a failed, stale or superseded read changes nothing,
+    # and a failed read at a terminal status is retried once.
+    assert "el.hidden = !Array.isArray(events) || !events.length;" in block
+    assert "n = el._req = (el._req || 0) + 1;" in block
+    assert "if (g !== gen || n !== el._req) return;" in block
+    assert "if (out.status === 200 && out.body) renderLedger(el, out.body.events);" in block
+    assert (
+        "else if (terminal) later(() => { if (g === gen && n === el._req) "
+        "loadLedger(path, el, false); }, 3000);" in block
+    )
+    tail = ", led, TERMINAL.includes(v.status))"
+    assert 'loadLedger("/try/" + encodeURIComponent(token) + "/events"' + tail in js
+    assert 'loadLedger("/approvals/" + encodeURIComponent(id) + "/events"' + tail in js
+    view = js[js.index("function viewTry(token)"):]
+    assert view.index("led.hidden = true;") < view.index("if (!token)")
+    assert 'href="app.css?v=20261020c"' in html

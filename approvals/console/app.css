@@ -131,6 +131,15 @@ dialog input { display: block; width: 100%; margin-top: 6px; min-height: 42px; p
 .explorer-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin: 0 0 12px; } .explorer-tools input { flex: 1 1 260px; min-height: 40px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--border-strong); background: var(--bg); color: var(--text); }
 .explorer-tools p { margin: 0; } .sep { width: 1px; align-self: stretch; background: var(--border); margin: 0 4px; } .quote { font-style: italic; color: var(--muted); } .mono { font-family: var(--mono); font-size: 13px; }
 .linkbtn { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font: inherit; text-decoration: underline; text-underline-offset: 3px; }
+/* ---- B5: run ledger and the static Architecture diagram (HTML and CSS only, nothing moves here). ---- */
+.ledger { margin-top: 14px; } .ledger h2 { font-size: 16px; } .ledger .steps { margin-bottom: 0; } .ledger .step-h code { color: var(--accent); }
+.arch { display: grid; gap: 16px; } .arch-lane { padding: 14px 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--glass); } .arch-lane h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.arch-row { list-style: none; margin: 0; padding: 0; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 28px; }
+.arch-node { position: relative; display: flex; flex-direction: column; gap: 4px; padding: 12px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface); font-size: 13px; color: var(--muted); }
+.arch-node strong { color: var(--text); font-size: 14px; } .arch-svc { color: var(--accent); font-family: var(--mono); font-size: 12px; }
+.arch-row:not(.arch-row--plain) > .arch-node + .arch-node::before { content: "\2192"; position: absolute; left: -22px; top: 50%; transform: translateY(-50%); color: var(--accent); font-size: 16px; }
+.arch-node--planned { border-style: dashed; } .arch-node--planned .chip { align-self: flex-start; margin-top: 4px; white-space: normal; }
+@media (max-width: 899px) { .arch-row { grid-auto-flow: row; gap: 22px; } .arch-row:not(.arch-row--plain) > .arch-node + .arch-node::before { content: "\2193"; left: 50%; top: -20px; transform: translateX(-50%); } }
 /* ---- depth and motion layer (owner directive 2026-10-20). Only transform and opacity move; all of it stops under prefers-reduced-motion. ---- */
 :root { --accent-2: #b69cff; --glass: color-mix(in srgb, var(--surface) 74%, transparent); --px: 0; --py: 0; --sy: 0; } @media (prefers-color-scheme: light) { :root:not([data-theme=dark]) { --accent-2: #6d28d9; --glass: color-mix(in srgb, var(--surface) 84%, transparent); } }
 .ambient { position: fixed; inset: 0; z-index: 0; pointer-events: none; overflow: hidden; } .topbar, .app-shell, .footer { position: relative; z-index: 1; }
