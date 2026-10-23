@@ -23,13 +23,13 @@ jobs:
   build:
     if: github.repository == 'upgradedev/lachesis-guard'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Install ffmpeg and a caption font
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q ffmpeg fonts-dejavu-core
+          sudo apt-get install -y -q --no-install-recommends ffmpeg fonts-dejavu-core
       - name: Fetch the live capture
         env:
           GH_TOKEN: ${{ github.token }}
