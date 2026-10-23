@@ -41,10 +41,9 @@
    "from triage import TriageHandler",
    "agent = Agent(model=..., tools=[...], interventions=[TriageHandler()])",
    "",
-   "repo     https://github.com/upgradedev/lachesis-guard",
    "console  https://d2nm49ao7e8z4z.cloudfront.net",
    "replay   python scripts/no_model_baseline.py",
-   "footage  console build ff75eb4, recorded before the wording fixes in PR #77"
+   "footage  console build ff75eb4, recorded before the console wording was corrected"
   ]
  }
 }
