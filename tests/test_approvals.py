@@ -720,11 +720,14 @@ def test_console_copy_rules():
         assert "email" not in text.lower(), name
         assert "never the gate" not in text.replace("The model is never the gate", ""), name
     html = _console("index.html")
-    assert "Every tool call is scored before it runs." in html
-    assert "Decider scores it; if benign and grounded, it runs." in html
+    assert "Every tool call is checked before it runs." in html
     assert (
-        "a destructive write always waits for a person, "
-        "and so does any call Decider scores under 0.70." in html
+        "Decider scores it. Benign, grounded and at 0.70 or above, it runs; "
+        "under the line it pauses, whatever the class." in html
+    )
+    assert (
+        "A call Decider confidently classes as a destructive write pauses for a person "
+        "(rule R3). Any call scored under 0.70 pauses too (rule R1), whatever its class." in html
     )
     assert "below the 0.70 gate" not in html
     assert "approve or decline the paused call right here" not in html
@@ -740,11 +743,13 @@ def test_console_app_rules():
                   "Expired: nobody decided, treated as declined", "Run failed"):
         assert label in js
     assert "Could not complete:" in js
-    for piece in ("The Decider GPU is asleep",
-                  ("It scales to zero when idle. This call paused fail-closed: no score, "
+    for piece in ("Decider did not answer (asleep or busy)",
+                  ("The GPU scales to zero when idle. This call paused fail-closed: no score, "
                    "and the public demo cannot decide it. "),
-                  ("Your click has asked the GPU to wake; a run started after it is awake "
-                   "will be scored. This pause expires at "),
+                  "that took about 9 minutes when measured on 2026-10-23, not a promise. ",
+                  ('"Start another run after " + hhmm(paused + 600000) + " UTC: a run started '
+                   'earlier can pause the same way, and it still uses one of today\'s 5 runs. "'),
+                  "If Decider was only busy with another call, a run started once that call ends",
                   " UTC and is then treated as declined; nothing runs."):
         assert piece in js
     assert "15000" in js and "10000" in js
@@ -1318,13 +1323,13 @@ def test_console_try_start_race_keeps_polling():
     assert "handle = later(tick, 2000)" in js
     assert "on404(out); return;" in js and "on404(); return;" in js
     html = _console("index.html")
-    assert "app.js?v=20261021i" in html
+    assert "app.js?v=20261023a" in html
 
 
 def test_the_console_decides_a_gate_run_without_promising_an_agent():
     js = _console("app.js")
     html = _console("index.html")
-    assert "app.js?v=20261021i" in html
+    assert "app.js?v=20261023a" in html
     # The detail view hands the lane on; the decision path for any lane
     # but try is the approver route.
     assert 'decisionCard(v, gate ? "gate" : "approval", () => ctl.kick())' in js
@@ -2712,4 +2717,4 @@ def test_console_run_ledger_renders_beside_the_step_timeline():
     assert 'loadLedger("/approvals/" + encodeURIComponent(id) + "/events"' + tail in js
     view = js[js.index("function viewTry(token)"):]
     assert view.index("led.hidden = true;") < view.index("if (!token)")
-    assert 'href="app.css?v=20261021a"' in html
+    assert 'href="app.css?v=20261023a"' in html
