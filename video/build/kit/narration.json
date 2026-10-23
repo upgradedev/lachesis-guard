@@ -27,8 +27,8 @@
     },
     {
       "id": "tests",
-      "captionText": "The test run scores 0.28 and pauses under R1. Each score came back from Decider on a SageMaker GPU in under a second. Approved, the agent finishes the run.",
-      "speechText": "The test run scores zero point two eight, and pauses under R one. Each score came back from Decider on a SageMaker G P U in under a second. Approved, the agent finishes the run."
+      "captionText": "The test run scores 0.28 and pauses under R1. Each score came back from Decider on a SageMaker GPU in about a second. Approved, the agent finishes the run.",
+      "speechText": "The test run scores zero point two eight, and pauses under R one. Each score came back from Decider on a SageMaker G P U in about a second. Approved, the agent finishes the run."
     },
     {
       "id": "ledger",
