@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="980" viewBox="0 0 1280 980" role="img" aria-labelledby="title description">
+<title id="title">Lachesis: before the tool runs</title>
+<desc id="description">A Bedrock agent proposes a call. Pre-checks route safe reads to Proceed and secret-shaped arguments to Confirm. Other calls reach Decider and the Python policy. Proceed and approved Confirm calls execute; Guide asks the user and returns to the agent; Deny, decline and expiry do not run the tool. A tool result returns to the agent.</desc>
+<defs>
+<linearGradient id="background" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0b1424"/><stop offset="1" stop-color="#14182d"/></linearGradient>
+<marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#8ea7c2" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></marker>
+<marker id="mint-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#91e8d6" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></marker>
+<marker id="violet-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#c0afff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></marker>
+</defs>
+<rect width="1280" height="980" rx="22" fill="url(#background)"/>
+<g font-family="Arial, Helvetica, sans-serif">
+<text x="40" y="54" text-anchor="start" font-size="31" fill="#edf4ff" font-weight="600">Before the tool runs</text>
+<text x="40" y="88" text-anchor="start" font-size="21" fill="#a4b6cf" font-weight="400">Pre-checks first. Typed questions for what remains. A code-owned verdict.</text>
+<path d="M290 230H350" fill="none" stroke="#728ba8" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M610 230H670" fill="none" stroke="#728ba8" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<text x="640" y="201" text-anchor="middle" font-size="15" fill="#a4b6cf">other</text>
+<text x="640" y="218" text-anchor="middle" font-size="15" fill="#a4b6cf">calls</text>
+<path d="M930 230H990" fill="none" stroke="#728ba8" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M1115 320V360H165" fill="none" stroke="#728ba8" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M165 360V400" fill="none" stroke="#728ba8" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M480 360V400" fill="none" stroke="#728ba8" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M800 360V400" fill="none" stroke="#728ba8" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M1115 360V400" fill="none" stroke="#728ba8" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<rect x="40" y="140" width="250" height="180" rx="14" fill="#132235" stroke="#728ba8" stroke-opacity=".55" stroke-width="1.5"/>
+<text x="165.0" y="175" text-anchor="middle" font-size="22" fill="#edf4ff" font-weight="600">Bedrock agent</text>
+<text x="165.0" y="204" text-anchor="middle" font-size="19" fill="#a4b6cf" font-weight="400">Proposes a tool call</text>
+<rect x="350" y="140" width="260" height="180" rx="14" fill="#132235" stroke="#728ba8" stroke-opacity=".55" stroke-width="1.5"/>
+<text x="480.0" y="175" text-anchor="middle" font-size="21" fill="#edf4ff" font-weight="600">Lachesis pre-checks</text>
+<text x="480.0" y="204" text-anchor="middle" font-size="18" fill="#a4b6cf" font-weight="400">safe read: Proceed</text>
+<text x="480.0" y="231" text-anchor="middle" font-size="18" fill="#a4b6cf" font-weight="400">secret-shaped: Confirm</text>
+<text x="480.0" y="258" text-anchor="middle" font-size="18" fill="#a4b6cf" font-weight="400">other calls: Decider</text>
+<rect x="670" y="140" width="260" height="180" rx="14" fill="#12302f" stroke="#91e8d6" stroke-opacity=".55" stroke-width="1.5"/>
+<text x="800.0" y="175" text-anchor="middle" font-size="22" fill="#edf4ff" font-weight="600">Strands Decider</text>
+<text x="800.0" y="204" text-anchor="middle" font-size="19" fill="#a4b6cf" font-weight="400">risk + grounding</text>
+<text x="800.0" y="231" text-anchor="middle" font-size="19" fill="#a4b6cf" font-weight="400">confidence</text>
+<text x="800.0" y="258" text-anchor="middle" font-size="19" fill="#a4b6cf" font-weight="400">no answer: Confirm</text>
+<rect x="990" y="140" width="250" height="180" rx="14" fill="#28253e" stroke="#c0afff" stroke-opacity=".55" stroke-width="1.5"/>
+<text x="1115.0" y="175" text-anchor="middle" font-size="22" fill="#edf4ff" font-weight="600">Python policy</text>
+<text x="1115.0" y="204" text-anchor="middle" font-size="19" fill="#a4b6cf" font-weight="400">First matching rule</text>
+<text x="1115.0" y="231" text-anchor="middle" font-size="19" fill="#a4b6cf" font-weight="400">R1 to R6</text>
+<rect x="40" y="400" width="250" height="125" rx="14" fill="#12302f" stroke="#91e8d6" stroke-opacity=".55" stroke-width="1.5"/>
+<text x="165.0" y="435" text-anchor="middle" font-size="22" fill="#edf4ff" font-weight="600">Proceed</text>
+<text x="165.0" y="464" text-anchor="middle" font-size="19" fill="#a4b6cf" font-weight="400">Run the proposed tool</text>
+<rect x="350" y="400" width="260" height="125" rx="14" fill="#132235" stroke="#728ba8" stroke-opacity=".55" stroke-width="1.5"/>
+<text x="480.0" y="435" text-anchor="middle" font-size="22" fill="#edf4ff" font-weight="600">Guide</text>
+<text x="480.0" y="464" text-anchor="middle" font-size="19" fill="#a4b6cf" font-weight="400">Ask the user, then</text>
+<text x="480.0" y="491" text-anchor="middle" font-size="19" fill="#a4b6cf" font-weight="400">return to the agent</text>
+<rect x="670" y="400" width="260" height="125" rx="14" fill="#28253e" stroke="#c0afff" stroke-opacity=".55" stroke-width="1.5"/>
+<text x="800.0" y="435" text-anchor="middle" font-size="22" fill="#edf4ff" font-weight="600">Confirm</text>
+<text x="800.0" y="464" text-anchor="middle" font-size="19" fill="#a4b6cf" font-weight="400">Pause for a person</text>
+<rect x="990" y="400" width="250" height="125" rx="14" fill="#302335" stroke="#e6adbc" stroke-opacity=".55" stroke-width="1.5"/>
+<text x="1115.0" y="435" text-anchor="middle" font-size="22" fill="#edf4ff" font-weight="600">Deny</text>
+<text x="1115.0" y="464" text-anchor="middle" font-size="19" fill="#a4b6cf" font-weight="400">Tool does not run</text>
+<rect x="40" y="585" width="1200" height="355" rx="18" fill="#0d1b2c" stroke="#728ba8" stroke-opacity=".25"/>
+<text x="66" y="625" text-anchor="start" font-size="24" fill="#edf4ff" font-weight="600">Execution after the verdict</text>
+<text x="66" y="656" text-anchor="start" font-size="19" fill="#a4b6cf" font-weight="400">Proceed runs the call. Confirm waits for the human decision.</text>
+<path d="M236 730H558" fill="none" stroke="#91e8d6" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#mint-arrow)"/>
+<path d="M236 850H296" fill="none" stroke="#c0afff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#violet-arrow)"/>
+<path d="M496 850H663V773" fill="none" stroke="#c0afff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#violet-arrow)"/>
+<text x="565" y="836" text-anchor="middle" font-size="18" fill="#c0afff" font-weight="400">approve</text>
+<path d="M396 892V916H933V892" fill="none" stroke="#728ba8" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<text x="659" y="906" text-anchor="middle" font-size="18" fill="#a4b6cf" font-weight="400">decline / expiry</text>
+<path d="M768 730H828" fill="none" stroke="#91e8d6" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#mint-arrow)"/>
+<path d="M1038 730H1098" fill="none" stroke="#91e8d6" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#mint-arrow)"/>
+<rect x="66" y="700" width="170" height="60" rx="14" fill="#12302f" stroke="#91e8d6" stroke-opacity=".55" stroke-width="1.5"/>
+<text x="151.0" y="738.0" text-anchor="middle" font-size="21" fill="#edf4ff" font-weight="600">Proceed</text>
+<rect x="66" y="820" width="170" height="60" rx="14" fill="#28253e" stroke="#c0afff" stroke-opacity=".55" stroke-width="1.5"/>
+<text x="151.0" y="858.0" text-anchor="middle" font-size="21" fill="#edf4ff" font-weight="600">Confirm</text>
+<rect x="296" y="808" width="200" height="84" rx="14" fill="#28253e" stroke="#c0afff" stroke-opacity=".55" stroke-width="1.5"/>
+<text x="396.0" y="858.0" text-anchor="middle" font-size="21" fill="#edf4ff" font-weight="600">Human decision</text>
+<rect x="558" y="688" width="210" height="85" rx="14" fill="#12302f" stroke="#91e8d6" stroke-opacity=".55" stroke-width="1.5"/>
+<text x="663.0" y="723" text-anchor="middle" font-size="21" fill="#edf4ff" font-weight="600">Execute the</text>
+<text x="663.0" y="752" text-anchor="middle" font-size="18" fill="#a4b6cf" font-weight="400">proposed tool call</text>
+<rect x="828" y="688" width="210" height="85" rx="14" fill="#12302f" stroke="#91e8d6" stroke-opacity=".55" stroke-width="1.5"/>
+<text x="933.0" y="723" text-anchor="middle" font-size="21" fill="#edf4ff" font-weight="600">Tool result</text>
+<text x="933.0" y="752" text-anchor="middle" font-size="18" fill="#a4b6cf" font-weight="400">returned to agent</text>
+<rect x="1098" y="688" width="116" height="85" rx="14" fill="#132235" stroke="#728ba8" stroke-opacity=".55" stroke-width="1.5"/>
+<text x="1156.0" y="723" text-anchor="middle" font-size="21" fill="#edf4ff" font-weight="600">Agent</text>
+<text x="1156.0" y="752" text-anchor="middle" font-size="16" fill="#a4b6cf" font-weight="400">next turn</text>
+<rect x="828" y="808" width="210" height="84" rx="14" fill="#302335" stroke="#e6adbc" stroke-opacity=".55" stroke-width="1.5"/>
+<text x="933.0" y="858.0" text-anchor="middle" font-size="21" fill="#edf4ff" font-weight="600">Tool does not run</text>
+</g>
+</svg>
