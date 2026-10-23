@@ -34,6 +34,17 @@ is 503 "busy" and consumes nothing; a failed hand-off of a start ends
 the run ERROR and answers 502; a failed hand-off of a decision still
 answers 202, because the decision is committed and the sweeper
 re-dispatches the resume of a decided run (runner.sweep).
+
+B6, behind USE_STEP_FUNCTIONS (default "false"; orchestrator.py): with
+the flag on, a start writes the same STARTING row, marked as owned by
+the lachesis-run workflow and carrying its prompt, and starts the
+execution instead of invoking the runner. A decision on a run the
+workflow owns is checked against the same refusals without a write, then
+sent with SendTaskSuccess (a wait that already ended is 409, any other
+failure 503); the workflow records it. The one status this API still
+writes for such a run is ERROR when StartExecution fails, because then
+no execution exists to write it; if an execution did start and has
+already taken the run, that write conflicts and the start answers 202.
 """
 
 from __future__ import annotations
@@ -46,6 +57,7 @@ import re
 import boto3
 import common
 import ledger
+import orchestrator
 from approval import domain, service
 
 RUNNER_ARN = os.environ.get("RUNNER_ARN", "")
@@ -64,6 +76,10 @@ CANNED_PROMPT = (
     "refunds_prod_config.py from the workspace with the delete_file "
     "tool, then run the tests with run_tests."
 )
+
+# The longest prompt a workflow-owned run stores on its row (B6). The
+# runner path sends the prompt in its async event instead.
+WORKFLOW_PROMPT_MAX_CHARS = 16000
 
 
 # The shape of an approval id or /try token: common.new_approval_id makes
@@ -134,10 +150,78 @@ def _error(exc: domain.DomainError, not_found: str = "") -> dict:
     return _response(exc.http_status, {"error": str(exc)})
 
 
+def _claimed_by_an_execution(approval_id: str) -> domain.Run | None:
+    """The row, if an execution has taken it: claimed, or moved on from
+    STARTING. None when it is still an unclaimed STARTING row, or when it
+    cannot be read."""
+    try:
+        current = service.unit_of_work().get(approval_id)
+    except Exception:
+        return None
+    if current is None:
+        return None
+    if current.status == domain.STARTING and not current.row.get("claimed_request_id"):
+        return None
+    return current
+
+
+def _start_workflow(run: domain.Run, id_key: str) -> dict:
+    """Start the lachesis-run execution of a committed STARTING run (B6).
+    If StartExecution fails, the run ends ERROR at once, as a failed
+    runner hand-off does.
+
+    StartExecution can succeed on the server while every client attempt
+    fails (a read timeout after the request was accepted). The execution
+    then claims the run, and the ERROR write conflicts. A row that an
+    execution has taken is answered 202 with its real status, since the
+    run goes on; 502 means no execution has it. An unclaimed STARTING row
+    whose ERROR write failed is still 502, and the sweeper closes it."""
+    try:
+        orchestrator.start(run.approval_id)
+    except Exception as exc:
+        print(json.dumps({"workflow_start_failed": type(exc).__name__}))
+        try:
+            service.record_failure(run, common.error_text(exc))
+        except domain.Conflict:
+            owned = _claimed_by_an_execution(run.approval_id)
+            if owned is not None:
+                return _response(202, {id_key: owned.approval_id, "status": owned.status})
+        except Exception:  # the ERROR write failed: the sweeper closes STARTING
+            pass
+        return _response(502, {"error": "the run could not be handed to the workflow"})
+    return _response(202, {id_key: run.approval_id, "status": run.status})
+
+
+def _decide_through_workflow(
+    owned: domain.WorkflowOwned, decision: str, decided_by: str, decided_by_name: str, id_key: str
+) -> dict:
+    """A decision on a run the workflow owns (B6). The refusals of
+    service.record_decision were already checked without a write; the
+    task token must be on the row, then one SendTaskSuccess hands the
+    decision to the workflow, which records it. The answer carries the
+    row's real status, still PENDING: this API wrote nothing."""
+    run = owned.run
+    if not run.task_token:
+        return _error(domain.NotDecidable())
+    try:
+        orchestrator.send_decision(
+            run.task_token, decision, decided_by, decided_by_name, owned.now
+        )
+    except orchestrator.WaitOver:
+        return _error(domain.Conflict())
+    except Exception as exc:
+        print(json.dumps({"decision_hand_off_failed": type(exc).__name__}))
+        return _error(domain.Busy())
+    return _response(202, {id_key: run.approval_id, "status": run.status})
+
+
 def _dispatch_start(run: domain.Run, prompt: str, id_key: str) -> dict:
-    """Hand a committed STARTING run to the runner. If the hand-off
-    itself fails, the run ends ERROR at once instead of sitting in
-    STARTING until the sweeper closes it."""
+    """Hand a committed STARTING run to the runner, or start its
+    workflow when the workflow owns it (B6). If the hand-off itself
+    fails, the run ends ERROR at once instead of sitting in STARTING
+    until the sweeper closes it."""
+    if run.workflow_owned:
+        return _start_workflow(run, id_key)
     try:
         _invoke_runner(
             {"action": "start", "prompt": prompt, "approval_id": run.approval_id},
@@ -201,8 +285,13 @@ def handler(event, _context):
         source_ip = (
             event.get("requestContext", {}).get("http", {}).get("sourceIp", "unknown")
         )
+        workflow = (
+            {"orchestrator": domain.WORKFLOW, "prompt": CANNED_PROMPT}
+            if orchestrator.enabled()
+            else {}
+        )
         try:
-            run = service.start_try(source_ip)
+            run = service.start_try(source_ip, **workflow)
         except domain.CapReached as exc:
             return _error(exc)
         except domain.Conflict:
@@ -232,6 +321,8 @@ def handler(event, _context):
             return refused
         try:
             run = service.record_decision(token, "try", decision, "try-token", "try-visitor")
+        except domain.WorkflowOwned as owned:
+            return _decide_through_workflow(owned, decision, "try-token", "try-visitor", "token")
         except domain.DomainError as exc:
             return _error(exc, "unknown token")
         _dispatch_resume(token)
@@ -245,11 +336,17 @@ def handler(event, _context):
         body = _parse_body(event)
         if body is None:
             return _response(400, {"error": "request body must be a JSON object"})
+        prompt = str(body.get("prompt") or CANNED_PROMPT)
+        workflow = {}
+        if orchestrator.enabled():
+            if len(prompt) > WORKFLOW_PROMPT_MAX_CHARS:
+                return _response(400, {"error": "prompt is too long"})
+            workflow = {"orchestrator": domain.WORKFLOW, "prompt": prompt}
         try:
-            run = service.start_run("approval")
+            run = service.start_run("approval", **workflow)
         except domain.Conflict:
             return _error(domain.Busy())
-        return _dispatch_start(run, str(body.get("prompt") or CANNED_PROMPT), "approval_id")
+        return _dispatch_start(run, prompt, "approval_id")
 
     if route == "GET /approvals":
         rows = [
@@ -277,13 +374,15 @@ def handler(event, _context):
         if refused:
             return refused
         claims = _claims(event)
+        decided_by = claims.get("sub", "")
+        decided_by_name = claims.get("username", claims.get("cognito:username", ""))
         try:
             run = service.record_decision(
-                approval_id,
-                "approval",
-                decision,
-                claims.get("sub", ""),
-                claims.get("username", claims.get("cognito:username", "")),
+                approval_id, "approval", decision, decided_by, decided_by_name
+            )
+        except domain.WorkflowOwned as owned:
+            return _decide_through_workflow(
+                owned, decision, decided_by, decided_by_name, "approval_id"
             )
         except domain.DomainError as exc:
             return _error(exc, "unknown approval")

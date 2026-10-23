@@ -35,17 +35,25 @@ def _now(now: float | None) -> float:
 
 
 def start_run(
-    lane: str, *, counters: Iterable[uow.Counter] = (), now: float | None = None
+    lane: str,
+    *,
+    counters: Iterable[uow.Counter] = (),
+    now: float | None = None,
+    orchestrator: str = "",
+    prompt: str = "",
 ) -> domain.Run:
     """Write the STARTING row and RunRequested (and any counters) in one
     transaction, before anyone is told the token. The caller then hands
-    the approval id to the runner."""
+    the approval id to the runner, or, for a run with ``orchestrator``
+    domain.WORKFLOW (B6), starts its lachesis-run execution."""
     run = domain.Run.request(
         common.new_approval_id(),
         common.new_session_id(),
         lane,
         _now(now),
         common.TTL_SECONDS,
+        orchestrator=orchestrator,
+        prompt=prompt,
     )
     return unit_of_work().commit(run, counters=counters)
 
@@ -61,11 +69,19 @@ def try_counters(source_ip: str, now: float | None = None) -> list[uow.Counter]:
     ]
 
 
-def start_try(source_ip: str, now: float | None = None) -> domain.Run:
+def start_try(
+    source_ip: str, now: float | None = None, *, orchestrator: str = "", prompt: str = ""
+) -> domain.Run:
     """POST /try: both daily counters, the STARTING row and RunRequested
     in one transaction. Raises domain.CapReached, consuming nothing, when
     either counter is at its cap."""
-    return start_run("try", counters=try_counters(source_ip, now), now=now)
+    return start_run(
+        "try",
+        counters=try_counters(source_ip, now),
+        now=now,
+        orchestrator=orchestrator,
+        prompt=prompt,
+    )
 
 
 def claim_run(approval_id: str, request_id: str) -> domain.Run | None:
@@ -116,17 +132,31 @@ def record_decision(
     decided_by: str,
     decided_by_name: str,
     now: float | None = None,
+    *,
+    by_workflow: bool = False,
 ) -> domain.Run:
     """PENDING -> APPROVED or DECLINED, with DecisionRecorded.
 
     Raises NotFound when there is no such run on ``lane``, Expired,
     NotResumable (a fail-closed pause on the public lane), or Conflict
-    when the run is not PENDING or moved before the commit."""
+    when the run is not PENDING or moved before the commit.
+
+    A run the lachesis-run workflow owns (B6) is decided only by the
+    workflow (``by_workflow``, its ApplyDecision task, which also drops
+    the used task token). Anyone else gets domain.WorkflowOwned, after
+    every refusal above was checked on a copy and nothing was written, so
+    the API can hand the decision to the workflow instead."""
     work = unit_of_work()
     run = work.get(approval_id)
     if run is None or run.lane != lane:
         raise domain.NotFound()
+    if run.workflow_owned and not by_workflow:
+        moment = _now(now)
+        domain.Run.from_item(run.row).decide(decision, decided_by, decided_by_name, moment)
+        raise domain.WorkflowOwned(run, moment)
     run.decide(decision, decided_by, decided_by_name, _now(now))
+    if by_workflow:
+        run.clear_task_token()
     return work.commit(run)
 
 
@@ -164,3 +194,28 @@ def expire(run: domain.Run) -> domain.Run:
     """PENDING (public lane) or RESUMING (after the expiry resume) -> EXPIRED."""
     run.expire()
     return unit_of_work().commit(run)
+
+
+# --- B6: the lachesis-run workflow's own commands ---------------------
+
+
+def claim_resume(run: domain.Run) -> domain.Run:
+    """AgentTurn takes a RESUMING run once (domain.Run.claim_resume)."""
+    run.claim_resume()
+    return unit_of_work().commit(run)
+
+
+def stage_pause(run: domain.Run, interrupts: list[dict], card: dict, now: float) -> domain.Run:
+    run.stage_pause(interrupts, card, now)
+    return unit_of_work().commit(run)
+
+
+def await_decision(approval_id: str, task_token: str) -> domain.Run:
+    """WaitForDecision: the pause and its task token in one write.
+    Raises NotFound, InvalidTransition or Conflict."""
+    work = unit_of_work()
+    run = work.get(approval_id)
+    if run is None:
+        raise domain.NotFound()
+    run.await_decision(task_token, common.TTL_SECONDS)
+    return work.commit(run)

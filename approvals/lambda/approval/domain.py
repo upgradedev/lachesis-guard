@@ -77,6 +77,11 @@ MAX_RESUME_ATTEMPTS = 3
 # decisions stay in ``decisions``.
 NOBODY_DECIDED = {"decided_by": "", "decided_by_name": "", "decided_at": ""}
 
+# The orchestrator marker of a run the lachesis-run state machine owns
+# (B6). Written only when USE_STEP_FUNCTIONS is on; a row without it is a
+# runner-owned run, exactly as before B6.
+WORKFLOW = "sfn"
+
 _TYPE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.]{0,63}")
 _TEXT_CAP = 64
 
@@ -140,6 +145,28 @@ class AlreadyClaimed(Conflict):
     """A runner already claimed this run (a duplicate async delivery)."""
 
     default_message = "run already claimed"
+
+
+class NotDecidable(Busy):
+    """A workflow-owned run is PENDING, but its task token is not on the
+    row yet. Cannot happen when the token and the pause are one write
+    (Run.await_decision); kept as a retryable 503 for a pause that a
+    pre-send resume failure returned to PENDING (B6)."""
+
+    default_message = "the approval is not open for a decision yet, try again in a moment"
+
+
+class WorkflowOwned(Conflict):
+    """The run is owned by the lachesis-run state machine (B6): only the
+    workflow may record its decision. Carries the loaded run so the API
+    can hand the decision to the workflow instead, and ``now``, the
+    moment the refusals were checked at, which the workflow records as
+    the decision time."""
+
+    def __init__(self, run: Run, now: float) -> None:
+        super().__init__("the run is owned by the workflow")
+        self.run = run
+        self.now = now
 
 
 class Expired(DomainError):
@@ -311,9 +338,22 @@ class Run:
 
     @classmethod
     def request(
-        cls, approval_id: str, session_id: str, lane: str, now: float, ttl_seconds: int
+        cls,
+        approval_id: str,
+        session_id: str,
+        lane: str,
+        now: float,
+        ttl_seconds: int,
+        *,
+        orchestrator: str = "",
+        prompt: str = "",
     ) -> Run:
-        """A new run in STARTING, written before the agent is invoked."""
+        """A new run in STARTING, written before the agent is invoked.
+
+        ``orchestrator`` and ``prompt`` are given only for a run the
+        lachesis-run workflow owns (B6): the workflow's first AgentTurn
+        reads the prompt from the row, so the execution state carries the
+        approval id only. Without them the row is exactly the pre-B6 row."""
         created = int(now)
         row = {
             "approval_id": approval_id,
@@ -329,6 +369,9 @@ class Run:
             "pause_seq": 0,
             "event_seq": 0,
         }
+        if orchestrator:
+            row["orchestrator"] = str(orchestrator)
+            row["prompt"] = str(prompt)
         run = cls(row=row, loaded_status="", loaded_version=0, is_new=True)
         run._record(RunRequested(lane=_text(lane)))
         return run
@@ -382,6 +425,40 @@ class Run:
     def is_expired(self, now: float) -> bool:
         expires = _int(self.row.get("expires_ts"))
         return bool(expires) and expires < int(now)
+
+    # B6: the workflow-owned run
+
+    @property
+    def orchestrator(self) -> str:
+        return str(self.row.get("orchestrator", "") or "")
+
+    @property
+    def workflow_owned(self) -> bool:
+        return self.orchestrator == WORKFLOW
+
+    @property
+    def task_token(self) -> str:
+        """The WaitForDecision task token. Never in public_view, the
+        ledger or an event: only the API reads it, to answer a decision
+        with SendTaskSuccess."""
+        return str(self.row.get("task_token", "") or "")
+
+    @property
+    def staged_pause(self) -> dict[str, Any]:
+        """The pause an AgentTurn staged for WaitForDecision, or {}."""
+        try:
+            stage = json.loads(self.row.get("staged_pause") or "{}")
+        except (TypeError, ValueError):
+            return {}
+        return stage if isinstance(stage, dict) else {}
+
+    def next_pause_expiry(self, now: float, ttl_seconds: int) -> int:
+        """The expires_ts the next pause will carry, by the rule pause()
+        applies: a first pause keeps the expiry the run was created with,
+        a re-pause from RESUMING renews it from ``now``."""
+        if self.status == RESUMING:
+            return int(now) + ttl_seconds
+        return _int(self.row.get("expires_ts")) or int(now) + ttl_seconds
 
     # write side helpers
 
@@ -583,3 +660,65 @@ class Run:
                 pause_seq=self.pause_seq, from_status=from_status, error_type=error_label(text)
             )
         )
+
+    # B6: commands of the lachesis-run workflow. Each is one Unit of Work
+    # commit, guarded like every other command by the status and version
+    # the run was loaded at. None of them moves the status outside
+    # TRANSITIONS: claim_resume, stage_pause and clear_task_token change
+    # attributes only, await_decision moves through pause().
+
+    def claim_resume(self) -> None:
+        """AgentTurn takes a RESUMING run before it sends the answer to
+        the agent, so a retried turn never resumes twice. The claim is
+        the run's event_seq: the RunResuming of the next decision moves
+        it, so each resume can be claimed exactly once."""
+        if self.status != RESUMING:
+            raise InvalidTransition(f"cannot claim a resume in {self.status}", self.status)
+        mark = str(self.event_seq)
+        if str(self.row.get("resume_claim", "")) == mark:
+            raise AlreadyClaimed()
+        self._set(resume_claim=mark)
+
+    def stage_pause(self, interrupts: list[dict], card: dict[str, Any], now: float) -> None:
+        """AgentTurn got an interrupt. The pause is kept on the row, not
+        yet decidable: the status stays STARTING or RESUMING until
+        await_decision writes the pause and the task token together."""
+        if PENDING not in TRANSITIONS.get(self.status, frozenset()):
+            raise InvalidTransition(f"cannot stage a pause in {self.status}", self.status)
+        if self.staged_pause:
+            raise InvalidTransition("a pause is already staged", self.status)
+        self._set(
+            staged_pause=json.dumps(
+                {"interrupts": list(interrupts), "card": dict(card), "at": int(now)}
+            )
+        )
+
+    def await_decision(self, task_token: str, ttl_seconds: int) -> None:
+        """WaitForDecision: the staged pause becomes PENDING in the same
+        write that stores the task token, so a person can never decide a
+        pause the workflow cannot hear about. The pause is written by
+        pause() at the moment it was staged, so its expires_ts is the one
+        AgentTurn gave the wait's timeout. A PENDING run without a stage
+        (a resume that failed before it was sent, or a retried wait) only
+        takes the new token."""
+        stage = self.staged_pause
+        if stage:
+            interrupts = stage.get("interrupts")
+            card = stage.get("card")
+            self.pause(
+                interrupts if isinstance(interrupts, list) else [],
+                card if isinstance(card, dict) else {},
+                float(_int(stage.get("at"))),
+                ttl_seconds,
+            )
+            self._set(staged_pause="", task_token=str(task_token))
+            return
+        if self.status != PENDING:
+            raise InvalidTransition(f"nothing to wait for in {self.status}", self.status)
+        self._set(task_token=str(task_token))
+
+    def clear_task_token(self) -> None:
+        """Drop a used or dead task token, in the command that leaves
+        PENDING (an applied decision, an expiry)."""
+        if self.task_token:
+            self._set(task_token="")
