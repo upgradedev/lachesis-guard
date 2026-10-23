@@ -1,1 +1,1 @@
-narration 150.510 s, 9 beats, ElevenLabs (tests beat: about a second); capture run 39917295999
+narration 174.612 s, 10 beats, ElevenLabs (five beats re-voiced, pattern-tour card after policy); capture run 39917295999
