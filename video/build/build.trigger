@@ -1,1 +1,1 @@
-narration 174.612 s, 10 beats, ElevenLabs (five beats re-voiced, pattern-tour card after policy); capture run 39917295999
+narration 173.730 s, 10 beats, ElevenLabs (metrics, tests and tour re-voiced; close is a card with the pattern wiring and links); capture run 39917295999
