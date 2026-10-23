@@ -12,27 +12,27 @@
   "approved2"
  ],
  "tests": [
-  72.83,
-  23.69
+  "pause3-1.0",
+  "finished+4.0"
  ],
  "ledger": [
-  100.34,
+  "ledger-1.0",
   9.86
  ],
  "policy": [
-  111.77,
+  "policy",
   14.0
  ],
  "metrics": [
-  127.52,
+  "metrics",
   23.2
  ],
  "architecture": [
-  152.41,
+  "architecture",
   16.0
  ],
  "close": [
-  170.12,
+  "close",
   11.8
  ]
 }
