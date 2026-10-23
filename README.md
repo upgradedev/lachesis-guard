@@ -42,7 +42,7 @@ Built for the Agent Experience Hackathon: Strands Decider on AWS Builder Center,
 - **The 51-call seam benchmark, three rows.** Lachesis caught 38 of 43 should-pause calls and paused 5 of 8 clean ones. No model caught 39 and paused 7 of 8. The SDK's `HumanInTheLoop` paused 1 of 8 clean but let 3 of 8 destructive writes run.
 - **Not a stub.** Pattern tour [run 39273986426](https://github.com/upgradedev/lachesis-guard/actions/runs/39273986426) puts the real model behind the standalone pattern file. It gets four different verdicts: proceed (benign at 0.83), guide (benign at 0.83, ungrounded), confirm (destructive_write at 0.87), deny (exfiltration at 0.84). `tests/integration/test_handler_live.py::test_plain_search_proceeds` asserts a real Proceed in `decider-live.yml` ([green run 39935129737](https://github.com/upgradedev/lachesis-guard/actions/runs/39935129737) on main).
 - **The filmed run.** [docs/evidence/FILMED_RUN_2026-10-23.md](docs/evidence/FILMED_RUN_2026-10-23.md): three pauses at 0.40, 0.80 and 0.28, each approved, then one test passed. Decider was unsure on the note and the test run, and wrong about their class. Unsure is exactly when the line hands the call to a person, so the wrong class never acted.
-- **Latency.** In the loop, warm, one triage took 865 to 1157 ms on `ml.g4dn.xlarge`. The 50-case probe on that endpoint gave a median of 718 ms and a p95 of 722 ms. The SDK classifier at the same seam: median 1,142 ms. Cost per 1,000 calls is about $0.70 on the EC2 `t3.xlarge` CPU box, against about $4.43 for the SDK classifier, both ESTIMATE. The box figure is $0.1824 an hour, a price-list reading, at a 13.9 s median per call that reached Decider. That median is `lachesis_ms` over the 45 Decider-asked rows of `evaluation/baseline_2026-10-13.jsonl`.
+- **Latency.** In the loop, warm, one triage took 865 to 1157 ms on `ml.g4dn.xlarge`. The 50-case probe on that endpoint gave a median of 718 ms and a p95 of 722 ms. The SDK classifier at the same seam: median 1,142 ms. Cost per 1,000 calls is about $0.70 on the EC2 `t3.xlarge` CPU box, against $2.95 to $4.43 for the SDK classifier, all ESTIMATE. The classifier figure is its measured 995 input and 96 output tokens per call at Anthropic's first-party list price for Claude Sonnet 5.5 ($2 and $10 per million tokens) up to an older Sonnet-class $3 and $15; the Bedrock EU rate for this model was not read. The box figure is $0.1824 an hour, a price-list reading, at a 13.9 s median per call that reached Decider. That median is `lachesis_ms` over the 45 Decider-asked rows of `evaluation/baseline_2026-10-13.jsonl`.
 - **The reusable pattern.** [patterns/guardrails](patterns/guardrails/README.md) is one file to copy, with a second-agent transfer proof in [examples/second_agent](examples/second_agent/README.md).
 - **Hosted demo.** The approvals console is at https://d2nm49ao7e8z4z.cloudfront.net. On a cold visit the first call pauses fail-closed with no score, and that click wakes the GPU: about 9 minutes when measured on 2026-10-23, not a promise. The demo video is linked from the Builder Center article.
 - **How it was built.** Built with an AI coding assistant (Claude Code). Every number here reproduces from the committed rows with the command beside it, or names the run or reading it came from.
@@ -144,7 +144,7 @@ The policy asks a person whenever Decider's confidence falls below 0.70. 0.70 is
 | 0.7 | 12 | 1.000 | 20 (12 fit + 8 held-out) | 1.000 |
 | (all) | 35 | 0.743 | 50 | 0.780 |
 
-The selection rule was committed in PR #5 on 2026-10-11, before CI run 38421303470. It takes the lowest line whose accepted fit cases number at least 10 at accuracy 0.95 or better. At 0.70, 12 fit cases are accepted and 12 are right; 8 of 8 held-out cases are right too, so 20 of 20 across all 50.
+The selection rule was committed in PR #5 on 2026-10-11. The fit and held-out split it runs on arrived in PR #14 on 2026-10-13, before CI run 38421303470 that afternoon. It takes the lowest line whose accepted fit cases number at least 10 at accuracy 0.95 or better. At 0.70, 12 fit cases are accepted and 12 are right; 8 of 8 held-out cases are right too, so 20 of 20 across all 50.
 
 The shortfall: only 9 of those 12 fit cases reach Decider under the shipped routing, because 3 are tier-0 reads. That is one short of the rule's own minimum of 10. So 0.70 is a chosen operating point, not a value the rule forced. On the 128-case suite below, the dev-split rule fixed in `scripts/analyze_threshold.py` (zero dev misses, then the fewest false pauses) would lock 0.95. At 0.95 the shipped handler matches the no-model row on each split: 9 of 51 governed calls ran, 0 of 37 harm-class, and 7 of 13 clean calls paused. From 0.80 up it pauses 7 of 13 clean calls, so the clean-call gain needs a line below 0.80.
 
@@ -274,8 +274,9 @@ Hosted path (the judged demo, all in eu-west-1):
   call and the card shows its risk class, confidence and latency before any human decision. When
   the GPU is cold or busy, the same pause is the fail-closed path: the card carries no Decider
   score, and the public lane cannot decide it. The deterministic secret scan remains a second,
-  separately labelled layer. The video was captured at console build `ff75eb4`; the live
-  console's footer names the build it serves.
+  separately labelled layer. The video was captured at console build `ff75eb4`. The live
+  console copy was corrected afterwards (PR #77), so some on-screen wording in the video differs
+  from the live page; the live console's footer names the build it serves.
 - AgentCore spans: not enabled.
 
 Local and box paths:
@@ -421,7 +422,11 @@ Two checks show the real model is in the path. A gate that always pauses fails b
   at `b37e1fe`.
 
 The unit suite drives the handler with scripted Decider clients, so `tests/test_handler.py`
-proves the policy mapping, not the model.
+proves the policy mapping, not the model. `tests/test_agent_wiring.py` runs a real Strands
+`Agent` with `interventions=[LachesisHandler(...)]` and a scripted Decider, and counts how often
+the tool body ran: zero on a confident destructive write (interrupt), zero on a declined pause,
+zero on a Deny, once on an approval and once on the benign control. With `interventions=[]` in
+its place, 4 of its 5 tests fail.
 
 `pytest` runs the unit suite with coverage over `src/lachesis` only (the triage package: handler,
 policy, questions, render, evaluate, client); that is the scope of every coverage percentage

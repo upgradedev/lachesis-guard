@@ -1,7 +1,7 @@
 [project]
 name = "lachesis-guard"
 version = "0.1.0"
-description = "A Strands InterventionHandler that scores every tool call for risk before it runs"
+description = "A Strands InterventionHandler that checks every tool call before it runs, with Strands Decider 2B triage and a deterministic gate"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = [
