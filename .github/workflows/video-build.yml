@@ -1,0 +1,53 @@
+name: video-build
+
+# Composes the submission video on a runner, because the build machine has no
+# free disk: it downloads the live capture from the video-capture run, takes the
+# ElevenLabs narration committed under video/build/media, and runs
+# video/build/build_video.py. Only a push of video/build/build.trigger on a
+# video/ branch starts it.
+
+on:
+  push:
+    branches: ["video/**"]
+    paths: ["video/build/build.trigger"]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: video-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: github.repository == 'upgradedev/lachesis-guard'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ffmpeg and a caption font
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q ffmpeg fonts-dejavu-core
+      - name: Fetch the live capture
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "$(cat video/build/capture_run_id)" -R "$GITHUB_REPOSITORY" -n video-capture -D video/build/capture
+      - name: Compose
+        run: python3 video/build/build_video.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lachesis-demo
+          path: |
+            video/build/out/lachesis-demo.mp4
+            video/build/out/receipt.json
+            video/build/out/seg/captions.srt
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lachesis-demo-frames
+          path: |
+            video/build/out/frames/
+            video/build/out/receipt.json
+          retention-days: 30
