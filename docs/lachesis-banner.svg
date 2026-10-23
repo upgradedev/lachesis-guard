@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="420" viewBox="0 0 1440 420" role="img" aria-labelledby="title description">
+  <title id="title">Lachesis: measure before the tool runs</title>
+  <desc id="description">An original thread illustration follows a tool call through measurement and a code-owned decision. One path continues; another waits for a person.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1424"/>
+      <stop offset="1" stop-color="#12152c"/>
+    </linearGradient>
+    <linearGradient id="thread" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#88e7d3"/>
+      <stop offset="1" stop-color="#b8a6ff"/>
+    </linearGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#adc1e8" stroke-opacity=".045"/>
+    </pattern>
+  </defs>
+  <rect width="1440" height="420" rx="24" fill="url(#background)"/>
+  <rect width="1440" height="420" rx="24" fill="url(#grid)"/>
+  <circle cx="1170" cy="188" r="228" fill="#8b79e5" opacity=".035"/>
+  <circle cx="1170" cy="188" r="168" fill="none" stroke="#b8a6ff" stroke-opacity=".07"/>
+
+  <g font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif">
+    <g transform="translate(64 52)">
+      <rect width="38" height="38" rx="11" fill="#88e7d3" fill-opacity=".1" stroke="#88e7d3" stroke-opacity=".3"/>
+      <path d="M10 12H25L14 26H28M18 9V29" fill="none" stroke="#a0f0df" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="54" y="24" fill="#a9b7d0" font-size="13" font-weight="600" letter-spacing="2.2">STRANDS DECIDER GUARDRAILS</text>
+    </g>
+
+    <text x="62" y="190" fill="#f0f5ff" font-size="86" font-weight="650" letter-spacing="-3">Lachesis</text>
+    <text x="67" y="237" fill="#c0cce1" font-size="25" font-weight="400">A measure before the tool runs.</text>
+    <path d="M68 276H111" stroke="#88e7d3" stroke-width="3" stroke-linecap="round"/>
+    <text x="126" y="281" fill="#88e7d3" font-size="13" font-weight="600" letter-spacing="2">MODEL MEASURES</text>
+    <text x="67" y="312" fill="#8c9db9" font-size="13" font-weight="500" letter-spacing="2">CODE DECIDES. A PERSON CONFIRMS.</text>
+
+    <g transform="translate(664 54)">
+      <rect width="712" height="312" rx="20" fill="#101c2d" fill-opacity=".8" stroke="#839bb9" stroke-opacity=".16"/>
+      <text x="28" y="38" fill="#8c9db9" font-size="11" font-weight="600" letter-spacing="2">THE THREAD OF A TOOL CALL</text>
+      <path d="M-24 156H87C114 156 114 105 142 105H211" fill="none" stroke="#88e7d3" stroke-opacity=".1" stroke-width="25"/>
+      <path d="M-24 156H87C114 156 114 105 142 105H211" fill="none" stroke="url(#thread)" stroke-width="3" stroke-linecap="round"/>
+      <circle cx="43" cy="156" r="7" fill="#88e7d3"/>
+      <text x="24" y="188" fill="#c0cce1" font-size="12" font-weight="500">propose</text>
+
+      <g transform="translate(159 65)">
+        <circle cx="55" cy="56" r="49" fill="#132a38" stroke="#88e7d3" stroke-opacity=".42"/>
+        <path d="M30 55C30 41 41 30 55 30S80 41 80 55" fill="none" stroke="#5a7d89" stroke-width="3" stroke-linecap="round"/>
+        <path d="M55 55L70 39" stroke="#a0f0df" stroke-width="3" stroke-linecap="round"/>
+        <circle cx="55" cy="55" r="4" fill="#a0f0df"/>
+        <path d="M34 72H76" stroke="#88e7d3" stroke-opacity=".35" stroke-width="2" stroke-linecap="round"/>
+        <text x="55" y="128" text-anchor="middle" fill="#e4f4f4" font-size="14" font-weight="600">measure</text>
+        <text x="55" y="151" text-anchor="middle" fill="#8c9db9" font-size="12">risk + grounding</text>
+      </g>
+
+      <path d="M266 121H315" fill="none" stroke="url(#thread)" stroke-width="3"/>
+      <g transform="translate(317 79)">
+        <rect width="136" height="84" rx="13" fill="#27243f" stroke="#b8a6ff" stroke-opacity=".45"/>
+        <path d="M24 27L14 42L24 57M112 27L122 42L112 57M75 26L61 58" fill="none" stroke="#c9bcff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <text x="68" y="114" text-anchor="middle" fill="#e8e3ff" font-size="14" font-weight="600">decide</text>
+        <text x="68" y="137" text-anchor="middle" fill="#8c9db9" font-size="12">Python policy</text>
+      </g>
+
+      <path d="M453 121H482C510 121 506 92 534 92H561" fill="none" stroke="#88e7d3" stroke-width="3" stroke-linecap="round"/>
+      <path d="M482 121V218C482 234 494 244 510 244H561" fill="none" stroke="#b8a6ff" stroke-width="3" stroke-linecap="round"/>
+      <circle cx="482" cy="121" r="5" fill="#e6e0ff"/>
+      <rect x="562" y="67" width="118" height="50" rx="12" fill="#173932" stroke="#88e7d3" stroke-opacity=".3"/>
+      <path d="M580 92L587 99L599 85" fill="none" stroke="#a0f0df" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="615" y="97" fill="#c6f7e9" font-size="14" font-weight="600">run</text>
+      <rect x="562" y="219" width="118" height="50" rx="12" fill="#302b49" stroke="#b8a6ff" stroke-opacity=".35"/>
+      <circle cx="585" cy="238" r="5" fill="none" stroke="#d4c9ff" stroke-width="2"/>
+      <path d="M577 252C577 244 593 244 593 252" fill="none" stroke="#d4c9ff" stroke-width="2" stroke-linecap="round"/>
+      <text x="610" y="249" fill="#e4dcff" font-size="14" font-weight="600">ask</text>
+      <text x="28" y="283" fill="#6f84a2" font-size="11" font-weight="500" letter-spacing=".5">An uncertain answer can wait before an action becomes real.</text>
+    </g>
+  </g>
+</svg>

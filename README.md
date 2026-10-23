@@ -1,52 +1,40 @@
-# lachesis-guard
+# Lachesis
+
+**For the on-call platform engineer, Lachesis checks a Bedrock agent's proposed tool call and asks a person when Decider is unsure.**
 
 [![CI](https://github.com/upgradedev/lachesis-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/upgradedev/lachesis-guard/actions/workflows/ci.yml)
 [![Decider Live](https://github.com/upgradedev/lachesis-guard/actions/workflows/decider-live.yml/badge.svg)](https://github.com/upgradedev/lachesis-guard/actions/workflows/decider-live.yml)
 [![Pattern Tour](https://github.com/upgradedev/lachesis-guard/actions/workflows/pattern-tour.yml/badge.svg)](https://github.com/upgradedev/lachesis-guard/actions/workflows/pattern-tour.yml)
+[![Python](https://img.shields.io/badge/Python-3.10--3.13-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Strands Decider 2B scores each tool call the pre-checks leave open, so confident, grounded, benign calls run and unsure ones wait for a person: on each split of our 128-case suite, clean-call pauses fell from 7 of 13 with no model to 1 of 13. The price: 1 of 37 harm-class calls ran on the dev split and 2 of 37 on the test split, all destructive `set_config` writes it scored benign. Lachesis checks every tool call before a Bedrock agent runs it. Decider measures; a Python table decides.
+[Live console](https://d2nm49ao7e8z4z.cloudfront.net/) · [Copy the pattern](patterns/guardrails/README.md) · [Replay offline](#quickstart) · [Evidence](#evidence)
 
-*Let a 2B model say "I'm not sure": Strands Decider triage before a Bedrock agent's tool runs*
+![Lachesis: measure before the tool runs. A thread passes through measurement and a code-owned decision, then continues or waits for a person.](docs/lachesis-banner.svg)
 
-The buyer is an on-call platform engineer who runs a coding agent on Amazon Bedrock. The risk is one unreviewed tool call: a destructive write, a leaked secret, a confused-deputy escalation, or data sent outside. Four things already sit near that call:
+Strands Decider answers typed questions about risk and grounding. A Python policy maps its answers to **Proceed**, **Guide**, **Confirm** or **Deny** before the tool runs. The model measures; the code decides.
 
-- The Strands SDK's vended `HumanInTheLoop` classifier (strands-agents 1.53) sees the tool name and input, never the user's request, and let 3 of 8 destructive writes run on our 51 calls.
-- Amazon Bedrock Guardrails screens content but, on its own, does not pause a proposed tool call for a named person and resume it later.
-- Gitleaks-style pre-commit scanners find credential literals in a diff after the write has happened, so they cannot pause a `delete_file` or an ungrounded argument.
-- The static rule a team already has, pre-checks and then a person for the rest, is at least as safe here but paused 7 of 13 clean calls on each 128-case split.
-
-What Lachesis changes: Decider answers two typed questions in one forward pass, and plain Python owns the gate at the 0.70 line ([Threshold](#threshold)).
-
-Two people use it. The engineer runs the agent behind Lachesis against staging. When a write pauses, they see a card in the Approvals console with the full proposed file and, when Decider answered, its risk class and confidence. They see the run ledger: every pause and every answer to a pause is an event; Proceed, Guide and Deny leave none. On the approvals lane, a release manager in the approvers group can decline a `delete_file` card like the filmed one (destructive_write at 0.80; in the film it was approved). A `DecisionRecorded` event then lands in the run's event log under their Cognito username, and `refunds_prod_config.py` stays. Tests: `tests/test_approvals.py::test_approval_ledger_needs_an_approver_and_hides_who_decided` (the declined event and the stored approver name) and `tests/test_agent_wiring.py::test_declined_pause_never_runs_the_tool_and_is_not_rescored` (the tool never runs).
-
-Built for the Agent Experience Hackathon: Strands Decider on AWS Builder Center, pattern `#guardrails`.
+Built for the **Agent Experience Hackathon: Strands Decider** on AWS Builder Center. Reusable decision pattern: **`#guardrails`**. Model tag: **`#strands-decider-2b`**.
 
 ## Contents
 
-- [For judges, in 60 seconds](#for-judges-in-60-seconds)
-- [How it decides](#how-it-decides)
-- [Quickstart](#quickstart)
-- [Threshold](#threshold)
-- [Latency and cost](#latency-and-cost)
-- [Reusable decision pattern](#reusable-decision-pattern)
-- [Pre-existing components](#pre-existing-components)
-- [What runs where](#what-runs-where)
-- [After the decision: audit and failure handling](#after-the-decision-audit-and-failure-handling)
-- [Run the demo](#run-the-demo)
-- [Tests and coverage](#tests-and-coverage)
-- [Licence](#licence)
+[Results](#for-judges-in-60-seconds) · [Decision flow](#how-it-decides) · [Quickstart](#quickstart) · [Reusable pattern](#reusable-decision-pattern) · [Architecture](#what-runs-where) · [Evidence](#evidence) · [Tests](#tests-and-coverage) · [Licence](#licence)
 
 ## For judges, in 60 seconds
 
-- **The scope of the gain in the opener.** All six clean calls Decider lets run on each split are one dictated `write_file` template, scored 0.71 to 0.77, and a tool-name rule fitted after the fact does as well or better on this suite ([The 128-case transfer suite](#the-128-case-transfer-suite)).
-- **The 51-call seam benchmark, three rows.** Lachesis caught 38 of 43 should-pause calls and paused 5 of 8 clean ones. No model caught 39 and paused 7 of 8. The SDK's `HumanInTheLoop` paused 1 of 8 clean but let 3 of 8 destructive writes run.
-- **Not a stub.** Pattern tour [run 39273986426](https://github.com/upgradedev/lachesis-guard/actions/runs/39273986426) puts the real model behind the standalone pattern file and gets four different verdicts: proceed (benign at 0.83), guide (benign at 0.83, ungrounded), confirm (destructive_write at 0.87), deny (exfiltration at 0.84). `tests/integration/test_handler_live.py::test_plain_search_proceeds` asserts a real Proceed in `decider-live.yml` ([green run 39935129737](https://github.com/upgradedev/lachesis-guard/actions/runs/39935129737) on main).
-- **The filmed run.** [docs/evidence/FILMED_RUN_2026-10-23.md](docs/evidence/FILMED_RUN_2026-10-23.md): three pauses at 0.40, 0.80 and 0.28, each approved, then one test passed. On the note and the test run Decider was unsure and wrong about the class; under the line a person decides, so the wrong class never acted. The no-model rule pauses the same three calls: this run shows the pause and the score, not what Decider adds.
-- **Latency and cost.** On the hosted GPU, latency is at parity: 865 to 1157 ms a triage in the loop (n=4, `ml.g4dn.xlarge`, warm), against the SDK classifier's 1,142 ms median at the same seam. The bonus is cost, all ESTIMATE: about $0.70 per 1,000 calls on a CPU box at 13.9 s a call, and $0.82 a warm hour on the hosted GPU, which undercuts the classifier's $2.95 per 1,000 above about 280 calls an hour ([Latency and cost](#latency-and-cost)).
-- **The reusable pattern.** [patterns/guardrails](patterns/guardrails/README.md) is one file to copy. A second agent in [examples/second_agent](examples/second_agent/README.md) is wired to it unchanged and proven offline with scripted Decider answers (`tests/test_second_agent.py`); it has not run against the live model.
-- **Hosted demo.** The approvals console is at https://d2nm49ao7e8z4z.cloudfront.net. On a cold visit the first call pauses fail-closed with no score, and that click wakes the GPU: about 9 minutes when measured on 2026-10-23, not a promise. The demo video is linked from the Builder Center article.
-- **How it was built.** Built with an AI coding assistant (Claude Code). Every number here comes from a committed row, a named run or a dated reading; the [Replay](#replay) commands print the benchmark tables and the 128-suite counts. Commit messages that cite a judge panel refer to our own simulated review pass, run with the same coding assistant, not to the hackathon's judges.
+On the paired **128-case transfer suite**, the **0.70 chosen operating point** trades fewer clean-call pauses for harmful calls that run. Source: `evaluation/expanded_cpu_2026-10-16.jsonl`, replayed by `python scripts/no_model_baseline.py`.
+
+| Gate | Clean calls paused | Harm-class calls that ran | Governed calls that ran |
+|---|---|---|---|
+| No model, each split | 7 of 13 | 0 of 37 | 9 of 51 |
+| Lachesis, dev | 1 of 13 | 1 of 37 | 12 of 51 |
+| Lachesis, test | 1 of 13 | 2 of 37 | 12 of 51 |
+
+**Read the gain narrowly:** all six clean calls Decider lets run on each split are one dictated `write_file` template. The harmful calls that ran were destructive `set_config` writes scored benign. A tool-name rule fitted after the fact matches or beats this suite; the splits are paired, not independent findings. [Full calibration, ablations and limits](#threshold).
+
+**The filmed run:** three pauses at 0.40, 0.80 and 0.28, each approved, then one test passed ([committed run record](docs/evidence/FILMED_RUN_2026-10-23.md)). Decider was unsure and wrong about the class on the note and test calls. The no-model rule pauses the same three calls: the film shows the pause and score, not an added model benefit.
+
+**Try the console:** [Lachesis Approvals](https://d2nm49ao7e8z4z.cloudfront.net/). A cold visit has no score; starting a run asks the GPU to wake. It took about 9 minutes on 2026-10-23, not a promise. The public lane cannot decide an unscored pause. [Capacity and failure behaviour](#ceilings-and-what-you-see-at-each).
 
 ## How it decides
 
@@ -71,20 +59,56 @@ The rule numbers are the ones the console, the article and the video cite.
 **The model is never the gate.** Decider only measures; the code decides. If Decider does not answer, the call pauses with "the Decider did not answer, so a person decides".
 
 ```mermaid
-flowchart LR
-    A["Bedrock agent proposes a tool call"] --> B["before_tool_call: Lachesis handler"]
-    B --> C{"deterministic pre-checks"}
-    C -->|safe read| P["Proceed"]
-    C -->|secret-shaped arguments| H["Confirm: a person decides"]
-    C -->|anything else| D["Strands Decider 2B: risk class + grounding"]
-    D --> T["policy table, plain Python"]
+flowchart TD
+    A["Bedrock agent proposes a tool call"] --> B{"Lachesis pre-checks"}
+    B -->|safe read| P["Proceed"]
+    B -->|secret-shaped arguments| C["Confirm: pause for a person"]
+    B -->|anything else| D["Decider: risk class + grounding + confidence"]
+    D --> T{"Python policy: R1 to R6"}
+    D -->|no answer| C
     T --> P
+    T --> C
     T --> G["Guide: ask the user"]
-    T --> H
-    T --> X["Deny: refused"]
+    T --> X["Deny: refuse"]
+    C --> H{"Human decision"}
+    H -->|approve| E["Execute the proposed tool call"]
+    H -->|decline or expiry| S["Tool does not run"]
+    P --> E
+    X --> S
+    G --> A
+    E --> R["Tool result returned to agent"]
+    R --> A
 ```
 
+<details>
+<summary>Who uses it and how it compares with the existing gates</summary>
+
+The buyer is an on-call platform engineer who runs a coding agent on Amazon Bedrock. The risk is one unreviewed tool call: a destructive write, a leaked secret, a confused-deputy escalation, or data sent outside. Four things already sit near that call:
+
+- The Strands SDK's vended `HumanInTheLoop` classifier (strands-agents 1.53) sees the tool name and input, never the user's request, and let 3 of 8 destructive writes run on our 51 calls.
+- Amazon Bedrock Guardrails screens content but, on its own, does not pause a proposed tool call for a named person and resume it later.
+- Gitleaks-style pre-commit scanners find credential literals in a diff after the write has happened, so they cannot pause a `delete_file` or an ungrounded argument.
+- The static rule a team already has, pre-checks and then a person for the rest, is at least as safe here but paused 7 of 13 clean calls on each 128-case split.
+
+What Lachesis changes: Decider answers two typed questions in one forward pass, and plain Python owns the gate at the 0.70 line ([Threshold](#threshold)).
+
+Two people use it. The engineer runs the agent behind Lachesis against staging. When a write pauses, they see a card in the Approvals console with the full proposed file and, when Decider answered, its risk class and confidence. They see the run ledger: every pause and every answer to a pause is an event; Proceed, Guide and Deny leave none. On the approvals lane, a release manager in the approvers group can decline a `delete_file` card like the filmed one (destructive_write at 0.80; in the film it was approved). A `DecisionRecorded` event then lands in the run's event log under their Cognito username, and `refunds_prod_config.py` stays. Tests: `tests/test_approvals.py::test_approval_ledger_needs_an_approver_and_hides_who_decided` (the declined event and the stored approver name) and `tests/test_agent_wiring.py::test_declined_pause_never_runs_the_tool_and_is_not_rescored` (the tool never runs).
+
+</details>
+
 ## Quickstart
+
+**Replay the committed evidence without a model or an AWS account.** From a checkout, using Python:
+
+```sh
+git clone https://github.com/upgradedev/lachesis-guard && cd lachesis-guard
+python scripts/no_model_baseline.py
+```
+
+It prints the seam benchmark and transfer-suite comparisons, including the rows above. It replays stored scores; it makes no model call. [More replay commands](#replay).
+
+<details>
+<summary>Run the real model tour on CPU: prerequisites, commands and expected output</summary>
 
 The tour serves the pinned model on CPU and drives four scripted tool calls through the pattern. It needs no AWS account.
 
@@ -142,6 +166,125 @@ Next steps, each with what it needs:
 - `python patterns/guardrails/example.py --agent`: needs the server above, AWS credentials that can call Bedrock, a region in the usual AWS variables, and `LACHESIS_EXAMPLE_MODEL` set to a Bedrock model id.
 - `python scripts/demo_agent.py --model <bedrock-model-id>`: needs `pip install pytest==8.3.4` in the venv, AWS credentials that can call Bedrock, and a Decider server at `STRANDS_DECIDER_URL` (default `http://127.0.0.1:8099`). See [Run the demo](#run-the-demo).
 - Your own agent: copy `patterns/guardrails/triage.py` and follow [patterns/guardrails/README.md](patterns/guardrails/README.md).
+
+</details>
+
+## Reusable decision pattern
+
+`patterns/guardrails/` holds the reusable Strands Decider 2B decision pattern. It has the typed questions and option set, the handler that places the decision in the agent's path, a runnable example, and a README another builder can follow. A second, non-refund agent (a database janitor with `run_query` and `drop_table`) is wired to the same pattern file unchanged in [`examples/second_agent/`](examples/second_agent/README.md). It is proven offline with scripted Decider answers in `tests/test_second_agent.py` and has not run against the live model.
+
+## What runs where
+
+The hosted agent runs on Amazon Bedrock AgentCore in `eu-west-1`; Strands Decider serves from a SageMaker GPU endpoint that scales to zero. The console shows a proposed call before a person decides it. Proceed, Guide and Deny leave no event in the hosted pause ledger.
+
+```mermaid
+flowchart TB
+    V["Public visitor / approver"] --> UI["CloudFront + S3 console"]
+    V --> AUTH["Cognito: approvers group"]
+    UI --> API["API Gateway HTTP API"]
+    AUTH --> API
+    API --> L["Lambda: approvals API + runner"]
+    L --> DB["DynamoDB: run state + pause events"]
+    L --> AC["AgentCore Runtime V2: Strands + Lachesis"]
+    AC --> BR["Amazon Bedrock: generative model"]
+    AC --> SM["SageMaker: Strands Decider 2B"]
+    DB --> PUB["DynamoDB stream + publisher Lambda"]
+    PUB --> BUS["EventBridge + Firehose"]
+    BUS --> LAKE["S3 audit lake + Athena"]
+```
+
+<details>
+<summary>Hosted and local paths, cold starts, concurrency and older benchmark limits</summary>
+
+Hosted path (the judged demo, all in eu-west-1):
+
+- The agent is a Strands agent on Amazon Bedrock AgentCore Runtime (`lachesis_agent`), with
+  Amazon Bedrock (`eu.anthropic.claude-sonnet-5-5`) as its model. Its image (`agent/Dockerfile`)
+  carries the Lachesis handler. Before every tool call the handler runs the pre-checks and asks
+  Decider about the rest; on Confirm the run pauses.
+- Strands Decider 2B (pinned model id above) serves from the SageMaker endpoint
+  `lachesis-decider` as inference component `lachesis-decider-2b` on one `ml.g4dn.xlarge`, with at
+  most one copy (`max_capacity=1` in `infra/stacks/decider_ic.py`). The copy and the instance
+  scale to zero when idle (read back on 2026-10-16: `CurrentInstanceCount 0`,
+  `CurrentCopyCount 0`). The GPU bills nothing while idle and about $0.82 per hour while warm.
+- The cold wake. At zero copies an invoke fails at once with a no-capacity error.
+  `agent/decider_sagemaker.py` raises `DeciderUnavailable`, and the handler pauses that call
+  fail-closed with no score. SageMaker counts the failure in `NoCapacityInvocationFailures`, and
+  the alarm `lachesis-decider-nocapacity-wake` (`infra/stacks/decider_ic.py`) adds one copy by
+  step scaling. Measured on 2026-10-23: the click at 08:02:25 UTC asked the GPU to wake, and a
+  copy was in service at 08:11:03, about 9 minutes later. To skip the wait,
+  `scripts/set_decider_warm.py` warms ahead of time. It also resets the copy request once if no
+  copy has placed 10 minutes after the instance comes up. On 2026-10-15 a person made that reset
+  by hand and the stalled copy placed in 98 seconds; the script has made the reset itself since
+  ([docs/evidence/GPU_2026-10-13.md](docs/evidence/GPU_2026-10-13.md)).
+- One forward pass at a time. `decider-image/adapter.py` answers a concurrent call with HTTP 503
+  `decider busy`; with no client retry, that call pauses fail-closed with no score, like a cold
+  one, but wakes nothing. This is read from the code; no concurrent load has been measured.
+- A person approves from the Lachesis Approvals console at https://d2nm49ao7e8z4z.cloudfront.net
+  (Cognito sign-in, approvers group). Behind it: an HTTP API, Lambda, DynamoDB and a sweeper.
+  Anyone can run the same canned, Decider-judged demo from the console's `/try` lane with no
+  account. The agent works through a workspace cleanup: it writes `cleanup_notes.txt`, deletes
+  `refunds_prod_config.py`, and runs `pytest`. When the GPU is warm, Decider judges each governed
+  call and the card shows its risk class, confidence and latency before any human decision. For a
+  cold or busy GPU, see [Ceilings](#ceilings-and-what-you-see-at-each). The deterministic secret
+  scan remains a second, separately labelled layer. The video was captured at console build
+  `ff75eb4`. The live console copy was corrected afterwards (PR #77), so some on-screen wording in
+  the video differs from the live page; the live console's footer names the build it serves.
+- AgentCore spans: not enabled.
+
+Local and box paths:
+
+- The agent is a Strands agent. You run `scripts/demo_agent.py` where you like; its model is
+  Amazon Bedrock. Pass a Bedrock model id as `--model` (the earlier box run used
+  `eu.anthropic.claude-sonnet-5-5` in eu-west-1). The same run also happens entirely on one EC2
+  box against the box's local Decider server, powered by a least-privilege instance role; see
+  [`docs/aws-run.md`](docs/aws-run.md). That box run is not the one in the video.
+- Strands Decider 2B, pinned to `StrandsAgents/strands-decider-2B-qwen3.5-v1-2610` (Apache-2.0,
+  base `Qwen/Qwen3.5-2B-Base`), serves on CPU. It ran on an EC2 t3.xlarge box for the earlier
+  demo and the benchmark, and runs on a GitHub Actions runner in CI. Each agent reads
+  `STRANDS_DECIDER_URL`, while the server listens on 127.0.0.1 only. On the box, the agent runs next to the server;
+  from a laptop, reach the box's server through an SSH tunnel, never over the open network.
+- The handler asks synchronously and has no client retry or backoff. Every latency in this
+  README was measured one call at a time. In the earlier box run, single in-loop CPU triages on
+  long histories took up to 91 s.
+- The benchmark comparison is committed under `benchmark/results/`, with the evidence notes in
+  `docs/evidence/`; the series table is in
+  [`benchmark/README.md`](benchmark/README.md#lachesis-series). Read it with this caveat. Nobody
+  answered the pauses, and in the 27 Claude Code runs the hook answered 111 tool calls, every one
+  a Confirm (`hook_refusals_by_kind` in `benchmark/results/lachesis-full-claude1.jsonl`). So
+  "zero violations" is also "nothing ran": the series proves the gate holds, not that it lets
+  good work through. The harness ran the 2026-10-12 hook (commit 205ab4e), before the
+  deterministic tiers.
+
+</details>
+
+## Evidence
+
+| Read | What it establishes |
+|---|---|
+| [Filmed run](docs/evidence/FILMED_RUN_2026-10-23.md) | Recorded hosted calls, scores and human decisions |
+| [GPU and hosted probes](docs/evidence/GPU_2026-10-13.md) | Device-labelled latency and verdict parity, separate from the film |
+| [Standalone pattern tour](https://github.com/upgradedev/lachesis-guard/actions/runs/39273986426) | The real model behind the pattern returns Proceed, Guide, Confirm and Deny |
+| [Headless agent benchmark](benchmark/README.md#lachesis-series) | Older hook runs and their all-Confirm limitation |
+
+The detailed record below keeps the chosen threshold, confidence errors, paired fixtures, latency samples and ESTIMATE cost assumptions beside their sources. Hosted latency is at parity with the SDK classifier; a cost advantage depends on traffic.
+
+<details>
+<summary>Judge-facing readings and build provenance</summary>
+
+- **The scope of the clean-call gain.** All six clean calls Decider lets run on each split are one dictated `write_file` template, scored 0.71 to 0.77, and a tool-name rule fitted after the fact does as well or better on this suite ([The 128-case transfer suite](#the-128-case-transfer-suite)).
+- **The 51-call seam benchmark, three rows.** Lachesis caught 38 of 43 should-pause calls and paused 5 of 8 clean ones. No model caught 39 and paused 7 of 8. The SDK's `HumanInTheLoop` paused 1 of 8 clean but let 3 of 8 destructive writes run.
+- **Not a stub.** Pattern tour [run 39273986426](https://github.com/upgradedev/lachesis-guard/actions/runs/39273986426) puts the real model behind the standalone pattern file and gets four different verdicts: proceed (benign at 0.83), guide (benign at 0.83, ungrounded), confirm (destructive_write at 0.87), deny (exfiltration at 0.84). `tests/integration/test_handler_live.py::test_plain_search_proceeds` asserts a real Proceed in `decider-live.yml` ([green run 39935129737](https://github.com/upgradedev/lachesis-guard/actions/runs/39935129737) on main).
+- **The filmed run.** [docs/evidence/FILMED_RUN_2026-10-23.md](docs/evidence/FILMED_RUN_2026-10-23.md): three pauses at 0.40, 0.80 and 0.28, each approved, then one test passed. On the note and the test run Decider was unsure and wrong about the class; under the line a person decides, so the wrong class never acted. The no-model rule pauses the same three calls: this run shows the pause and the score, not what Decider adds.
+- **Latency and cost.** On the hosted GPU, latency is at parity: 865 to 1157 ms a triage in the loop (n=4, `ml.g4dn.xlarge`, warm), against the SDK classifier's 1,142 ms median at the same seam. The bonus is cost, all ESTIMATE: about $0.70 per 1,000 calls on a CPU box at 13.9 s a call, and $0.82 a warm hour on the hosted GPU, which undercuts the classifier's $2.95 per 1,000 above about 280 calls an hour ([Latency and cost](#latency-and-cost)).
+- **The reusable pattern.** [patterns/guardrails](patterns/guardrails/README.md) is one file to copy. A second agent in [examples/second_agent](examples/second_agent/README.md) is wired to it unchanged and proven offline with scripted Decider answers (`tests/test_second_agent.py`); it has not run against the live model.
+- **Hosted demo.** The approvals console is at https://d2nm49ao7e8z4z.cloudfront.net. On a cold visit the first call pauses fail-closed with no score, and that click wakes the GPU: about 9 minutes when measured on 2026-10-23, not a promise. The prepared video and Builder Center article await the owner's publication steps.
+- **How it was built.** Built with AI coding assistants (Claude Code and Codex). Every number here comes from a committed row, a named run or a dated reading; the [Replay](#replay) commands print the benchmark tables and the 128-suite counts. Commit messages that cite a judge panel refer to our own simulated review pass, run with Claude Code, not to the hackathon's judges.
+
+</details>
+
+<details>
+<summary>Threshold, calibration, seam benchmark, transfer suite and offline replay</summary>
 
 ## Threshold
 
@@ -228,6 +371,11 @@ Re-measuring the calibration needs a Decider server; CI runs it as `decider-meas
 python scripts/measure_threshold.py --out threshold-results.jsonl
 ```
 
+</details>
+
+<details>
+<summary>Latency and cost: device-labelled measurements and ESTIMATE arithmetic</summary>
+
 ## Latency and cost
 
 On the hosted `ml.g4dn.xlarge` endpoint the 50-case probe gave a median of 718 ms and a p95 of 722 ms (n=45, first call excluded), with verdict parity 50 of 50 against the CPU rows (`evaluation/sagemaker_g4dn_2026-10-16.jsonl`). In the agent loop a warm triage took 865 to 1157 ms (n=4: the filmed run's three and one from a second run that morning; [docs/evidence/FILMED_RUN_2026-10-23.md](docs/evidence/FILMED_RUN_2026-10-23.md)). The SDK classifier answered in 1,142 ms median at the same seam. So hosted latency is at parity. The hosted endpoint runs `ml.g4dn.xlarge` because the `ml.g5.xlarge` pool stalled in eu-west-1 on 2026-10-16; the earlier GPU rows stay labelled by device (`evaluation/gpu_threshold_2026-10-13.jsonl`, EC2 `g5.xlarge` median 193 ms; `evaluation/sagemaker_2026-10-15.jsonl`, `ml.g5.xlarge` median 167 ms).
@@ -242,98 +390,10 @@ Cost per 1,000 calls, all ESTIMATE:
 
 Why SageMaker and not Bedrock: strands-decider serves the model as is, behind a SageMaker inference component that scales to zero. A 2026-10-13 design review, whose notes are not in this repository, read two alternatives and rejected them: Bedrock Custom Model Import did not support this model's architecture and was not offered in `eu-west-1`, and AgentCore Runtime Instances capped the image at 2 GB.
 
-## Reusable decision pattern
+</details>
 
-`patterns/guardrails/` holds the reusable Strands Decider 2B decision pattern. It has the typed questions and option set, the handler that places the decision in the agent's path, a runnable example, and a README another builder can follow. A second, non-refund agent (a database janitor with `run_query` and `drop_table`) is wired to the same pattern file unchanged in [`examples/second_agent/`](examples/second_agent/README.md). It is proven offline with scripted Decider answers in `tests/test_second_agent.py` and has not run against the live model.
-
-## Pre-existing components
-
-- `vendor/merismos-aws/guard.py`: the `BeforeToolCallEvent` hook seam from Merismos (MIT, ours).
-  Reference only; Lachesis builds on the newer `InterventionHandler` seam.
-- `benchmark/`: the Threefold benchmark fixtures (nine task dirs) and harness (Apache-2.0, ours),
-  with the repo-root LICENSE carried over. Prior result rows were not copied.
-- LastTake (MIT, ours): the resume-across-process-death session pattern behind the demo.
-  No code copied; FileSessionManager is a Strands built-in.
-- The grounding question plus Guide follows the sponsor's worked example
-  (`examples/strands/tool_call_intervention.py` in strands-decider, Apache-2.0; see NOTICE).
-  The five-class risk question, the Confirm and Deny split with the human pause, the
-  threshold chosen on our own rows, and the benchmark table are this build's own.
-
-## What runs where
-
-```mermaid
-flowchart TB
-    U["Approver / public visitor"] --> CF["CloudFront + S3 console"]
-    U --> COG["Cognito user pool (approvers)"]
-    CF --> API["API Gateway HTTP API (/approvals, /try)"]
-    COG --> API
-    API --> LAPI["Lambda: lachesis-approvals-api"]
-    LAPI --> DDB["DynamoDB: lachesis-approvals + lachesis-run-events"]
-    LAPI --> LRUN["Lambda: lachesis-runner + lachesis-sweeper"]
-    LRUN --> AC["Bedrock AgentCore Runtime V2 (lachesis_agent)"]
-    AC --> BR["Amazon Bedrock (claude-sonnet-5-5) + S3SessionManager"]
-    AC --> SM["SageMaker endpoint lachesis-decider, inference component lachesis-decider-2b (ml.g4dn.xlarge, 0 or 1 copy)"]
-```
-
-Hosted path (the judged demo, all in eu-west-1):
-
-- The agent is a Strands agent on Amazon Bedrock AgentCore Runtime (`lachesis_agent`), with
-  Amazon Bedrock (`eu.anthropic.claude-sonnet-5-5`) as its model. Its image (`agent/Dockerfile`)
-  carries the Lachesis handler. Before every tool call the handler runs the pre-checks and asks
-  Decider about the rest; on Confirm the run pauses.
-- Strands Decider 2B (pinned model id above) serves from the SageMaker endpoint
-  `lachesis-decider` as inference component `lachesis-decider-2b` on one `ml.g4dn.xlarge`, with at
-  most one copy (`max_capacity=1` in `infra/stacks/decider_ic.py`). The copy and the instance
-  scale to zero when idle (read back on 2026-10-16: `CurrentInstanceCount 0`,
-  `CurrentCopyCount 0`). The GPU bills nothing while idle and about $0.82 per hour while warm.
-- The cold wake. At zero copies an invoke fails at once with a no-capacity error.
-  `agent/decider_sagemaker.py` raises `DeciderUnavailable`, and the handler pauses that call
-  fail-closed with no score. SageMaker counts the failure in `NoCapacityInvocationFailures`, and
-  the alarm `lachesis-decider-nocapacity-wake` (`infra/stacks/decider_ic.py`) adds one copy by
-  step scaling. Measured on 2026-10-23: the click at 08:02:25 UTC asked the GPU to wake, and a
-  copy was in service at 08:11:03, about 9 minutes later. To skip the wait,
-  `scripts/set_decider_warm.py` warms ahead of time. It also resets the copy request once if no
-  copy has placed 10 minutes after the instance comes up. On 2026-10-15 a person made that reset
-  by hand and the stalled copy placed in 98 seconds; the script has made the reset itself since
-  ([docs/evidence/GPU_2026-10-13.md](docs/evidence/GPU_2026-10-13.md)).
-- One forward pass at a time. `decider-image/adapter.py` answers a concurrent call with HTTP 503
-  `decider busy`; with no client retry, that call pauses fail-closed with no score, like a cold
-  one, but wakes nothing. This is read from the code; no concurrent load has been measured.
-- A person approves from the Lachesis Approvals console at https://d2nm49ao7e8z4z.cloudfront.net
-  (Cognito sign-in, approvers group). Behind it: an HTTP API, Lambda, DynamoDB and a sweeper.
-  Anyone can run the same canned, Decider-judged demo from the console's `/try` lane with no
-  account. The agent works through a workspace cleanup: it writes `cleanup_notes.txt`, deletes
-  `refunds_prod_config.py`, and runs `pytest`. When the GPU is warm, Decider judges each governed
-  call and the card shows its risk class, confidence and latency before any human decision. For a
-  cold or busy GPU, see [Ceilings](#ceilings-and-what-you-see-at-each). The deterministic secret
-  scan remains a second, separately labelled layer. The video was captured at console build
-  `ff75eb4`. The live console copy was corrected afterwards (PR #77), so some on-screen wording in
-  the video differs from the live page; the live console's footer names the build it serves.
-- AgentCore spans: not enabled.
-
-Local and box paths:
-
-- The agent is a Strands agent. You run `scripts/demo_agent.py` where you like; its model is
-  Amazon Bedrock. Pass a Bedrock model id as `--model` (the earlier box run used
-  `eu.anthropic.claude-sonnet-5-5` in eu-west-1). The same run also happens entirely on one EC2
-  box against the box's local Decider server, powered by a least-privilege instance role; see
-  [`docs/aws-run.md`](docs/aws-run.md). That box run is not the one in the video.
-- Strands Decider 2B, pinned to `StrandsAgents/strands-decider-2B-qwen3.5-v1-2610` (Apache-2.0,
-  base `Qwen/Qwen3.5-2B-Base`), serves on CPU. It ran on an EC2 t3.xlarge box for the earlier
-  demo and the benchmark, and runs on a GitHub Actions runner in CI. Each agent reads
-  `STRANDS_DECIDER_URL`, while the server listens on 127.0.0.1 only. On the box, the agent runs next to the server;
-  from a laptop, reach the box's server through an SSH tunnel, never over the open network.
-- The handler asks synchronously and has no client retry or backoff. Every latency in this
-  README was measured one call at a time. In the earlier box run, single in-loop CPU triages on
-  long histories took up to 91 s.
-- The benchmark comparison is committed under `benchmark/results/`, with the evidence notes in
-  `docs/evidence/`; the series table is in
-  [`benchmark/README.md`](benchmark/README.md#lachesis-series). Read it with this caveat. Nobody
-  answered the pauses, and in the 27 Claude Code runs the hook answered 111 tool calls, every one
-  a Confirm (`hook_refusals_by_kind` in `benchmark/results/lachesis-full-claude1.jsonl`). So
-  "zero violations" is also "nothing ran": the series proves the gate holds, not that it lets
-  good work through. The harness ran the 2026-10-12 hook (commit 205ab4e), before the
-  deterministic tiers.
+<details>
+<summary>After the decision: audit, failure handling and public demo ceilings</summary>
 
 ## After the decision: audit and failure handling
 
@@ -409,6 +469,11 @@ If a public run will not start or a card has no score, find its row below and wa
 
 On the approvals lane an approver can still decide a fail-closed card; only the public lane cannot.
 
+</details>
+
+<details>
+<summary>Run the Bedrock demo and resume a paused session</summary>
+
 ## Run the demo
 
 Needs: AWS credentials that can call Bedrock, a Decider server at `STRANDS_DECIDER_URL`, and the
@@ -427,7 +492,21 @@ keeps the committed state: re-run with `--resume --workdir <dir>`. The agent re-
 call, Lachesis returns the cached verdict for that toolUseId, and the agent pauses again;
 approvals are bound to the call id, not to the process.
 
+</details>
+
 ## Tests and coverage
+
+With the existing test dependencies installed:
+
+```sh
+python -m pytest -q
+python -m ruff check src/ tests/ patterns/ scripts/
+```
+
+Coverage is enforced for `src/lachesis` only. Unit tests use scripted Decider answers; live model checks are separate.
+
+<details>
+<summary>What each test suite proves, and what the coverage percentage includes</summary>
 
 Two checks show the real model is in the path. A gate that always pauses fails both:
 
@@ -457,8 +536,25 @@ run: `approvals/` has `tests/test_approvals.py`, the standalone pattern has
 `tests/test_agent_entrypoint.py`, the CDK template policy checker has
 `tests/test_check_templates.py`, and the hosted BYOC adapter has `tests/test_adapter.py`.
 
+</details>
+
+## Pre-existing components
+
+- `vendor/merismos-aws/guard.py`: the `BeforeToolCallEvent` hook seam from Merismos (MIT, ours).
+  Reference only; Lachesis builds on the newer `InterventionHandler` seam.
+- `benchmark/`: the Threefold benchmark fixtures (nine task dirs) and harness (Apache-2.0, ours),
+  with the repo-root LICENSE carried over. Prior result rows were not copied.
+- LastTake (MIT, ours): the resume-across-process-death session pattern behind the demo.
+  No code copied; FileSessionManager is a Strands built-in.
+- The grounding question plus Guide follows the sponsor's worked example
+  (`examples/strands/tool_call_intervention.py` in strands-decider, Apache-2.0; see NOTICE).
+  The five-class risk question, the Confirm and Deny split with the human pause, the
+  threshold chosen on our own rows, and the benchmark table are this build's own.
+
+Built with AI coding assistants **Claude Code and Codex**. Simulated review panels mentioned in commit messages were run with Claude Code; they are not the hackathon's judges.
+
 <a id="license"></a>
 
 ## Licence
 
-MIT. See `LICENSE`. Third-party strings are attributed in `NOTICE`.
+MIT. See [LICENSE](LICENSE). Third-party strings are attributed in [NOTICE](NOTICE); the copied benchmark carries its Apache-2.0 licence in [benchmark/LICENSE](benchmark/LICENSE).

@@ -172,6 +172,5 @@ unpooled block per task family (`standard`, `pressure`) and per agent
 - `credentials.py` - token-file isolation and `--check-auth`
 - `codex_agent.py` - Codex CLI invocation and JSON event reader
 - `scripted_agent.py` - deterministic scripted stand-in used to test the harness without a model
-- `fake_agents.py` - stand-in executables for unit testing the harness
 - `report.py` - aggregation, markdown report generator, and summary JSON builder
 - `results/` - committed JSONL run rows and `-summary.json` files for the Lachesis series
