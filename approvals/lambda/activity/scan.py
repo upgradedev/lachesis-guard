@@ -20,7 +20,10 @@ The rules, each a finding of its own:
   its added lines passed SCAN_COMMIT_CHARS (from the first file past the
   budget on, files are checked by path only) or because GitHub listed
   more files than the ingest read (domain.build adds that one). It flags
-  the commit: what was not read is not called clean.
+  the commit. A file without a patch (binary, or too large for GitHub to
+  return one) is checked by its path only and its content is never read,
+  and the added lines of one file past SCAN_CHARS are not read (see
+  below); apart from those two, what was not read is not called clean.
 
 A renamed file is checked by its new path and by the path it had, so a
 workflow moved out of .github/workflows/ (which turns it off) or a file
@@ -132,20 +135,38 @@ class Finding:
         return {"rule": self.rule, "path": self.path, "reason": self.reason}
 
 
-def added_lines(patch: str) -> str:
-    """The added lines of a unified diff, without their leading +, capped
-    at SCAN_CHARS characters."""
+def added_text(patch: str) -> tuple[str, bool]:
+    """The added lines of a GitHub ``patch``, without their leading +,
+    capped at SCAN_CHARS characters, and whether the cap cut them.
+
+    GitHub's per-file ``patch`` holds hunks only, never the ---/+++ file
+    headers, so every line that starts with + is an added line, also one
+    whose own text starts with ++. Lines are split on newline only: a
+    form feed, a file or group separator, NEL or a Unicode line separator
+    inside an added line is part of that line, never the start of a line
+    that could escape the scan."""
     kept: list[str] = []
     size = 0
-    for line in (patch or "").splitlines():
-        if not line.startswith("+") or line.startswith("+++"):
+    cut = False
+    lines = (patch or "").split("\n")
+    for index, line in enumerate(lines):
+        if not line.startswith("+"):
             continue
         text = line[1:]
         kept.append(text)
         size += len(text) + 1
         if size >= SCAN_CHARS:
+            cut = size - 1 > SCAN_CHARS or any(
+                rest.startswith("+") for rest in lines[index + 1 :]
+            )
             break
-    return "\n".join(kept)[:SCAN_CHARS]
+    return "\n".join(kept)[:SCAN_CHARS], cut
+
+
+def added_lines(patch: str) -> str:
+    """The added lines of a unified diff, without their leading +, capped
+    at SCAN_CHARS characters (see added_text)."""
+    return added_text(patch)[0]
 
 
 def secret_hit(text: str) -> str | None:
@@ -203,13 +224,21 @@ def scan_file(change: FileChange, read_lines: bool = True) -> list[Finding]:
         found.append(Finding(rule, where, reason))
     if not read_lines:
         return found
-    added = added_lines(change.patch)
+    found.extend(text_findings(path, added_lines(change.patch), found))
+    return found
+
+
+def text_findings(path: str, added: str, found: Iterable[Finding] = ()) -> list[Finding]:
+    """The line rules on ``added``, the added text of one file as it is
+    (no diff markers): a DROP statement (unless ``found`` already holds a
+    database_migration finding) and a secret pattern."""
+    out: list[Finding] = []
     if all(f.rule != DATABASE_MIGRATION for f in found) and _DROP.search(added):
-        found.append(Finding(DATABASE_MIGRATION, path, "an added line holds a DROP statement"))
+        out.append(Finding(DATABASE_MIGRATION, path, "an added line holds a DROP statement"))
     hit = secret_in_text(added)
     if hit is not None:
-        found.append(Finding(SECRET_IN_ADDED_LINE, path, f"an added line contains {hit}"))
-    return found
+        out.append(Finding(SECRET_IN_ADDED_LINE, path, f"an added line contains {hit}"))
+    return out
 
 
 def scan(

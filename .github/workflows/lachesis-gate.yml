@@ -1,0 +1,163 @@
+name: lachesis-gate
+
+# The Lachesis merge gate (B7b). On every pull request this job names the
+# pull request to the gate (POST /gate/pulls) with a GitHub OIDC token
+# whose audience is lachesis-gate, then polls GET /gate/{id} every 15 s for
+# at most 10 minutes. It succeeds on PASSED or APPROVED and fails on
+# DECLINED or EXPIRED. Nothing is configured on a developer's machine.
+#
+# A throttled (429) or unavailable (503, or no answer) POST is asked again
+# with a jittered backoff, each wait at most 60 s, until 10 minutes have
+# passed. The route throttle is shared by every caller, and any GitHub
+# account can mint a token with this audience, so while the gate is
+# advisory an outside caller can still exhaust the shared route throttle
+# and make this job fail.
+#
+# The job sends no file list: the gate reads the pull request and its
+# changed files from GitHub itself, with its own read-only token, and
+# checks that the token comes from this workflow file at this pull
+# request's ref. So this job cannot choose, trim or empty what is scanned.
+#
+# NOT YET A REQUIRED CHECK, AND NOT YET ENFORCING. Until the owner makes
+# this job a required status check, it must never block other work, so it
+# runs with continue-on-error: true: a failed or timed-out gate shows on
+# the pull request and blocks nothing. Turning the gate on means making
+# the check required and removing continue-on-error. Even then a
+# pull_request run uses the pull request's own copy of this file, so a
+# pull request that edits it can skip the call and succeed; real
+# enforcement needs a trusted path (pull_request_target running the base
+# branch copy, or the gate posting a commit status itself).
+#
+# The job is skipped while the repository variable LACHESIS_GATE_URL (the
+# API base URL, not a secret) is unset, and for pull requests from forks,
+# which GitHub gives no OIDC token.
+#
+# The OIDC token is masked and requested afresh for every call; no token
+# is printed or stored.
+
+# "edited" is the event GitHub sends when the base branch changes: a
+# retarget (also the automatic one of a stacked pull request) runs the
+# check again, and the gate's run id holds the base branch, so the new
+# base's file list is read. A title or body edit finds the same run.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: lachesis-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    if: vars.LACHESIS_GATE_URL != '' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    # Up to 10 minutes of asking again, then up to 10 minutes of polling.
+    timeout-minutes: 25
+    # Not a required check yet: a failure here must not block other work.
+    continue-on-error: true
+    env:
+      GATE_URL: ${{ vars.LACHESIS_GATE_URL }}
+      REPOSITORY: ${{ github.repository }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Ask the gate and wait for its verdict
+        run: |
+          set -euo pipefail
+          base="${GATE_URL%/}"
+          jq -n --arg repo "$REPOSITORY" --argjson pr "$PR_NUMBER" --arg sha "$HEAD_SHA" \
+            '{repository: $repo, pr_number: $pr, head_sha: $sha}' > gate-request.json
+          fresh_token() {
+            # In this shell, never in a command substitution, so the mask
+            # command reaches the runner before the token is used.
+            TOKEN="$(curl -sSf \
+              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=lachesis-gate" | jq -r '.value')"
+            echo "::add-mask::${TOKEN}"
+          }
+          call() {
+            # call METHOD PATH [BODY_FILE]: the body lands in gate-response.json,
+            # the HTTP code in CODE.
+            fresh_token
+            if [ "$#" -ge 3 ]; then
+              curl -sS -o gate-response.json -w '%{http_code}' -X "$1" \
+                -H "Authorization: Bearer ${TOKEN}" -H "content-type: application/json" \
+                --data-binary "@$3" "${base}$2" > gate-code.txt || echo 000 > gate-code.txt
+            else
+              curl -sS -o gate-response.json -w '%{http_code}' -X "$1" \
+                -H "Authorization: Bearer ${TOKEN}" "${base}$2" > gate-code.txt || echo 000 > gate-code.txt
+            fi
+            CODE="$(cat gate-code.txt)"
+          }
+          report() {
+            echo "Gate status: $1"
+            jq -c '.summary // {}' gate-response.json || true
+            {
+              echo "### Lachesis merge gate: $1"
+              echo ""
+              echo "Verdict summary (counts only). The verdict is the deterministic scan's, of the"
+              echo "files GitHub lists for this pull request; any Decider reading is advisory."
+              echo "Advisory only: this is not yet a required or enforcing check."
+              echo '```json'
+              jq '.summary // {}' gate-response.json || true
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          }
+          finish() {
+            case "$1" in
+              PASSED|APPROVED) report "$1"; exit 0 ;;
+              DECLINED|EXPIRED|ERROR) report "$1"; exit 1 ;;
+            esac
+          }
+
+          # A throttled (429) or unavailable (503, or no answer) gate is asked
+          # again until the deadline: each wait is drawn between half and all
+          # of a ceiling that doubles from 5 s up to 60 s, and never runs past
+          # the deadline.
+          # retry-begin
+          post_deadline=$(( $(date +%s) + 600 ))
+          ceiling=5
+          while :; do
+            call POST /gate/pulls gate-request.json
+            case "$CODE" in
+              429|503|000) ;;
+              *) break ;;
+            esac
+            left=$(( post_deadline - $(date +%s) ))
+            if [ "$left" -le 0 ]; then break; fi
+            pause=$(( ceiling / 2 + RANDOM % (ceiling - ceiling / 2 + 1) ))
+            pause=$(( pause > left ? left : pause ))
+            echo "The gate answered HTTP ${CODE}; asking again in ${pause} s."
+            sleep "$pause"
+            ceiling=$(( ceiling * 2 > 60 ? 60 : ceiling * 2 ))
+          done
+          # retry-end
+          if [ "$CODE" != "200" ] && [ "$CODE" != "202" ]; then
+            echo "The gate refused the request: HTTP ${CODE} $(jq -r '.error // ""' gate-response.json 2>/dev/null || true)"
+            exit 1
+          fi
+          gate_id="$(jq -r '.gate_id' gate-response.json)"
+          status="$(jq -r '.status' gate-response.json)"
+          echo "Gate run ${gate_id}: ${status}"
+          finish "$status"
+
+          deadline=$(( $(date +%s) + 600 ))
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            sleep 15
+            call GET "/gate/${gate_id}"
+            if [ "$CODE" != "200" ]; then
+              echo "Poll answered HTTP ${CODE}; trying again."
+              continue
+            fi
+            status="$(jq -r '.status' gate-response.json)"
+            echo "$(date -u +%H:%M:%S) UTC: ${status}"
+            finish "$status"
+          done
+          report "${status} after 10 minutes"
+          echo "Still waiting for a person after 10 minutes. Re-run this job once an approver"
+          echo "has decided: the re-run finds the same gate run and reads its decision."
+          exit 1

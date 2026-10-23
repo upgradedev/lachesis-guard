@@ -34,9 +34,14 @@ What the queries can and cannot say:
 
 - Only paused tool calls reach the bus. Lachesis pauses only on a
   Confirm verdict (Proceed, Guide and Deny never pause a run), so a
-  RunPaused row is a Confirm, and its layer says whether Decider,
-  a deterministic layer, or nobody (``unavailable``, fail-closed) made
-  it. There is no verdict column, and no query invents one. Caveat: the
+  RunPaused row of an agent run is a Confirm, and its layer says whether
+  Decider, a deterministic layer, or nobody (``unavailable``,
+  fail-closed) made it. Since B7b a merge-gate hold (lane gate, layer
+  ``mergegate``) is a RunPaused row too, but it is the deterministic
+  scan's hold of a pull request, not a tool call and not a Confirm:
+  FRESH_PAUSE leaves it out, so the pause-mix, fail-closed and
+  confidence queries count agent pauses only. There is no verdict
+  column, and no query invents one. Caveat: the
   runner builds the card, and so the RunPaused fields, from the last
   confirm or deny row of the turn (runner._pending_card). When one turn
   holds a Confirm on one call and a later Deny on another, the row
@@ -163,12 +168,14 @@ DEDUPED = (
 
 # A RunPaused that is not a re-issued verdict: cached is false, or,
 # for a row relayed before cached existed, the heuristic does not match
-# (layer decider with no latency_ms). Written so a null never drops a
-# row by accident.
+# (layer decider with no latency_ms). Merge-gate holds (layer mergegate,
+# B7b) are not tool-call verdicts and are left out too. Written so a
+# null never drops a row by accident.
 FRESH_PAUSE = (
     "(coalesce(cached, false) = false\n"
     "       AND NOT (cached IS NULL AND coalesce(layer, '') = 'decider'"
-    " AND latency_ms IS NULL))"
+    " AND latency_ms IS NULL)\n"
+    "       AND coalesce(layer, '') <> 'mergegate')"
 )
 
 # One lane per run: max over the RunRequested rows that carry one, so a
@@ -274,14 +281,14 @@ QUERIES: dict[str, tuple[str, str]] = {
     "lachesis-pause-mix-by-layer-per-day": (
         (
             "Paused tool calls (Confirm verdicts) per day by layer and risk class, n only. "
-            "Re-issued verdicts (no new model call) are left out."
+            "Re-issued verdicts (no new model call) and merge-gate holds are left out."
         ),
         _PAUSE_MIX,
     ),
     "lachesis-fail-closed-per-day": (
         (
             "Paused calls per day and how many of them were fail-closed (layer unavailable), "
-            "as two counts. Re-issued verdicts are left out."
+            "as two counts. Re-issued verdicts and merge-gate holds are left out."
         ),
         _FAIL_CLOSED,
     ),
@@ -296,7 +303,7 @@ QUERIES: dict[str, tuple[str, str]] = {
         (
             "Approval lane only (try lane excluded): each answered pause by layer, risk, "
             "confidence tenth and the latest human decision on it, n pauses only. "
-            "Re-issued verdicts are left out."
+            "Re-issued verdicts and merge-gate holds are left out."
         ),
         _PAUSE_CONFIDENCE_BY_DECISION,
     ),

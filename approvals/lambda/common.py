@@ -101,6 +101,43 @@ def list_by_status(status: str, limit: int = 50) -> list[dict]:
     return response.get("Items", [])
 
 
+# The approver queue's read (B7b): status-index pages of this many rows,
+# at most this many pages, newest first.
+QUEUE_PAGE_SIZE = 100
+QUEUE_MAX_PAGES = 10
+
+
+def list_by_status_in_lanes(status: str, lanes, limit: int = 50) -> list[dict]:
+    """The newest ``limit`` rows in ``status`` whose lane is in ``lanes``.
+
+    The lane is filtered page by page, before the limit: read the other
+    way (one page of ``limit``, then the lane), public /try pauses filled
+    the page and pushed approval and gate rows out of the approver queue.
+    At most QUEUE_MAX_PAGES pages are read."""
+    wanted = set(lanes)
+    rows: list[dict] = []
+    kwargs = {
+        "IndexName": "status-index",
+        "KeyConditionExpression": "#s = :status",
+        "ExpressionAttributeNames": {"#s": "status"},
+        "ExpressionAttributeValues": {":status": status},
+        "ScanIndexForward": False,
+        "Limit": QUEUE_PAGE_SIZE,
+    }
+    for _ in range(QUEUE_MAX_PAGES):
+        response = _table.query(**kwargs)
+        for row in response.get("Items", []):
+            if row.get("lane", "approval") in wanted:
+                rows.append(row)
+                if len(rows) >= limit:
+                    return rows
+        last = response.get("LastEvaluatedKey")
+        if not last:
+            break
+        kwargs["ExclusiveStartKey"] = last
+    return rows
+
+
 # Rows per status-index page in the sweeper's read (B4).
 SWEEP_PAGE_SIZE = 100
 
@@ -299,7 +336,7 @@ def public_view(item: dict) -> dict:
     if lane == "try" and isinstance(card.get("reason"), str):
         card["reason"] = _try_reason(card["reason"], str(card.get("tool", "")))
     decided_by_name = "" if status in {"PENDING", "EXPIRED"} else item.get("decided_by_name", "")
-    return {
+    view = {
         "approval_id": item["approval_id"],
         "status": status,
         "lane": lane,
@@ -312,7 +349,67 @@ def public_view(item: dict) -> dict:
         ],
         "result_text": error_label(result_text) if status == "ERROR" else result_text,
         "created_ts": int(item.get("created_ts", 0)),
-        # B7a: the queue groups runs by project. A run carries no project
-        # of its own yet, so every run is the canned demo's.
+        # B7a: the queue groups runs by project. A gate run (B7b) carries
+        # its registry project; every other run falls back to Demo.
         "project": str(item.get("project") or "Demo"),
     }
+    if lane == "gate":
+        # B7b: the head a gate run is for, cut to 12 characters, so the
+        # queue tells an older head's card from the live head's, and the
+        # base branch it runs against (stored escaped), so a retarget's
+        # second run of the same head is told apart too. A gate run is
+        # only on the approver routes.
+        view["head"] = str(item.get("head_sha", ""))[:12]
+        view["base"] = str(item.get("base_ref", ""))[:64]
+    return view
+
+
+# GET /approvals lists a gate run's card cut (B7b): a gate card can hold
+# up to gate.policy.CARD_MAX_BYTES of paths, so twenty of them would pass
+# Lambda's 6 MB response limit and fail the whole queue. The queue row
+# reads no path from it; GET /approvals/{id} keeps the full card.
+QUEUE_REASON_BYTES = 2048
+QUEUE_CUT_MARK = "[Cut for the queue: the full card is on this run's detail view.]"
+
+
+def _stored_bytes(text: str) -> int:
+    """The bytes ``text`` takes in a JSON response (json.dumps with the
+    default ensure_ascii, quotes included)."""
+    return len(json.dumps(text))
+
+
+def _fit(text: str, budget: int) -> str:
+    """The longest start of ``text`` that takes at most ``budget`` bytes
+    in a JSON response, quotes not counted."""
+    used = 0
+    for index, ch in enumerate(text):
+        used += _stored_bytes(ch) - 2
+        if used > budget:
+            return text[:index]
+    return text
+
+
+def queue_card(card: dict) -> dict:
+    """A public card as the queue list carries it: no changed_files or
+    prior_steps, and a reason over QUEUE_REASON_BYTES (as stored JSON)
+    cut to its first whole lines within it, then QUEUE_CUT_MARK. The
+    first line is always kept, cut by characters if it is alone too
+    long, so a gate card still starts with its "Merge gate: " header."""
+    view = {key: value for key, value in card.items()
+            if key not in {"changed_files", "prior_steps"}}
+    reason = view.get("reason")
+    if not isinstance(reason, str) or _stored_bytes(reason) <= QUEUE_REASON_BYTES:
+        return view
+    budget = QUEUE_REASON_BYTES - _stored_bytes(QUEUE_CUT_MARK)
+    kept: list[str] = []
+    for line in reason.split("\n"):
+        # Each line's two quote bytes stand for the "\n" that joins it.
+        cost = _stored_bytes(line)
+        if cost > budget:
+            if not kept:
+                kept.append(_fit(line, budget - 2))
+            break
+        kept.append(line)
+        budget -= cost
+    view["reason"] = "\n".join([*kept, QUEUE_CUT_MARK])
+    return view

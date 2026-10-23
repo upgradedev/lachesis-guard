@@ -36,7 +36,6 @@ real ingest are unverified until the first deploy.
 from __future__ import annotations
 
 import json
-import os
 import time
 from typing import Any
 
@@ -44,40 +43,21 @@ from activity import bus as activity_bus
 from activity import github, registry, service
 from activity import store as activity_store
 
-SECRET_ID = os.environ.get("GITHUB_SECRET_ID", "lachesis/github-readonly")
-REGION = os.environ.get("AWS_REGION", "eu-west-1")
+SECRET_ID = github.SECRET_ID
+REGION = github.REGION
 STOP_BEFORE_END_MS = 90_000
 
-
-class NoToken(RuntimeError):
-    """The secret holds no usable token. The message never quotes it."""
+# The token helpers live in activity/github.py, shared with the gate.
+NoToken = github.NoToken
+token_from = github.token_from
 
 
 class IngestFailed(RuntimeError):
     """At least one repository's ingest failed; the message is counts only."""
 
 
-def token_from(secret_string: Any) -> str:
-    """The token in a secret string: the raw token, or {"token": "..."}."""
-    text = str(secret_string or "").strip()
-    if text.startswith("{"):
-        try:
-            value = json.loads(text).get("token")
-        except (ValueError, AttributeError):
-            raise NoToken("the secret is not valid JSON") from None
-        text = str(value or "").strip()
-    if not text or any(ch.isspace() for ch in text):
-        raise NoToken("the secret holds no token")
-    return text
-
-
 def read_token(secrets_client: Any = None) -> str:
-    if secrets_client is None:
-        import boto3
-
-        secrets_client = boto3.client("secretsmanager", region_name=REGION)
-    response = secrets_client.get_secret_value(SecretId=SECRET_ID)
-    return token_from(response.get("SecretString"))
+    return github.read_token(secrets_client)
 
 
 def handler(event: dict | None = None, context: Any = None, *, deps: dict | None = None) -> dict:

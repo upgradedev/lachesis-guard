@@ -13,8 +13,10 @@ subclass); the caller decides whether that is a 409 or a no-op.
 from __future__ import annotations
 
 import datetime
+import hashlib
 import time
 from collections.abc import Iterable
+from typing import Any
 
 import common
 
@@ -84,6 +86,84 @@ def start_try(
     )
 
 
+# B7b: the merge gate's caps. New gate runs per repository per UTC day
+# (a run needs a real push: its head is GitHub's), and Decider readings
+# per UTC hour across every repository, so gate traffic alone cannot
+# keep the Decider copy warm and billed. And POSTs per repository per UTC
+# hour, taken before the gate reads GitHub, so one repository's workflow
+# cannot spend the read-only token every repository and the B7a ingest
+# share (GitHub allows 5000 calls an hour; a POST costs one to five).
+GATE_REPO_DAILY_CAP = 200
+GATE_DECIDER_HOURLY_CAP = 30
+GATE_POST_HOURLY_CAP = 300
+
+
+def _digest(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()[:24]
+
+
+def gate_counters(repository: str, now: float | None = None) -> list[uow.Counter]:
+    """The per-repository daily counter of new gate runs."""
+    moment = _now(now)
+    day = datetime.datetime.fromtimestamp(moment, datetime.timezone.utc).strftime("%Y-%m-%d")
+    return [
+        uow.Counter(
+            f"gate-repo-{_digest(repository)}-{day}",
+            GATE_REPO_DAILY_CAP,
+            int(moment) + COUNTER_TTL_SECONDS,
+        )
+    ]
+
+
+def take_gate_post(repository: str, now: float | None = None) -> bool:
+    """One gate POST of ``repository`` this UTC hour, or False at the cap.
+    The key holds a digest of the repository, never its name."""
+    moment = _now(now)
+    hour = datetime.datetime.fromtimestamp(moment, datetime.timezone.utc).strftime("%Y-%m-%dT%H")
+    return unit_of_work().take(
+        uow.Counter(
+            f"gate-post-{_digest(repository)}-{hour}", GATE_POST_HOURLY_CAP, int(moment) + 86400
+        )
+    )
+
+
+def take_gate_reading(now: float | None = None) -> bool:
+    """One Decider reading of the gate this UTC hour, or False at the cap."""
+    moment = _now(now)
+    hour = datetime.datetime.fromtimestamp(moment, datetime.timezone.utc).strftime("%Y-%m-%dT%H")
+    return unit_of_work().take(
+        uow.Counter(f"gate-decider-{hour}", GATE_DECIDER_HOURLY_CAP, int(moment) + 86400)
+    )
+
+
+def record_gate(
+    approval_id: str,
+    project: str,
+    gate: dict[str, Any],
+    card: dict[str, Any] | None,
+    now: float | None = None,
+) -> domain.Run:
+    """B7b: write a merge-gate run in one transaction, already decided by
+    the gate: PENDING with ``card`` when a person must decide, otherwise
+    DONE (the gate passed). The row, RunRequested and RunPaused or
+    RunCompleted, and the repository's daily counter are one commit, so
+    the run is never seen in STARTING. ``approval_id`` is the caller's
+    (gate_api derives it from the pull request head); a run already at
+    that id raises domain.Conflict, and a repository at its daily cap
+    raises domain.CapReached; either writes nothing."""
+    moment = _now(now)
+    run = domain.Run.request_gate(
+        approval_id, common.new_session_id(), project, gate, moment, common.TTL_SECONDS
+    )
+    if card is None:
+        run.pass_gate()
+    else:
+        run.hold_gate(card, moment, common.TTL_SECONDS)
+    return unit_of_work().commit(
+        run, counters=gate_counters(str(gate.get("repository", "")), moment)
+    )
+
+
 def claim_run(approval_id: str, request_id: str) -> domain.Run | None:
     """The runner takes a STARTING run before it invokes the agent.
 
@@ -127,7 +207,7 @@ def record_failure(run: domain.Run, text: str) -> domain.Run:
 
 def record_decision(
     approval_id: str,
-    lane: str,
+    lane: str | Iterable[str],
     decision: str,
     decided_by: str,
     decided_by_name: str,
@@ -137,7 +217,9 @@ def record_decision(
 ) -> domain.Run:
     """PENDING -> APPROVED or DECLINED, with DecisionRecorded.
 
-    Raises NotFound when there is no such run on ``lane``, Expired,
+    ``lane`` is one lane or several (B7b: the approver route decides the
+    approval and the gate lane alike). Raises NotFound when there is no
+    such run on ``lane``, Expired,
     NotResumable (a fail-closed pause on the public lane), or Conflict
     when the run is not PENDING or moved before the commit.
 
@@ -146,9 +228,10 @@ def record_decision(
     the used task token). Anyone else gets domain.WorkflowOwned, after
     every refusal above was checked on a copy and nothing was written, so
     the API can hand the decision to the workflow instead."""
+    lanes = {lane} if isinstance(lane, str) else set(lane)
     work = unit_of_work()
     run = work.get(approval_id)
-    if run is None or run.lane != lane:
+    if run is None or run.lane not in lanes:
         raise domain.NotFound()
     if run.workflow_owned and not by_workflow:
         moment = _now(now)

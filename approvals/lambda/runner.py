@@ -20,7 +20,9 @@ Two actions:
 in-process under its own role (sweeper.py). It resumes expired PENDING
 rows with "no" and marks them EXPIRED, so a forgotten pause ends
 refused, never open, and it re-dispatches the resume of a decided run
-whose hand-off from the API was lost.
+whose hand-off from the API was lost. A merge-gate run (B7b) has no
+agent: an expired one is marked EXPIRED without any agent call, and a
+decided one is never re-dispatched.
 
 Every agent answer goes through contract.read_result: an agent error
 (which comes back with HTTP 200) is recorded as ERROR, never as DONE.
@@ -412,6 +414,10 @@ def sweep(context=None) -> dict:
     closed_decided = 0
     for status in (domain.APPROVED, domain.DECLINED):
         for item in common.list_by_status_oldest(status):
+            if item.get("lane") == domain.GATE:
+                # B7b: a decided gate run is final. It has no agent to
+                # resume; the table's ttl removes the row.
+                continue
             if _owned_by_workflow(item):
                 if int(time.time()) - _decided_ts(item) < WORKFLOW_DECIDED_GRACE_S:
                     continue
@@ -435,10 +441,17 @@ def sweep(context=None) -> dict:
         if int(item.get("expires_ts", 0)) + _pending_grace(item) < int(time.time())
     ]
     closed_try = 0
+    closed_gate = 0
     deferred = 0
     for item in expired:
         run = domain.Run.from_item(item)
         run.clear_task_token()
+        if run.is_gate:
+            # B7b: an undecided gate run ends EXPIRED, and the pull
+            # request's check fails. There is no agent to resume.
+            if _quietly(service.expire, run):
+                closed_gate += 1
+            continue
         if run.lane == "try":
             # A public /try pause that nobody decided simply ends. It
             # must not resume the agent: resuming re-invokes the runtime
@@ -480,6 +493,7 @@ def sweep(context=None) -> dict:
         "rescued": rescued,
         "closed_starting": closed_starting,
         "closed_try": closed_try,
+        "closed_gate": closed_gate,
         "deferred": deferred,
         "redispatched": redispatched,
         "closed_decided": closed_decided,

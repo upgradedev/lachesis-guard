@@ -1,12 +1,21 @@
-"""The read-only GitHub REST client of the ingest (B7a). urllib only.
+"""The read-only GitHub REST client of the ingest (B7a) and the merge
+gate (B7b). urllib only.
 
-Three reads, all GET, all on https://api.github.com:
+Reads, all GET, all on https://api.github.com:
 
 - ``repo(repo)``: GET /repos/{owner}/{name}, for its ``private`` flag;
 - ``commits_since(repo, since)``: GET /repos/{r}/commits?since=...,
   every page, newest first (the default branch);
 - ``commit(repo, sha)``: GET /repos/{r}/commits/{sha}, every page of
-  its files (GitHub pages the files of a large commit).
+  its files (GitHub pages the files of a large commit);
+- ``pull(repo, number)``: GET /repos/{r}/pulls/{n}, the pull request
+  itself (its state and real head sha), for the merge gate;
+- ``pull_files(repo, number, max_pages)``: GET /repos/{r}/pulls/{n}/files,
+  at most ``max_pages`` pages, and whether every page was read.
+
+``read_token`` reads the token from the Secrets Manager secret
+lachesis/github-readonly; the ingest and the gate share it. It is kept
+in memory only, never logged, stored or returned by anything else.
 
 Pagination follows the ``Link`` header's rel="next", and only to a URL
 on https://api.github.com/; an HTTP redirect is followed only to that
@@ -34,6 +43,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import re
 import urllib.error
 import urllib.parse
@@ -51,6 +61,8 @@ MAX_PAGES = 10
 MAX_FILE_PAGES = 30
 RATE_FLOOR = 50
 TIMEOUT_S = 10
+SECRET_ID = os.environ.get("GITHUB_SECRET_ID", "lachesis/github-readonly")
+REGION = os.environ.get("AWS_REGION", "eu-west-1")
 
 _NEXT = re.compile(r'<([^>]+)>\s*;\s*rel="next"')
 
@@ -78,6 +90,33 @@ class RateLimited(GitHubError):
         super().__init__(429, path)
         self.reset_at = reset_at
         self.retry_after = retry_after
+
+
+class NoToken(RuntimeError):
+    """The secret holds no usable token. The message never quotes it."""
+
+
+def token_from(secret_string: Any) -> str:
+    """The token in a secret string: the raw token, or {"token": "..."}."""
+    text = str(secret_string or "").strip()
+    if text.startswith("{"):
+        try:
+            value = json.loads(text).get("token")
+        except (ValueError, AttributeError):
+            raise NoToken("the secret is not valid JSON") from None
+        text = str(value or "").strip()
+    if not text or any(ch.isspace() for ch in text):
+        raise NoToken("the secret holds no token")
+    return text
+
+
+def read_token(secrets_client: Any = None) -> str:
+    if secrets_client is None:  # pragma: no cover - boto3 wiring
+        import boto3
+
+        secrets_client = boto3.client("secretsmanager", region_name=REGION)
+    response = secrets_client.get_secret_value(SecretId=SECRET_ID)
+    return token_from(response.get("SecretString"))
 
 
 def _int(value: Any) -> int | None:
@@ -128,8 +167,10 @@ class GitHub:
         rate_floor: int = RATE_FLOOR,
         max_pages: int = MAX_PAGES,
         max_file_pages: int = MAX_FILE_PAGES,
+        timeout: float = TIMEOUT_S,
     ) -> None:
         self._token = token
+        self.timeout = timeout
         self._open = opener or default_opener()
         self.rate_floor = rate_floor
         self.max_pages = max_pages
@@ -172,7 +213,7 @@ class GitHub:
         try:
             # The body is read inside the try: a timeout or a cut connection
             # while reading is a transport failure like any other.
-            with self._open(self._request(url), timeout=TIMEOUT_S) as response:
+            with self._open(self._request(url), timeout=self.timeout) as response:
                 self._note_limits(response.headers)
                 status = getattr(response, "status", None) or response.getcode()
                 body = response.read()
@@ -244,3 +285,29 @@ class GitHub:
             if isinstance(entry, dict)
         ]
         return first, files, not more
+
+    def pull(self, repo: str, number: int) -> dict[str, Any]:
+        """The pull request ``number`` of ``repo`` (GitHub's own record)."""
+        if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+            raise GitHubError(0, "a malformed pull request number")
+        body, _ = self.get(f"{API}{self._repo_path(repo)}/pulls/{number}")
+        return body if isinstance(body, dict) else {}
+
+    def pull_files(
+        self, repo: str, number: int, max_pages: int
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """The changed files of a pull request, at most ``max_pages`` pages
+        of PER_PAGE, and whether every page was read."""
+        if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+            raise GitHubError(0, "a malformed pull request number")
+        pages, more = self._pages(
+            f"{API}{self._repo_path(repo)}/pulls/{number}/files?per_page={PER_PAGE}", max_pages
+        )
+        files = [
+            entry
+            for page in pages
+            if isinstance(page, list)
+            for entry in page
+            if isinstance(entry, dict)
+        ]
+        return files, not more

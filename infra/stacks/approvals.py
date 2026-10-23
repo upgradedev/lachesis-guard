@@ -64,6 +64,23 @@ lachesis-events, with source lachesis.activity only. The API may GetItem
 and Query that table, nothing else, for GET /projects and the activity
 routes. Not yet deployed or run on AWS.
 
+The merge gate (B7b): the function lachesis-gate (approvals/lambda/
+gate_api.py) serves POST /gate/pulls and GET /gate/{id} behind a second
+JWT authorizer on the same HTTP API, for GitHub Actions OIDC tokens
+(issuer token.actions.githubusercontent.com, audience lachesis-gate);
+the function also checks the token's repository claim against the
+committed project registry. It reads the pull request and its files
+from GitHub itself with the read-only token (GetSecretValue on the
+lachesis/github-readonly ARN only, the secret the ingest reads). It
+writes a gate run (lane "gate") through the Unit of Work with its daily
+and hourly counters, so it gets the run table's GetItem, PutItem and
+UpdateItem and the event log's PutItem, nothing else there. It may call
+sagemaker:DescribeInferenceComponent on the Decider component and
+sagemaker:InvokeEndpoint on the Decider endpoint and component, by
+literal ARN; it invokes only when a copy is already running and not
+being removed. Approvers decide gate runs through the existing decision
+route. Not yet deployed or run on AWS.
+
 Deploy isolation: the iac workflow deploys this stack with
 --exclusively, so a deploy here never redeploys LachesisFoundation,
 LachesisDecider or LachesisAgent. A change here that needs something
@@ -128,11 +145,18 @@ RUN_FAILED_RULE_NAME = "lachesis-run-failed"
 OUTBOX_METRIC_NAMESPACE = "Lachesis/Outbox"
 RUN_FAILED_METRIC = "RunFailedPublished"
 # B7a: the activity ingest. The secret is created by the owner, outside
-# CDK; the ingest reads it and nothing else does.
+# CDK; the ingest and the merge gate (B7b) read it, nothing else does.
 ACTIVITY_SOURCE = "lachesis.activity"
 ACTIVITY_TABLE_NAME = "lachesis-activity"
 GITHUB_SECRET_NAME = "lachesis/github-readonly"
 INGEST_RATE_MINUTES = 15
+# B7b: the merge gate. The issuer and audience the GitHub OIDC authorizer
+# accepts, and the Decider resources the gate may describe and invoke
+# (the names infra/stacks/decider.py and decider_ic.py create).
+GITHUB_OIDC_ISSUER = "https://token.actions.githubusercontent.com"
+GATE_AUDIENCE = "lachesis-gate"
+DECIDER_ENDPOINT_NAME = "lachesis-decider"
+DECIDER_COMPONENT_NAME = "lachesis-decider-2b"
 # B6: how a new run starts. "false" (the default everywhere) keeps the
 # async runner path; "true" starts the lachesis-run workflow instead.
 USE_STEP_FUNCTIONS = os.environ.get("LACHESIS_USE_STEP_FUNCTIONS", "false").strip().lower()
@@ -624,6 +648,130 @@ class ApprovalsStack(cdk.Stack):
             )
             route.node.add_dependency(integration)
             route_resources.append(route)
+
+        # --- B7b: the merge gate ----------------------------------------
+        # The one GitHub secret, by its ARN; Secrets Manager appends a
+        # hyphen and six random characters to a secret's name in its ARN,
+        # so exactly six ? match it and no longer name
+        # (github-readonly-admin) does. The ingest (B7a) and the gate read
+        # it, nothing else.
+        github_secret_arn = (
+            f"arn:aws:secretsmanager:eu-west-1:{self.account}:secret:{GITHUB_SECRET_NAME}-??????"
+        )
+        gate_fn = lambda_.Function(
+            self,
+            "Gate",
+            function_name="lachesis-gate",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            handler="gate_api.handler",
+            code=code,
+            timeout=cdk.Duration.seconds(29),
+            memory_size=256,
+            environment={
+                **common_env,
+                "DECIDER_ENDPOINT": DECIDER_ENDPOINT_NAME,
+                "DECIDER_COMPONENT": DECIDER_COMPONENT_NAME,
+                "GITHUB_SECRET_ID": GITHUB_SECRET_NAME,
+            },
+        )
+        # Reads a gate run, and writes a new one (the Put and its events
+        # inside TransactWriteItems), with the repository's daily counter
+        # and the hourly Decider reading counter (UpdateItem on a
+        # counter row; a gate run itself is decided by the API function
+        # and expired by the sweeper).
+        grant_store(gate_fn, ("GetItem", "PutItem", "UpdateItem"))
+        # The gate reads the pull request and its files from GitHub itself
+        # with the read-only token, so the workflow cannot pick what is
+        # scanned.
+        gate_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["secretsmanager:GetSecretValue"], resources=[github_secret_arn]
+            )
+        )
+        decider_component_arn = (
+            f"arn:aws:sagemaker:{self.region}:{self.account}:"
+            f"inference-component/{DECIDER_COMPONENT_NAME}"
+        )
+        gate_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["sagemaker:DescribeInferenceComponent"],
+                resources=[decider_component_arn],
+            )
+        )
+        gate_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["sagemaker:InvokeEndpoint"],
+                resources=[
+                    (
+                        f"arn:aws:sagemaker:{self.region}:{self.account}:"
+                        f"endpoint/{DECIDER_ENDPOINT_NAME}"
+                    ),
+                    decider_component_arn,
+                ],
+            )
+        )
+        gate_authorizer = apigw.CfnAuthorizer(
+            self,
+            "GitHubOidcAuthorizer",
+            api_id=api.attr_api_id,
+            authorizer_type="JWT",
+            name="github-actions-oidc",
+            identity_source=["$request.header.Authorization"],
+            jwt_configuration=apigw.CfnAuthorizer.JWTConfigurationProperty(
+                issuer=GITHUB_OIDC_ISSUER,
+                audience=[GATE_AUDIENCE],
+            ),
+        )
+        gate_integration = apigw.CfnIntegration(
+            self,
+            "GateIntegration",
+            api_id=api.attr_api_id,
+            integration_type="AWS_PROXY",
+            integration_uri=gate_fn.function_arn,
+            payload_format_version="2.0",
+        )
+        gate_routes = ("POST /gate/pulls", "GET /gate/{id}")
+        for route_key in gate_routes:
+            slug = "".join(
+                part.title()
+                for part in route_key.replace("/", " ")
+                .replace("{", "")
+                .replace("}", "")
+                .split()
+            )
+            route = apigw.CfnRoute(
+                self,
+                "Route" + slug,
+                api_id=api.attr_api_id,
+                route_key=route_key,
+                target=f"integrations/{gate_integration.attr_integration_id}",
+                authorization_type="JWT",
+                authorizer_id=gate_authorizer.attr_authorizer_id,
+            )
+            route.node.add_dependency(gate_integration)
+            route_resources.append(route)
+        lambda_.CfnPermission(
+            self,
+            "GateInvokePermission",
+            action="lambda:InvokeFunction",
+            function_name=gate_fn.function_name,
+            principal="apigateway.amazonaws.com",
+            source_arn=f"arn:aws:execute-api:eu-west-1:{self.account}:{api.attr_api_id}/*",
+        )
+        # The handler answers every failure with a status of its own, so a
+        # Lambda error here is a bug in the gate: one alert per window.
+        gate_errors_alarm = cloudwatch.Alarm(
+            self,
+            "GateErrorsAlarm",
+            metric=gate_fn.metric_errors(period=cdk.Duration.minutes(5), statistic="Sum"),
+            threshold=1,
+            evaluation_periods=1,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            alarm_description="The merge gate function failed an invocation (B7b)",
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+        gate_errors_alarm.add_alarm_action(cw_actions.SnsAction(foundation.alerts_topic))
+
         stage = apigw.CfnStage(
             self,
             "DefaultStage",
@@ -658,6 +806,10 @@ class ApprovalsStack(cdk.Stack):
                     "ThrottlingRateLimit": 5,
                     "ThrottlingBurstLimit": 10,
                 },
+                # B7b: the gate, one POST per pull-request push and a poll
+                # every 15 s while a person decides.
+                "POST /gate/pulls": {"ThrottlingRateLimit": 2, "ThrottlingBurstLimit": 5},
+                "GET /gate/{id}": {"ThrottlingRateLimit": 5, "ThrottlingBurstLimit": 10},
             },
         )
         # ApiGateway validates RouteSettings against existing routes at
@@ -937,12 +1089,7 @@ class ApprovalsStack(cdk.Stack):
             "dynamodb:Query",
         )
         foundation.key.grant(ingest, *_KEY_ACTIONS)
-        # The one secret, by its ARN; Secrets Manager appends a hyphen and
-        # six random characters to a secret's name in its ARN, so exactly
-        # six ? match it and no longer name (github-readonly-admin) does.
-        github_secret_arn = (
-            f"arn:aws:secretsmanager:eu-west-1:{self.account}:secret:{GITHUB_SECRET_NAME}-??????"
-        )
+        # The one secret, by its ARN (github_secret_arn, above).
         ingest.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["secretsmanager:GetSecretValue"], resources=[github_secret_arn]
@@ -978,6 +1125,7 @@ class ApprovalsStack(cdk.Stack):
         api_fn.add_environment("ACTIVITY_TABLE", activity_table.table_name)
 
         self.activity_table = activity_table
+        self.gate_function = gate_fn
         self.runner_dlq = runner_dlq
         self.run_state_machine = state_machine
         self.events_table = events_table

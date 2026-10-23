@@ -447,8 +447,38 @@ def test_a_removed_line_or_a_droplet_is_not_a_finding():
     fc = scan.FileChange
     assert _rules([fc("q.sql", "modified", "@@\n-DROP TABLE users;\n+SELECT 1;")]) == []
     assert _rules([fc("notes.md", "modified", "@@\n+we will dropTableau later")]) == []
-    assert _rules([fc("a.py", "modified", "+++ b/a.py\n+x = 1")]) == []
+    assert _rules([fc("a.py", "modified", "@@\n+x = 1")]) == []
     assert scan.verdict([]) == "clean"
+
+
+@pytest.mark.parametrize("patch", [
+    # GitHub's patch has no ---/+++ headers: an added line whose own text
+    # starts with ++ is an added line and is scanned.
+    '@@ -1 +1 @@\n+++i; const k = "AKIA' + "Q" * 16 + '";',
+    # Lines are split on newline only: a form feed, a separator, NEL or a
+    # Unicode line separator never starts a line that escapes the scan.
+    '@@\n+x = 1;\x0c++ k = "AKIA' + "Q" * 16 + '"',
+    '@@\n+x = 1; k = "AKIA' + "Q" * 16 + '"',
+    '@@\n+x = 1;\x1ck = "AKIA' + "Q" * 16 + '"',
+    '@@\n+x = 1;\x85k = "AKIA' + "Q" * 16 + '"',
+])
+def test_every_added_line_is_scanned_whatever_it_starts_with(patch):
+    assert _rules([scan.FileChange("a.js", "modified", patch)]) == [
+        ("secret_in_added_line", "a.js")
+    ]
+
+
+def test_added_text_says_when_the_cap_cut_the_lines():
+    short, cut = scan.added_text("@@\n+" + "a" * 10)
+    assert (short, cut) == ("a" * 10, False)
+    text, cut = scan.added_text("@@\n+" + "a" * (scan.SCAN_CHARS + 5))
+    assert cut is True and len(text) == scan.SCAN_CHARS
+    exact, cut = scan.added_text("@@\n+" + "a" * scan.SCAN_CHARS)
+    assert cut is False and len(exact) == scan.SCAN_CHARS
+    _, cut = scan.added_text("@@\n+" + "a" * scan.SCAN_CHARS + "\n+b")
+    assert cut is True
+    _, cut = scan.added_text("@@\n+" + "a" * scan.SCAN_CHARS + "\n context")
+    assert cut is False
 
 
 def test_a_secret_finding_never_quotes_the_secret():
@@ -1464,7 +1494,9 @@ def test_the_stack_grants_exactly_what_the_ingest_and_the_api_issue():
     assert "retry_attempts=0," in ingest
     assert "never overlap" not in ingest
     assert 'actions=["secretsmanager:GetSecretValue"], resources=[github_secret_arn]' in source
-    assert source.count("secretsmanager:GetSecretValue") == 1
+    # The ingest and the merge gate (B7b) read the secret, by that ARN only.
+    assert source.count("secretsmanager:GetSecretValue") == 2
+    assert source.count("resources=[github_secret_arn]") == 2
     assert '{"StringEquals": {"events:source": [ACTIVITY_SOURCE]}}' in source
     assert "events.Schedule.rate(cdk.Duration.minutes(INGEST_RATE_MINUTES))" in source
     assert 'time_to_live_attribute="ttl"' in source[source.index('"ActivityTable"'):]

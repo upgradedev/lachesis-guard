@@ -82,6 +82,17 @@ NOBODY_DECIDED = {"decided_by": "", "decided_by_name": "", "decided_at": ""}
 # runner-owned run, exactly as before B6.
 WORKFLOW = "sfn"
 
+# The merge-gate lane (B7b): one run per pull-request head, recorded by
+# gate_api.py. A gate run never has an agent behind it: it is written
+# already PENDING (a person decides) or DONE (the gate passed), a decision
+# ends it APPROVED or DECLINED, and nothing ever resumes it.
+GATE = "gate"
+# A gate run's row lives this long (DynamoDB TTL), well past its pause:
+# a re-run of the job or a reopened pull request days later must still
+# find the run of that head and its decision, never a free id. The rows
+# are small, and the event log keeps 30 days too.
+GATE_ROW_TTL_SECONDS = 30 * 86400
+
 _TYPE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.]{0,63}")
 _TEXT_CAP = 64
 
@@ -347,13 +358,16 @@ class Run:
         *,
         orchestrator: str = "",
         prompt: str = "",
+        project: str = "",
     ) -> Run:
         """A new run in STARTING, written before the agent is invoked.
 
         ``orchestrator`` and ``prompt`` are given only for a run the
         lachesis-run workflow owns (B6): the workflow's first AgentTurn
         reads the prompt from the row, so the execution state carries the
-        approval id only. Without them the row is exactly the pre-B6 row."""
+        approval id only. Without them the row is exactly the pre-B6 row.
+        ``project`` (B7b) is the registry name the console groups the run
+        under; without it the row has no project attribute."""
         created = int(now)
         row = {
             "approval_id": approval_id,
@@ -372,8 +386,38 @@ class Run:
         if orchestrator:
             row["orchestrator"] = str(orchestrator)
             row["prompt"] = str(prompt)
+        if project:
+            row["project"] = str(project)
         run = cls(row=row, loaded_status="", loaded_version=0, is_new=True)
         run._record(RunRequested(lane=_text(lane)))
+        return run
+
+    @classmethod
+    def request_gate(
+        cls,
+        approval_id: str,
+        session_id: str,
+        project: str,
+        gate: dict[str, Any],
+        now: float,
+        ttl_seconds: int,
+    ) -> Run:
+        """A new merge-gate run (B7b), still in memory and STARTING. The
+        caller moves it on with pass_gate() or hold_gate() before the one
+        commit that writes it, so the row is never seen in STARTING.
+        ``gate`` holds the repository, the pull request, its head sha, its
+        base branch (base_ref, already escaped for display: the run id
+        holds the branch itself) and the verdict summary GET /gate/{id}
+        answers with."""
+        run = cls.request(approval_id, session_id, GATE, now, ttl_seconds, project=project)
+        run.row.update(
+            repository=str(gate.get("repository", "")),
+            pr_number=_int(gate.get("pr_number")),
+            head_sha=str(gate.get("head_sha", "")),
+            base_ref=str(gate.get("base_ref", "")),
+            gate=json.dumps(gate.get("summary") or {}, sort_keys=True),
+            ttl=int(now) + GATE_ROW_TTL_SECONDS,
+        )
         return run
 
     # read side
@@ -393,6 +437,10 @@ class Run:
     @property
     def lane(self) -> str:
         return str(self.row.get("lane", "approval") or "approval")
+
+    @property
+    def is_gate(self) -> bool:
+        return self.lane == GATE
 
     @property
     def session_id(self) -> str:
@@ -574,8 +622,28 @@ class Run:
             )
         )
 
+    def _no_agent(self, what: str) -> None:
+        """A gate run has no agent session: nothing may resume it."""
+        if self.is_gate:
+            raise InvalidTransition(f"a gate run is never {what}", self.status)
+
+    def pass_gate(self) -> None:
+        """B7b: the gate found nothing a person must see. STARTING -> DONE
+        in the same commit that writes the new row."""
+        if not self.is_gate:
+            raise InvalidTransition("only a gate run can pass the gate", self.status)
+        self.finish("")
+
+    def hold_gate(self, card: dict[str, Any], now: float, ttl_seconds: int) -> None:
+        """B7b: the gate flagged a change, so a person decides. STARTING ->
+        PENDING with the card, in the same commit that writes the row."""
+        if not self.is_gate:
+            raise InvalidTransition("only a gate run can hold the gate", self.status)
+        self.pause([], card, now, ttl_seconds)
+
     def begin_resume(self, now: float) -> str:
         """APPROVED or DECLINED -> RESUMING. Returns the agent answer."""
+        self._no_agent("resumed")
         decided = self.status
         if decided not in {APPROVED, DECLINED}:
             raise InvalidTransition(f"cannot resume a run in {decided}", decided)
@@ -591,6 +659,7 @@ class Run:
 
     def begin_expiry_resume(self, now: float) -> str:
         """An expired PENDING pause is resumed with "no"; nobody decided it."""
+        self._no_agent("resumed")
         self._move(RESUMING, resuming_ts=int(now), resumed_decision="", **NOBODY_DECIDED)
         self._record(RunResuming(pause_seq=self.pause_seq, answer="decline", cause="expiry"))
         return "no"

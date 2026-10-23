@@ -19,6 +19,16 @@ Routes (HTTP API, see infra/stacks/approvals.py):
                              repository in full
 - GET  /approvals/projects/{key}/activity  approvers group only
 
+B7b, the merge gate: POST /gate/pulls and GET /gate/{id} are served by
+gate_api.py behind the GitHub Actions OIDC authorizer, not here. A gate
+run is decided here, on the approver routes: GET /approvals lists its
+PENDING rows beside the approval lane's, each with its head and base
+branch and its card cut to the first lines (the body is capped, see
+_queue), GET /approvals/{id} and its /events read it with the full
+card, and POST /approvals/{id}/decision records the decision
+and dispatches no resume, because a gate run has no agent behind it.
+The /try routes never read a gate run (their lane check is "try").
+
 A route with no authorizer never carries JWT claims, so each project
 read has two routes: the anonymous one redacts private repositories
 (activity/read.py), the approver one is behind the JWT authorizer. A
@@ -263,7 +273,49 @@ def _dispatch_resume(approval_id: str) -> None:
         print(json.dumps({"resume_hand_off_failed": approval_id, "error": type(exc).__name__}))
 
 
-def _ledger(approval_id: str, lane: str, not_found: str) -> dict:
+# The lanes the approver routes read and decide (B7b adds the gate).
+APPROVER_LANES = ("approval", domain.GATE)
+# GET /approvals answers with at most this many bytes of body. Lambda's
+# synchronous response limit, 6 MB, is on the whole envelope, which
+# escapes the body's quotes and backslashes once more, so the body stays
+# far below it. QUEUE_COUNT_BYTES is kept for the gate_rows_omitted key.
+QUEUE_MAX_BYTES = 1_000_000
+QUEUE_COUNT_BYTES = 64
+
+
+def _queue(rows: list[dict]) -> dict:
+    """The approver queue's body. A gate run's card is listed in its
+    queue form (common.queue_card: the first lines of its reason, no
+    paths list); GET /approvals/{id} answers with the full card. An
+    approval-lane card is listed whole, since the queue row reads its
+    arguments. If the body would still pass QUEUE_MAX_BYTES, gate rows
+    are left out from the end, never an approval-lane row, and counted
+    in gate_rows_omitted."""
+    views = []
+    for row in rows:
+        view = common.public_view(row)
+        if view["lane"] == domain.GATE:
+            view["card"] = common.queue_card(view["card"])
+        views.append(view)
+    size = len(json.dumps({"approvals": views}))
+    dropped: set[int] = set()
+    for index in reversed(range(len(views))):
+        if size <= QUEUE_MAX_BYTES - QUEUE_COUNT_BYTES:
+            break
+        if views[index]["lane"] == domain.GATE:
+            # The row and the ", " that joined it to the list.
+            size -= len(json.dumps(views[index])) + 2
+            dropped.add(index)
+    body: dict = {
+        "approvals": [view for index, view in enumerate(views) if index not in dropped]
+    }
+    if dropped:
+        body["gate_rows_omitted"] = len(dropped)
+        print(json.dumps({"queue_gate_rows_omitted": len(dropped)}))
+    return body
+
+
+def _ledger(approval_id: str, lane: str | tuple[str, ...], not_found: str) -> dict:
     """The run's ledger, after the lane check on the run row: an invalid
     id, an unknown run or a run of the other lane is 404 and the event log
     is never read. A failed read, of the run row or of the log, is 503,
@@ -273,7 +325,8 @@ def _ledger(approval_id: str, lane: str, not_found: str) -> dict:
     try:
         item = common.get(approval_id)
         # A row without a lane predates /try and is an approval-lane run.
-        if item is None or item.get("lane", "approval") != lane:
+        lanes = (lane,) if isinstance(lane, str) else lane
+        if item is None or item.get("lane", "approval") not in lanes:
             return _response(404, {"error": not_found})
         events = ledger.read(approval_id)
     except Exception as exc:
@@ -405,12 +458,15 @@ def handler(event, _context):
         return _dispatch_start(run, prompt, "approval_id")
 
     if route == "GET /approvals":
+        # One limit per lane: gate rows (up to 200 per repository a day)
+        # cannot push the approval lane's Confirm pauses off the queue,
+        # and the body cap (_queue) leaves out gate rows only.
         rows = [
             row
-            for row in common.list_by_status("PENDING", limit=50)
-            if row.get("lane", "approval") == "approval"
+            for lane in APPROVER_LANES
+            for row in common.list_by_status_in_lanes("PENDING", (lane,), limit=50)
         ]
-        return _response(200, {"approvals": [common.public_view(row) for row in rows]})
+        return _response(200, _queue(rows))
 
     if route == "GET /approvals/projects":
         return _projects(approver=True)
@@ -421,12 +477,12 @@ def handler(event, _context):
     if route == "GET /approvals/{id}":
         approval_id = params.get("id", "")
         item = common.get(approval_id) if _valid_id(approval_id) else None
-        if item is None or item.get("lane", "approval") != "approval":
+        if item is None or item.get("lane", "approval") not in APPROVER_LANES:
             return _response(404, {"error": "unknown approval"})
         return _response(200, common.public_view(item))
 
     if route == "GET /approvals/{id}/events":
-        return _ledger(params.get("id", ""), "approval", "unknown approval")
+        return _ledger(params.get("id", ""), APPROVER_LANES, "unknown approval")
 
     if route == "POST /approvals/{id}/decision":
         approval_id = params.get("id", "")
@@ -440,7 +496,7 @@ def handler(event, _context):
         decided_by_name = claims.get("username", claims.get("cognito:username", ""))
         try:
             run = service.record_decision(
-                approval_id, "approval", decision, decided_by, decided_by_name
+                approval_id, APPROVER_LANES, decision, decided_by, decided_by_name
             )
         except domain.WorkflowOwned as owned:
             return _decide_through_workflow(
@@ -448,7 +504,9 @@ def handler(event, _context):
             )
         except domain.DomainError as exc:
             return _error(exc, "unknown approval")
-        _dispatch_resume(approval_id)
+        # A gate run's decision is its end: there is no agent to resume.
+        if not run.is_gate:
+            _dispatch_resume(approval_id)
         return _response(202, {"approval_id": approval_id, "status": run.status})
 
     return _response(404, {"error": "unknown route"})
