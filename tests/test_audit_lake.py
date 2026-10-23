@@ -617,3 +617,11 @@ def test_the_queries_name_the_fresh_pause_filter():
         assert "PARTITION BY run_ref, pause_seq ORDER BY seq DESC" in sql
         assert "WHERE rn = 1" in sql
         assert "\"type\" = 'RunRequested' AND lane IS NOT NULL" in sql
+
+
+def test_the_audit_bucket_outlives_a_destroy():
+    # Owner choice 2026-10-23: RETAIN, and no auto-delete custom resource.
+    src = STACK.read_text(encoding="utf-8")
+    bucket = src[src.index('"AuditBucket"'):src.index("# --- delivery: Firehose")]
+    assert "removal_policy=cdk.RemovalPolicy.RETAIN" in bucket
+    assert "auto_delete_objects" not in bucket

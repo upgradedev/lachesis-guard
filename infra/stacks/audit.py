@@ -21,11 +21,13 @@ Audit keeps every event the outbox publisher puts on lachesis-events:
   and DeliveryToS3.DataFreshness for Firehose to S3, whose own retries
   end in discarded records after 24 h.
 
-Retention is an owner choice and is recorded here: like every Lachesis
-stack the bucket has RemovalPolicy.DESTROY with auto_delete_objects, so
-the iac destroy action erases the whole trail, every version included.
-The lake is an operations record for this build, not a retained audit
-archive; making it one means RETAIN and no auto-delete.
+Retention is an owner choice and is recorded here: the owner chose
+RETAIN on 2026-10-23, so the bucket has RemovalPolicy.RETAIN and no
+auto-delete. The iac destroy action removes the stack but leaves the
+bucket and its objects, so a destroy never erases the trail. The
+lifecycle rules still expire objects. A later deploy creates a new
+bucket, because the name is generated, and the old one is deleted by
+hand.
 
 Insight reads it: the Glue database lachesis_audit with the table events
 (OpenX JSON SerDe, partition projection on dt, no crawler), the Athena
@@ -127,10 +129,9 @@ class AuditStack(cdk.Stack):
                     abort_incomplete_multipart_upload_after=cdk.Duration.days(1),
                 ),
             ],
-            # Like every Lachesis stack: the iac destroy action removes it,
-            # objects and versions included.
-            removal_policy=cdk.RemovalPolicy.DESTROY,
-            auto_delete_objects=True,
+            # Owner choice 2026-10-23: the trail outlives a destroy. No
+            # auto-delete, so the iac destroy action leaves the bucket.
+            removal_policy=cdk.RemovalPolicy.RETAIN,
         )
 
         # --- delivery: Firehose ----------------------------------------
