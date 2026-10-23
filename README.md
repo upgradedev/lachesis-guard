@@ -8,7 +8,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10--3.13-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-[Live console](https://d2nm49ao7e8z4z.cloudfront.net/) · [Copy the pattern](patterns/guardrails/README.md) · [Replay offline](#quickstart) · [Evidence](#evidence)
+[Live console](https://d2nm49ao7e8z4z.cloudfront.net/) · [Watch demo](https://youtu.be/DV-NAtPSXt4) · [Builder Center article](https://builder.aws.com/project/3L6WqZV47A4jD7QRFMK34nMDDE9/let-a-2b-model-say-im-not-sure-strands-decider-triage-before-a-bedrock-agents-tool-runs) · [Copy the pattern](patterns/guardrails/README.md) · [Replay offline](#quickstart) · [Evidence](#evidence)
 
 ![Lachesis: measure before the tool runs. A thread passes through measurement and a code-owned decision, then continues or waits for a person.](docs/lachesis-banner.svg)
 
@@ -34,7 +34,7 @@ On the paired **128-case transfer suite**, the **0.70 chosen operating point** t
 
 **The filmed run:** three pauses at 0.40, 0.80 and 0.28, each approved, then one test passed ([committed run record](docs/evidence/FILMED_RUN_2026-10-23.md)). Decider was unsure and wrong about the class on the note and test calls. The no-model rule pauses the same three calls: the film shows the pause and score, not an added model benefit.
 
-**Try the console:** [Lachesis Approvals](https://d2nm49ao7e8z4z.cloudfront.net/). A cold visit has no score; starting a run asks the GPU to wake. It took about 9 minutes on 2026-10-23, not a promise. The public lane cannot decide an unscored pause. [Capacity and failure behaviour](#ceilings-and-what-you-see-at-each).
+**Try the console:** [Lachesis Approvals](https://d2nm49ao7e8z4z.cloudfront.net/). Select **Start the demo run** to request a run. If Decider is asleep, the first call that needs it pauses fail-closed with no score and asks the GPU to wake. That took about 9 minutes on 2026-10-23, not a promise. The public lane cannot decide an unscored pause. [Capacity and failure behaviour](#ceilings-and-what-you-see-at-each).
 
 ## How it decides
 
@@ -292,8 +292,8 @@ The detailed record below keeps the chosen threshold, confidence errors, paired 
 - **The filmed run.** [docs/evidence/FILMED_RUN_2026-10-23.md](docs/evidence/FILMED_RUN_2026-10-23.md): three pauses at 0.40, 0.80 and 0.28, each approved, then one test passed. On the note and the test run Decider was unsure and wrong about the class; under the line a person decides, so the wrong class never acted. The no-model rule pauses the same three calls: this run shows the pause and the score, not what Decider adds.
 - **Latency and cost.** On the hosted GPU, latency is at parity: 865 to 1157 ms a triage in the loop (n=4, `ml.g4dn.xlarge`, warm), against the SDK classifier's 1,142 ms median at the same seam. The bonus is cost, all ESTIMATE: about $0.70 per 1,000 calls on a CPU box at 13.9 s a call, and $0.82 a warm hour on the hosted GPU, which undercuts the classifier's $2.95 per 1,000 above about 280 calls an hour ([Latency and cost](#latency-and-cost)).
 - **The reusable pattern.** [patterns/guardrails](patterns/guardrails/README.md) is one file to copy. A second agent in [examples/second_agent](examples/second_agent/README.md) is wired to it unchanged and proven offline with scripted Decider answers (`tests/test_second_agent.py`); it has not run against the live model.
-- **Hosted demo.** The approvals console is at https://d2nm49ao7e8z4z.cloudfront.net. On a cold visit the first call pauses fail-closed with no score, and that click wakes the GPU: about 9 minutes when measured on 2026-10-23, not a promise. The prepared video and Builder Center article await the owner's publication steps.
-- **How it was built.** Built with AI coding assistants (Claude Code and Codex). Every number here comes from a committed row, a named run or a dated reading; the [Replay](#replay) commands print the benchmark tables and the 128-suite counts. Commit messages that cite a judge panel refer to our own simulated review pass, run with Claude Code, not to the hackathon's judges.
+- **Hosted demo.** The approvals console is at https://d2nm49ao7e8z4z.cloudfront.net. Select **Start the demo run** to request a run. If Decider is asleep, the first call that needs it pauses fail-closed with no score and asks the GPU to wake: about 9 minutes when measured on 2026-10-23, not a promise. Watch the [recorded demo](https://youtu.be/DV-NAtPSXt4) and read the [Builder Center article](https://builder.aws.com/project/3L6WqZV47A4jD7QRFMK34nMDDE9/let-a-2b-model-say-im-not-sure-strands-decider-triage-before-a-bedrock-agents-tool-runs).
+- **How it was built.** Built with AI coding assistants (Claude Code and Codex). Every number here comes from a committed row, a named run or a dated reading; the [Replay](#replay) commands print the benchmark tables and the 128-suite counts. Commit messages that cite a judge panel refer to our own simulated review pass, run with Claude Code, not to the hackathon's judges. Dated disclosure, 2026-10-23: this repository has been public since 2026-10-11, before the hackathon window opened on 2026-10-16.
 
 </details>
 
