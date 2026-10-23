@@ -1,12 +1,13 @@
-# Reusable decision pattern: triage every tool call before it runs
+# Reusable decision pattern: check every tool call before it runs
 
-A Strands `InterventionHandler` that asks Strands Decider 2B two typed questions
-before every tool call, and turns the answers into Proceed, Guide, Confirm or
-Deny with plain Python. Copy `triage.py` into your own agent; it needs only
-`strands-agents` from PyPI and a running Decider server.
+A Strands `InterventionHandler` that checks every tool call before it runs.
+Two deterministic pre-checks settle what they can. Strands Decider 2B scores
+every other call with two typed questions, and plain Python turns the answers
+into Proceed, Guide, Confirm or Deny. Copy `triage.py` into your own agent; it
+needs only `strands-agents` from PyPI and a running Decider server.
 
-Lachesis scores every tool call for risk before it runs, so the agent pauses
-for a person instead of cleaning up after it.
+The agent pauses for a person before a risky call runs, instead of someone
+cleaning up after it.
 
 ## The two questions
 
@@ -42,31 +43,70 @@ Exact repeats of refused calls are denied outright. The model never sees a
 score: Deny and Guide texts are neutral, and a denied pause reads "a person
 declined this call".
 
-## About a minute
+## The tour, about two minutes from a clean install
 
-Run the serve line in a second terminal; it stays in the foreground:
+Before you start:
+
+- A machine that fits the 2B model in fp32 on CPU. We run an EC2 t3.xlarge
+  (4 vCPU, 16 GB RAM); a t3.large (2 vCPU, 8 GB) was OOM-killed while loading
+  the model.
+- Python 3.11 in a fresh virtual environment, as in the CI job.
+- Network access for the first serve: it downloads the model from Hugging
+  Face once.
+- No AWS account. The tour needs none.
+
+Get the files and install the pinned versions:
 
 ```sh
+git clone https://github.com/upgradedev/lachesis-guard
+cd lachesis-guard/patterns/guardrails
 pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cpu
-pip install strands-decider==0.1.0 transformers==5.19.0 strands-agents
+pip install strands-decider==0.1.0 transformers==5.19.0 strands-agents==1.61.1
+```
+
+Start the server in a second terminal. It stays in the foreground:
+
+```sh
 strands-decider serve StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --device cpu --port 8099
+```
+
+Wait until it is ready: repeat this check until it prints a JSON line that
+starts with `{"status":"ok"`. The CI job polls it every 5 seconds:
+
+```sh
+curl -sf http://127.0.0.1:8099/health
+```
+
+Then run the tour from `patterns/guardrails`:
+
+```sh
 python example.py
 ```
 
 The tour drives four scripted tool calls through the handler and prints each
 verdict: a Proceed, a Guide, a Confirm with the pause a person would see, and
-a Deny. It takes about 40 seconds on CPU once the server is up (40.7 s on an
-EC2 t3.xlarge, 40.2 s in CI run 38383159931), plus the one-off model download.
-It needs no AWS account. A clean-container CI job runs the same pinned install
-and fails unless all four verdicts fire.
+a Deny. These are the verdict lines from CI run
+[39273986426](https://github.com/upgradedev/lachesis-guard/actions/runs/39273986426)
+(2026-10-19, commit b37e1fe), against the real model:
 
-The server needs a machine that fits the 2B model in fp32 on CPU: we run an
-EC2 t3.xlarge (4 vCPU, 16 GB RAM); a t3.large (2 vCPU, 8 GB) OOM-killed while
-loading the model.
+```
+[1/4] search {'query': 'refund'} -> proceed (benign at 0.83, grounded=True)
+[2/4] list_paths {'path': 'src'} -> guide (benign at 0.83, grounded=False)
+[3/4] delete_file {'path': 'build/'} -> confirm (destructive_write at 0.87, grounded=True)
+[4/4] send_email {'body': 'customer records attached', 'to': 'stranger@example.net'} -> deny (exfiltration at 0.84, grounded=True)
+tour: proceed guide confirm deny in 37.6 s
+```
 
-With AWS credentials, `python example.py --agent` runs the same triage around
-a small Bedrock agent instead. The model comes from `LACHESIS_EXAMPLE_MODEL`
-and the region from the usual AWS variables; there are no other knobs.
+The last line must read `tour: proceed guide confirm deny`; the seconds vary
+by machine. In that run the whole job took about 2 minutes on a clean
+container: install 38 s, model download and serve 40 s, tour 39 s. The
+[pattern-tour](../../.github/workflows/pattern-tour.yml) workflow runs the
+same pinned install and fails unless that closing line appears.
+
+With AWS credentials and `LACHESIS_EXAMPLE_MODEL` set to a Bedrock model id,
+`python example.py --agent` runs the same triage around a small Bedrock agent
+instead. The region comes from the usual AWS variables; there are no other
+knobs.
 
 Wire it into your agent:
 
@@ -92,8 +132,11 @@ decides": nothing runs on a guess, and nothing runs without a person.
   grounding question carry most of its signal; write them carefully.
 - Pick the threshold by measurement: run your own tool calls through, plot
   confidence against right and wrong, and set the line where a person should
-  take over. Our own measurement is in the repo README under Threshold: 0.7,
-  fit on 50 labeled tool calls.
+  take over. Our line, 0.70, is a chosen operating point on 50 labeled tool
+  calls. At 0.70 all 12 accepted fit cases were right, but only 9 of them
+  reach Decider under the shipped routing, one short of our rule's own
+  minimum of 10. The repo README's Threshold section has the full
+  calibration.
 - Keep `Confirm` for the calls a person must see and `Deny` for the ones that
   must never run. A triage that denies when unsure takes the human out of a
   decision the human should make.

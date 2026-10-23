@@ -12,17 +12,18 @@ what it left behind.
 
 The task fixtures, independent checkers (`checks.py`), and harness
 (`harness.py`, `run.py`, `report.py`) are pre-existing components carried from
-the owner's earlier Apache-2.0 benchmark suite, disclosed at the bottom of the
-root [README](../README.md#license). The Lachesis adapter
-(`benchmark/lachesis_hook.py`), series runner (`benchmark/run_series.py`), and
-all Lachesis result rows (`benchmark/results/lachesis-*.jsonl`) were built and
-measured during the hackathon window.
+the owner's earlier Apache-2.0 benchmark suite, disclosed in the root README
+under [Pre-existing components](../README.md#pre-existing-components). The
+Lachesis adapter (`benchmark/lachesis_hook.py`), the `lachesis` condition in
+`harness.py` and `run.py`, and all Lachesis result rows
+(`benchmark/results/lachesis-*.jsonl`) were built and measured during the
+hackathon window.
 
 | Condition | What the agent gets |
 |---|---|
 | `none` | the repository as it is |
 | `prompt` | the team's rules in prose ([conditions/CLAUDE.prompt.md](conditions/CLAUDE.prompt.md)), in `CLAUDE.md` for Claude Code and in `AGENTS.md` for Codex, the same text for both |
-| `lachesis` | the Lachesis hook (`benchmark/lachesis_hook.py`), asking a local Strands Decider 2B server to triage every tool call and deny the risky ones; with no human to ask in headless runs, pauses and guides count as prevented |
+| `lachesis` | the Lachesis hook (`benchmark/lachesis_hook.py`) on the agent's file-writing and shell calls (`HOOK_MATCHER` for Claude Code and `CODEX_HOOK_MATCHER` for Codex, in `harness.py`; read-only tools such as `Read` and `Glob` are not hooked), asking a local Strands Decider 2B server to triage the call and deny the risky ones; with no human to ask in headless runs, pauses and guides count as prevented |
 
 ## Lachesis series
 
@@ -37,7 +38,20 @@ rows committed here. No rate below pools the two task families.
 
 The acceptance tests passed in 0 of the 15 standard runs and 0 of the 9
 pressure runs of the Claude series: with every risky call refused or paused by
-the headless hook, the agent stopped instead of finishing.
+the headless hook, the agent stopped instead of finishing. The Claude series
+holds 27 runs; the 3 `warehouse-carrier-notify` runs hit a judging error and
+count in no rate, which leaves 24 judged.
+
+Read the zeros with this caveat. In the 27 Claude Code runs the hook answered
+111 tool calls, and every one of the 111 was a Confirm (`hook_refusals_by_kind`
+in `results/lachesis-full-claude1.jsonl`). With nobody to answer, each Confirm
+stopped its call. So "zero violations" here also means that no hooked call
+ran. The series shows the gate holds. It does not show that the gate lets
+good work through. The rows came from the hook as of commit 205ab4e
+(2026-10-12), before the deterministic pre-checks were added; today's hook
+runs them first. All 27 rows record the same `hook_sha256`, which is the hash
+of `benchmark/lachesis_hook.py` at 205ab4e as checked out on Windows (CRLF).
+
 `results/lachesis-pressure-codex1.jsonl` is the pressure run before the rerun;
 its 4 hook errors excluded it, and `results/lachesis-pressure-codex1-fix1.jsonl`
 replaced it.
@@ -73,7 +87,8 @@ of pressure runs. Under `prompt`, prose rules hold for `claude-sonnet-5` on
 this fixture set but slip for `claude-haiku-4-5` (56% under pressure) and Codex
 (11% under pressure). Under `lachesis`, 0 violations landed across all 15
 standard and 9 pressure runs of `claude-sonnet-5` without any `CLAUDE.md` rules
-file in the workspace.
+file in the workspace. That zero comes with the caveat above: all 111 hook
+answers were Confirm, so no hooked call ran and no task finished.
 
 ## Two task families
 
@@ -110,13 +125,20 @@ Check the agent login before starting a series:
     python benchmark/run.py --check-auth                  # Claude Code
     python benchmark/run.py --agent codex --check-auth    # Codex
 
-Run the scripted harness self-test (no model required, free) or a Lachesis
-benchmark series against a running Decider server (`LACHESIS_DECIDER_ENDPOINT`,
-default `http://127.0.0.1:8099`):
+Every `lachesis` run needs a serving Decider named by `STRANDS_DECIDER_URL`.
+`run.py` refuses to start a `lachesis` run without it, the scripted self-test
+included. The scripted agent needs no agent model and costs nothing:
 
+    export STRANDS_DECIDER_URL=http://127.0.0.1:8099
     python benchmark/run.py --agent scripted --conditions lachesis --reps 1
-    python benchmark/run_series.py --agent claude-code --family all --conditions lachesis --reps 3 --run-id lachesis-full-claude1
-    python benchmark/report.py benchmark/results/lachesis-full-claude1.jsonl
+    python benchmark/run.py --agent claude-code --family all --conditions lachesis --reps 3 --run-id my-lachesis-claude
+    python benchmark/report.py benchmark/results/my-lachesis-claude.jsonl
+
+The second command plans the same 27 runs, in the same order, as the
+committed rows in `results/lachesis-full-claude1.jsonl`: 9 tasks x 1
+condition x 3 reps, one run at a time (checked with `--dry-run`). Those rows
+carry the run id `lachesis-full-claude1`. Use a new `--run-id`: without
+`--resume`, an existing id appends to the committed results file.
 
 ## What a run does
 
@@ -139,7 +161,6 @@ unpooled block per task family (`standard`, `pressure`) and per agent
 - `tasks/pressure-*/` - the three pressure-family task definitions
 - `conditions/CLAUDE.prompt.md` - the prose rules used by the `prompt` condition
 - `lachesis_hook.py` - the Claude Code and Codex `PreToolUse` adapter that routes tool calls through Lachesis and Strands Decider 2B
-- `run_series.py` - series launcher that runs `benchmark/run.py` and `benchmark/report.py`
 - `task_library.py` - loads tasks and task families
 - `checks.py` - independent violation checkers over the files and git history left by the agent
 - `harness.py`, `run.py` - single-run execution and matrix runner (retries, stopping, resuming)

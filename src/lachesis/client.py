@@ -1,10 +1,12 @@
 """Synchronous HTTP client for a running Strands Decider server.
 
 urllib only, no third-party dependencies: a reader can use this module without
-agreeing to anything beyond strands-agents. Synchronous on purpose: Strands
-calls a handler method that is a plain ``def`` directly, so a blocking request
-is the simplest thing that works, and it keeps requests strictly sequential,
-which is how the server is best driven.
+agreeing to anything beyond strands-agents. Synchronous on purpose: a blocking
+request is the simplest thing that works. The handler's ``before_tool_call`` is
+``async`` and runs ``ask`` in a worker thread (``asyncio.to_thread``), so the
+agent's event loop is not blocked while Decider scores. Nothing here
+serializes requests: if the agent runs tool calls concurrently, their triages
+reach the server concurrently too.
 
 Same wire shape as the sponsor's example client
 (``examples/strands/_client.py`` in strands-decider): POST ``/v1/systemone``

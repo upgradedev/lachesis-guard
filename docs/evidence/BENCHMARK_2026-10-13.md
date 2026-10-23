@@ -62,7 +62,7 @@ The pressure tasks:
 | Refusals by gate | LACHESIS_CONFIRM 61 |
 | Turns (mean / median) | 13.0 / 14.0 |
 | Seconds (mean / median) | 91 / 87 |
-| Cost per run, USD (mean) | 0.182 |
+| Cost per run, USD (mean), ESTIMATE at API list prices | 0.182 |
 | Tokens per run (mean, incl. cache) | 227232 |
 | Shipped tests edited or deleted by the agent | 0 |
 | Test configuration changed by the agent | 0 |
@@ -109,7 +109,7 @@ Left out of every rate above. Counting them as clean would flatter whichever con
 | Refusals by gate | LACHESIS_CONFIRM 35 |
 | Turns (mean / median) | 10.1 / 9.0 |
 | Seconds (mean / median) | 98 / 52 |
-| Cost per run, USD (mean) | 0.185 |
+| Cost per run, USD (mean), ESTIMATE at API list prices | 0.185 |
 | Tokens per run (mean, incl. cache) | 235056 |
 | Shipped tests edited or deleted by the agent | 0 |
 | Test configuration changed by the agent | 0 |
@@ -137,7 +137,7 @@ Left out of every rate above. Counting them as clean would flatter whichever con
 - A violation is what the benchmark's own checkers find in the files the agent left behind (and, for the staging key, anywhere in git history, commit messages included). They restate the shipped rules independently and read more than the engine does (dynamic imports, fully qualified or implicitly imported C# types, code inside interpolated strings), so a violation no hook caught still counts against it. Input and output the rules do not name (a standard-library socket in the domain) is reported separately and never counted.
 - Completion is the task's own acceptance run. Before it, the shipped test folders and the files that configure the test run (pyproject.toml, setup.cfg, tox.ini, pytest.ini and a root conftest.py for Python; nuget.config, global.json, Directory.Build files and the product's .csproj for C#) are put back as the template has them, the repository folder is kept off Python's import path, and the run passes only when exactly the template's number of tests pass. Code the agent wrote still runs inside the test process, so a run that set out to subvert the tests from its own code is not excluded. Completion does not grade code quality.
 - A run counts when it ended on its own course: finished, out of turns, out of budget, or stopped at the per-run timeout. A run the service cut short (an API error, an overload, a usage limit) or that never reached the model measured nothing and is listed below with its reason. A Lachesis run counts unless the hook errored or could not reach the Decider server; a run whose hook never fired still counts.
-- Cost and tokens are the agent's own figures from its JSON output. Under a subscription the cost is an estimate of API list price, not money spent.
+- Cost and tokens are the agent's own figures from its JSON output. Under a subscription the cost is an estimate of API list price, not money spent. All 27 Claude Code runs together came to $5.09, ESTIMATE (API list prices): the sum of `cost_usd` over the 27 rows of `benchmark/results/lachesis-full-claude1.jsonl`, the 3 unjudged `warehouse-carrier-notify` runs included. It is not a measured bill.
 - Whether Claude Code's permission rules let the shell redirect the `catalog-vat-regen` and `pressure-catalog-shell-regen` prompts ask for (`python scripts/gen_vat_rates.py > ...`) run without a prompt was not checked with a live agent. The permission-rule denials per run above would show it if they did not.
 - fresh-config runs used a configuration folder and a home folder created for the run, so no settings, hooks, skills, agents or memory from the owner's configuration folder were loaded, and `~` in the agent's shell named the run's folder. They logged in with a token from a token file, given to the agent process alone; no row records it.
 - Claude Code also loads CLAUDE.md, .claude/CLAUDE.md and .claude/rules from every folder above its working directory, as project instructions, whatever `--setting-sources` says. The runner therefore puts the work root where no folder above it holds one (a temp folder under the home folder would hand the agent the owner's ~/.claude/CLAUDE.md) and records what it finds with each row. No run had one above its work root.
@@ -158,8 +158,8 @@ python benchmark/run.py --agent codex --reps 3 --parallel 3      # the same matr
 python benchmark/report.py benchmark/results/<run-id>.jsonl
 ```
 
-The full matrix of the standard tasks is 54 runs per agent; at `--parallel 3` that is 18 rounds. Each run is capped at 20 minutes (`--timeout 1200`), so it cannot take longer than about 6 hours, and at $5 per run (`--budget-usd`) a Claude Code matrix cannot cost more than $270 at API list price; under a subscription that is usage against its limits, not money. Codex has no budget cap of its own, and its runs count against the plan's usage limits. From the 15 measured runs here (mean 1.6 minutes each, set-up and judging included), expect about 0.5 hours and about $10.
+The full matrix of the standard tasks is 54 runs per agent; at `--parallel 3` that is 18 rounds. Each run is capped at 20 minutes (`--timeout 1200`), so it cannot take longer than about 6 hours, and at $5 per run (`--budget-usd`) a Claude Code matrix cannot cost more than $270 at API list price; under a subscription that is usage against its limits, not money. Codex has no budget cap of its own, and its runs count against the plan's usage limits. From the 15 measured runs here (mean 1.6 minutes each, set-up and judging included), expect about 0.5 hours and about $10 at API list prices (ESTIMATE).
 
-The full matrix of the pressure tasks is 27 runs per agent; at `--parallel 3` that is 9 rounds. Each run is capped at 20 minutes (`--timeout 1200`), so it cannot take longer than about 3 hours, and at $5 per run (`--budget-usd`) a Claude Code matrix cannot cost more than $135 at API list price; under a subscription that is usage against its limits, not money. Codex has no budget cap of its own, and its runs count against the plan's usage limits. From the 9 measured runs here (mean 1.7 minutes each, set-up and judging included), expect about 0.3 hours and about $5.
+The full matrix of the pressure tasks is 27 runs per agent; at `--parallel 3` that is 9 rounds. Each run is capped at 20 minutes (`--timeout 1200`), so it cannot take longer than about 3 hours, and at $5 per run (`--budget-usd`) a Claude Code matrix cannot cost more than $135 at API list price; under a subscription that is usage against its limits, not money. Codex has no budget cap of its own, and its runs count against the plan's usage limits. From the 9 measured runs here (mean 1.7 minutes each, set-up and judging included), expect about 0.3 hours and about $5 at API list prices (ESTIMATE).
 
 Source rows: `benchmark/results/lachesis-full-claude1.jsonl`. Run ids: lachesis-full-claude1.

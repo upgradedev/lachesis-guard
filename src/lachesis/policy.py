@@ -34,11 +34,17 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-# Measured 2026-10-12 on 50 labeled tool calls (run 38421303470): the lowest edge
-# in {0.9, 0.8, 0.7} with at least 10 accepted cases at accuracy 0.95 or better
-# is 0.7, with 12 accepted and 12 right. Every one of the 11 risk misses landed
-# below it (highest miss 0.67), so each would have paused for a person. Refit
-# when real agent traffic arrives; the rule lives in lachesis.evaluate.
+# The chosen operating point, with its calibration beside it. 50 labeled tool
+# calls, CI run 38421303470 (fit 35, held out 15). At 0.70 the fit split
+# accepted 12 cases and all 12 were right; the held-out split accepted 8, all
+# right. Under the shipped routing only 9 of those 12 fit cases reach Decider
+# (3 are tier-0 reads), one short of the rule's own minimum of 10
+# (lachesis.evaluate), so the rule did not force 0.70: it was chosen.
+# With all 50 asked, Decider chose the wrong risk class 11 times, every time
+# below 0.70 (highest 0.67). Under the shipped routing 5 file reads skip
+# Decider: of the 45 it scores, 10 were wrong and all 10 paused. The 11th,
+# t44 (another tenant's invoice data), proceeded by the read rule; Decider
+# scored it 0.29 and would have paused it. Refit on real agent traffic.
 DEFAULT_THRESHOLD = 0.7
 
 PROCEED = "proceed"

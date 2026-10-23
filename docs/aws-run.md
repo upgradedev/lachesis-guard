@@ -2,9 +2,14 @@
 
 The hackathon asks for a working agent on AWS. The judged deployment is
 the hosted stack (README, "What runs where": AgentCore Runtime plus a
-SageMaker Decider endpoint). This page documents the earlier all-on-one-
-EC2-box run, which is how the filmed demo was produced and remains the
-simplest way to reproduce it locally on AWS.
+SageMaker Decider endpoint). The submission video shows one run of that
+hosted stack, and its record is in
+[FILMED_RUN_2026-10-23.md](evidence/FILMED_RUN_2026-10-23.md).
+
+This page documents an earlier run on one EC2 box, not in the video.
+Everything ran on that one box: the agent, Decider and the person at the
+terminal. It is still the shortest way to run the whole loop yourself on
+AWS.
 
 ## Where each part runs
 
@@ -48,11 +53,17 @@ and runs the demo. First proved on 2026-10-13 on instance
 i-0c25a473fb2216b3f (t3.xlarge, eu-west-1), log kept with the owner.
 
 What the log shows: the read proceeded; `run_tests` paused at confidence
-0.50 (below the 0.70 threshold) and was approved; the refund write was
-guided back as ungrounded; and the staging-key write was stopped by the
-deterministic secret scan before Decider was asked, then refused by the
-person at the terminal. The agent reported both stops, suggested reading
-the key from an environment variable, and did not work around either one.
+0.50 (below the 0.70 threshold) and was approved; the refund write came
+back benign at 0.80 but ungrounded, so Lachesis returned Guide; and the
+staging-key write was stopped by the deterministic secret scan before
+Decider was asked, then refused by the person at the terminal. The agent
+reported both stops, suggested reading the key from an environment
+variable, and did not work around either one. That Guide is the only live
+Guide in either run, this one or the filmed one.
+
+On CPU a single in-loop triage on a long history took up to 91 s. On
+the warm hosted GPU the filmed run's triages took 865 to 1145 ms each,
+measured at the handler.
 
 To reproduce: give a small EC2 box the role above, serve the pinned model
 on port 8099, and run `bash scripts/box_demo.sh` in a terminal.

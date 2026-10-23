@@ -31,7 +31,7 @@ jobs:
         run: |
           set -o pipefail
           pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cpu
-          pip install strands-decider==0.1.0 transformers==5.19.0 strands-agents
+          pip install strands-decider==0.1.0 transformers==5.19.0 strands-agents==1.61.1
 
       - name: Serve the pinned model
         run: |

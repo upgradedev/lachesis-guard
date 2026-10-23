@@ -30,8 +30,14 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+# The shipped tier-0 set, so this replay routes reads the way the handler does.
+# The rows carry no arguments, so the secret-path denylist is not replayed here.
+from lachesis.policy import TIER0_READ_TOOLS  # noqa: E402
+
 THRESHOLDS = [round(0.50 + 0.05 * i, 2) for i in range(10)]  # 0.50 .. 0.95
-TIER0_READ_TOOLS = {"read_file", "list_paths"}
 
 
 def load_rows(path: Path) -> list[dict]:

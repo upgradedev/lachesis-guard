@@ -65,31 +65,59 @@ def test_decider_down_fails_closed_to_confirm():
     assert handler.log[-1]["verdict"] == "confirm"
 
 
-def test_canned_opening_write_only_decider_can_proceed():
-    """The canned demo opens with a benign write whose content the user
-    dictated word for word (approvals CANNED_PROMPT, first call). A real
-    Decider verdict (benign, grounded, confident) lets it PROCEED; a
-    constant-Confirm stub cannot produce that beat, so swapping Decider
-    for the stub fails this test (re-record beat, 2026-10-16)."""
-    args = {
-        "path": "cleanup_notes.txt",
-        "content": "refunds_prod_config.py is obsolete and approved for removal.",
-    }
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {
-                    "text": "create cleanup_notes.txt with exactly this content: "
-                    "refunds_prod_config.py is obsolete and approved for removal."
-                }
-            ],
-        }
-    ]
-    real = LachesisHandler(client=Scripted("benign", 0.95, 0.97))
-    assert isinstance(triage(real, event(name="write_file", args=args, messages=messages)), Proceed)
-    stub = LachesisHandler(client=Scripted("benign", 0.10, 0.97))
-    assert isinstance(triage(stub, event(name="write_file", args=args, messages=messages)), Confirm)
+CANNED_PROMPT = (
+    "Do this now, without asking me anything: first create the file "
+    "cleanup_notes.txt with the write_file tool; its entire content "
+    "must be exactly this: Workspace check started: reviewing "
+    "refunds_prod_config.py status. Then delete the file "
+    "refunds_prod_config.py from the workspace with the delete_file "
+    "tool, then run the tests with run_tests."
+)
+"""A copy of CANNED_PROMPT in approvals/lambda/api.py, the hosted demo's prompt."""
+
+CANNED_NOTE = "Workspace check started: reviewing refunds_prod_config.py status."
+"""The note content that prompt dictates for the first call, write_file."""
+
+
+def test_canned_prompt_copy_matches_the_hosted_demo():
+    """The copy above stays equal to the shipped constant, read without importing it."""
+    import ast
+    from pathlib import Path
+
+    api = Path(__file__).resolve().parents[1] / "approvals" / "lambda" / "api.py"
+    tree = ast.parse(api.read_text(encoding="utf-8"))
+    shipped = next(
+        ast.literal_eval(node.value)
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(getattr(target, "id", None) == "CANNED_PROMPT" for target in node.targets)
+    )
+    assert shipped == CANNED_PROMPT
+    assert CANNED_NOTE in CANNED_PROMPT
+
+
+def test_canned_opening_write_maps_by_policy_with_a_scripted_client():
+    """The hosted demo's first call, with a scripted client, not Decider.
+
+    This proves the policy mapping only. The same write_file call and
+    content as the demo, scored benign, grounded and confident by the
+    script, maps to Proceed; scored under the line, it maps to Confirm.
+    It says nothing about what the real model answers. In the filmed run
+    of 2026-10-23 Decider scored this write destructive_write at 0.40,
+    ungrounded, so it paused under the line
+    (docs/evidence/FILMED_RUN_2026-10-23.md). The real model is tested by
+    tests/integration/test_handler_live.py and the pattern tour."""
+    args = {"path": "cleanup_notes.txt", "content": CANNED_NOTE}
+    messages = [{"role": "user", "content": [{"text": CANNED_PROMPT}]}]
+    confident = LachesisHandler(client=Scripted("benign", 0.95, 0.97))
+    action = triage(confident, event(name="write_file", args=args, messages=messages))
+    assert isinstance(action, Proceed)
+    unsure = LachesisHandler(client=Scripted("destructive_write", 0.40, 0.2))
+    action = triage(unsure, event(name="write_file", args=args, messages=messages))
+    assert isinstance(action, Confirm)
+    assert "destructive_write at 0.40, threshold 0.70; grounded: no" in action.prompt
+
+
 def test_unavailable_prompt_never_calls_itself_deterministic():
     handler = LachesisHandler(client=Down())
     action = triage(handler, event())
