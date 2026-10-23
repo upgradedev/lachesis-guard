@@ -50,7 +50,8 @@ as before B6. Least privilege: the state machine role may invoke the
 task function only; the API may StartExecution and SendTaskSuccess on
 this state machine only; the task function may SendTaskFailure on it
 only. Alarms on failed, aborted and timed-out executions go to the
-alerts topic. Not yet deployed or run on AWS.
+alerts topic. Deployed with this stack on 2026-10-23 (iac run 39908642677)
+and switched off: the flag is "false".
 
 The activity ingest (B7a): the table lachesis-activity (pk
 project_repo, sk committed_at#sha, the foundation CMK, a 30-day ttl) and
@@ -62,7 +63,8 @@ API read-only, writes one row per commit with PutItem conditioned on
 attribute_not_exists, and puts one ActivityObserved per new commit on
 lachesis-events, with source lachesis.activity only. The API may GetItem
 and Query that table, nothing else, for GET /projects and the activity
-routes. Not yet deployed or run on AWS.
+routes. Deployed with this stack on 2026-10-23 (iac run 39908642677); the
+console's Projects view reads it.
 
 The merge gate (B7b): the function lachesis-gate (approvals/lambda/
 gate_api.py) serves POST /gate/pulls and GET /gate/{id} behind a second
@@ -79,7 +81,9 @@ sagemaker:DescribeInferenceComponent on the Decider component and
 sagemaker:InvokeEndpoint on the Decider endpoint and component, by
 literal ARN; it invokes only when a copy is already running and not
 being removed. Approvers decide gate runs through the existing decision
-route. Not yet deployed or run on AWS.
+route. Deployed with this stack on 2026-10-23 (iac run 39908642677). The
+pull-request check is advisory: it is not a required check, so it blocks no
+merge.
 
 Deploy isolation: the iac workflow deploys this stack with
 --exclusively, so a deploy here never redeploys LachesisFoundation,

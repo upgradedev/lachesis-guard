@@ -46,9 +46,10 @@ pause_seq and cached and the runner and domain put cached on RunPaused.
 Rows relayed earlier have none of them, so lachesis-time-to-decision and
 lachesis-approval-pause-confidence-by-decision return nothing for them.
 
-None of this has run on AWS yet. In particular the AppendDelimiterToRecord
+Deployed on 2026-10-23 (iac run 39909301653). The AppendDelimiterToRecord
 processor (the console's "New line delimiter" option for an S3
-destination) and the queries are unverified until the first deploy.
+destination) and the four queries had not been checked against delivered
+records when this was written.
 """
 
 from __future__ import annotations
