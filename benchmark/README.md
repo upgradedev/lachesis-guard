@@ -136,7 +136,8 @@ included. The scripted agent needs no agent model and costs nothing:
 
 The second command plans the same 27 runs, in the same order, as the
 committed rows in `results/lachesis-full-claude1.jsonl`: 9 tasks x 1
-condition x 3 reps, one run at a time (checked with `--dry-run`). Those rows
+condition x 3 reps, one run at a time. That plan was checked with the same
+flags and `--agent scripted --dry-run`, which needs no login. Those rows
 carry the run id `lachesis-full-claude1`. Use a new `--run-id`: without
 `--resume`, an existing id appends to the committed results file.
 
