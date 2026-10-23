@@ -11,10 +11,10 @@ Lachesis checks every tool call before it runs, with Strands Decider 2B scoring 
 
 The buyer is an on-call platform engineer who runs a coding agent on Amazon Bedrock. The risk is one unreviewed tool call: a destructive write, a leaked secret, a confused-deputy escalation, or data sent outside. Four things already sit near that call:
 
-- The Strands SDK's vended `HumanInTheLoop` classifier (strands-agents 1.53) sees the tool name and input, never the user's request, and answers yes or no. On our 51-call benchmark it let 3 of 8 destructive writes run.
-- Amazon Bedrock Guardrails screens content. On its own it does not pause a proposed tool call for a named person and resume it later.
-- Gitleaks-style pre-commit scanners find credential literals in a diff after the write has happened. They cannot pause a `delete_file` or an ungrounded argument before it runs.
-- The static rule a team already has runs its pre-checks, then sends everything else to a person. It is at least as safe on our rows, and noisier. It paused 7 of 8 clean calls on the 51-call benchmark and 7 of 13 on each split of the 128-case suite.
+- The Strands SDK's vended `HumanInTheLoop` classifier (strands-agents 1.53) sees the tool name and input, never the user's request, and let 3 of 8 destructive writes run on our 51 calls.
+- Amazon Bedrock Guardrails screens content but, on its own, does not pause a proposed tool call for a named person and resume it later.
+- Gitleaks-style pre-commit scanners find credential literals in a diff after the write has happened, so they cannot pause a `delete_file` or an ungrounded argument.
+- The static rule a team already has, pre-checks and then a person for the rest, is at least as safe here but paused 7 of 13 clean calls on each 128-case split.
 
 What Lachesis changes: Decider answers two typed questions in one forward pass, and plain Python owns the gate. Confident, grounded, benign calls run without a person. At the 0.70 line, clean-call pauses fall from 7 of 13 to 1 of 13 on each split of the 128-case suite. The price: 1 of 37 harm-class calls ran on the dev split, and 2 of 37 on the test split ([Threshold](#threshold)).
 
@@ -42,7 +42,7 @@ Built for the Agent Experience Hackathon: Strands Decider on AWS Builder Center,
 - **The 51-call seam benchmark, three rows.** Lachesis caught 38 of 43 should-pause calls and paused 5 of 8 clean ones. No model caught 39 and paused 7 of 8. The SDK's `HumanInTheLoop` paused 1 of 8 clean but let 3 of 8 destructive writes run.
 - **Not a stub.** Pattern tour [run 39273986426](https://github.com/upgradedev/lachesis-guard/actions/runs/39273986426) puts the real model behind the standalone pattern file. It gets four different verdicts: proceed (benign at 0.83), guide (benign at 0.83, ungrounded), confirm (destructive_write at 0.87), deny (exfiltration at 0.84). `tests/integration/test_handler_live.py::test_plain_search_proceeds` asserts a real Proceed in `decider-live.yml` ([green run 39935129737](https://github.com/upgradedev/lachesis-guard/actions/runs/39935129737) on main).
 - **The filmed run.** [docs/evidence/FILMED_RUN_2026-10-23.md](docs/evidence/FILMED_RUN_2026-10-23.md): three pauses at 0.40, 0.80 and 0.28, each approved, then one test passed. Decider was unsure on the note and the test run, and wrong about their class. Unsure is exactly when the line hands the call to a person, so the wrong class never acted.
-- **Latency.** In the loop, warm, one triage took 865 to 1157 ms on `ml.g4dn.xlarge`. The 50-case probe on that endpoint gave a median of 718 ms and a p95 of 722 ms. The SDK classifier at the same seam: median 1,142 ms. Cost per 1,000 calls is about $0.70 on a CPU box against about $4.43 for the SDK classifier, both ESTIMATE.
+- **Latency.** In the loop, warm, one triage took 865 to 1157 ms on `ml.g4dn.xlarge`. The 50-case probe on that endpoint gave a median of 718 ms and a p95 of 722 ms. The SDK classifier at the same seam: median 1,142 ms. Cost per 1,000 calls is about $0.70 on a CPU box, where the CI CPU median is 7.4 s per triage, against about $4.43 for the SDK classifier, both ESTIMATE.
 - **The reusable pattern.** [patterns/guardrails](patterns/guardrails/README.md) is one file to copy, with a second-agent transfer proof in [examples/second_agent](examples/second_agent/README.md).
 - **Hosted demo.** The approvals console is at https://d2nm49ao7e8z4z.cloudfront.net. On a cold visit the first call pauses fail-closed with no score, and that click wakes the GPU: about 9 minutes when measured on 2026-10-23, not a promise. The demo video is linked from the Builder Center article.
 - **How it was built.** Built with an AI coding assistant (Claude Code). Every number here reproduces from the committed rows with the command beside it, or names the run or reading it came from.
@@ -200,7 +200,7 @@ python scripts/measure_threshold.py --out threshold-results.jsonl
 
 ## Reusable decision pattern
 
-`patterns/guardrails/` holds the reusable Strands Decider 2B decision pattern. It has the typed questions and option set, the handler that places the decision in the agent's path, a runnable example, and a README another builder can follow in five minutes. A second, non-refund agent (a database janitor with `run_query` and `drop_table`) wired with the same unmodified pattern file lives in [`examples/second_agent/`](examples/second_agent/README.md).
+`patterns/guardrails/` holds the reusable Strands Decider 2B decision pattern. It has the typed questions and option set, the handler that places the decision in the agent's path, a runnable example, and a README another builder can follow. Its clean-container tour job took 2 min 1 s ([run 39273986426](https://github.com/upgradedev/lachesis-guard/actions/runs/39273986426)). A second, non-refund agent (a database janitor with `run_query` and `drop_table`) wired with the same unmodified pattern file lives in [`examples/second_agent/`](examples/second_agent/README.md).
 
 ## Pre-existing components
 
