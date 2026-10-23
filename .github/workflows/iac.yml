@@ -91,10 +91,17 @@ jobs:
         if: inputs.action == 'deploy-agent'
         working-directory: infra
         run: cdk deploy LachesisAgent --require-approval never
+      # --exclusively: deploying approvals never redeploys Foundation,
+      # Decider or Agent. CDK can write what this stack's constructs add
+      # to a Foundation resource (the CMK key policy for a cross-stack
+      # grant, for example) into the Foundation template; such a change
+      # reaches AWS only through deploy-foundation, so run that first
+      # when a change touches the console bucket, its origin access or
+      # a grant on the Foundation key.
       - name: Deploy approvals
         if: inputs.action == 'deploy-approvals'
         working-directory: infra
-        run: cdk deploy LachesisApprovals --require-approval never
+        run: cdk deploy LachesisApprovals --exclusively --require-approval never
       - name: Deploy observability
         if: inputs.action == 'deploy-observability'
         working-directory: infra

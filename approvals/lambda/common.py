@@ -101,6 +101,37 @@ def list_by_status(status: str, limit: int = 50) -> list[dict]:
     return response.get("Items", [])
 
 
+# Rows per status-index page in the sweeper's read (B4).
+SWEEP_PAGE_SIZE = 100
+
+
+def list_by_status_oldest(status: str) -> list[dict]:
+    """Every row in `status`, oldest created_ts first, read page by page.
+
+    The sweeper's read. list_by_status (newest first, one page) stays the
+    approver queue's read; read that way, the sweeper only ever saw the
+    newest page, so with more rows than one page the oldest, the ones
+    already due, were never closed. Every page is read before the sweeper
+    changes a row, so a row the sweep moves out of `status` cannot shift
+    a later page."""
+    rows: list[dict] = []
+    kwargs = {
+        "IndexName": "status-index",
+        "KeyConditionExpression": "#s = :status",
+        "ExpressionAttributeNames": {"#s": "status"},
+        "ExpressionAttributeValues": {":status": status},
+        "ScanIndexForward": True,
+        "Limit": SWEEP_PAGE_SIZE,
+    }
+    while True:
+        response = _table.query(**kwargs)
+        rows.extend(response.get("Items", []))
+        last = response.get("LastEvaluatedKey")
+        if not last:
+            return rows
+        kwargs["ExclusiveStartKey"] = last
+
+
 # One attempt, no retries. An agent invocation is not idempotent: the
 # botocore default retries a ReadTimeoutError, which would run the agent
 # a second time, and it would also make the final exception say nothing

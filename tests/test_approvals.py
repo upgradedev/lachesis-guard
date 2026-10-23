@@ -216,6 +216,7 @@ class FakeTable:
         self.dynamo = dynamo
         self.items = dynamo.tables[APPROVALS]
         self.reads = []
+        self.queries = []
 
     def get_item(self, Key, ConsistentRead=False):  # noqa: N803
         self.reads.append(ConsistentRead)
@@ -223,12 +224,40 @@ class FakeTable:
         return {"Item": copy.deepcopy(item)} if item else {}
 
     def query(self, IndexName, KeyConditionExpression, **kwargs):  # noqa: N803
+        """The status-index as DynamoDB pages it: ordered by (created_ts,
+        approval_id), ascending unless ScanIndexForward is False, at most
+        Limit rows, resuming strictly after ExclusiveStartKey by key
+        position (never by list offset, so a row that left the status
+        between pages cannot shift the next page), and a LastEvaluatedKey
+        whenever a page is full, as DynamoDB may return one then."""
+        self.queries.append(copy.deepcopy(kwargs))
         status = kwargs["ExpressionAttributeValues"][":status"]
-        rows = [
-            _as_read(copy.deepcopy(i)) for i in self.items.values() if i.get("status") == status
-        ]
-        rows.sort(key=lambda i: int(i.get("created_ts", 0)), reverse=True)
-        return {"Items": rows[: kwargs.get("Limit", 50)]}
+        forward = kwargs.get("ScanIndexForward", True)
+
+        def position(row):
+            return (int(row.get("created_ts", 0)), str(row["approval_id"]))
+
+        rows = sorted(
+            (i for i in self.items.values() if i.get("status") == status),
+            key=position,
+            reverse=not forward,
+        )
+        start = kwargs.get("ExclusiveStartKey")
+        if start is not None:
+            assert start["status"] == status
+            after = position(start)
+            rows = [r for r in rows if (position(r) > after if forward else position(r) < after)]
+        limit = kwargs.get("Limit")
+        page = rows[:limit] if limit is not None else rows
+        response = {"Items": [_as_read(copy.deepcopy(i)) for i in page]}
+        if limit is not None and len(page) == limit:
+            last = page[-1]
+            response["LastEvaluatedKey"] = {
+                "approval_id": last["approval_id"],
+                "status": last["status"],
+                "created_ts": last.get("created_ts", 0),
+            }
+        return response
 
 
 @pytest.fixture()
@@ -2168,3 +2197,91 @@ def test_the_card_carries_the_cached_flag_and_the_event_relays_it(modules):
     run2 = domain.Run.request("appr-fresh", "s" * 40, "approval", time.time(), 1800)
     run2.pause(interrupts, {"cached": "yes"}, time.time(), 1800)
     assert [e.cached for _, e in run2.events if e.name == "RunPaused"] == [False]
+
+
+# --- B4: the sweeper reads every page, oldest first ---------------------
+
+
+def _pending_row(common, approval_id, lane, created_ts, expires_ts):
+    _create_row(common, approval_id, "s" * 32 + approval_id[-8:].rjust(8, "0"), lane)
+    _transition(
+        common, approval_id, "STARTING", "PENDING", interrupts='[{"interruptId": "i1"}]', card="{}"
+    )
+    common._table.items[approval_id].update(created_ts=created_ts, expires_ts=expires_ts)
+
+
+def _sweep_queries(table, status):
+    return [q for q in table.queries if q["ExpressionAttributeValues"][":status"] == status]
+
+
+def test_sweeper_reads_every_page_of_a_status_oldest_first(modules, monkeypatch):
+    """More stale rows than one page: every one is closed, and the reads
+    were ascending pages chained by ExclusiveStartKey."""
+    common, _, runner, table = modules
+    monkeypatch.setattr(common, "SWEEP_PAGE_SIZE", 2)
+    for n in range(5):
+        _create_row(common, f"appr-stale-{n}", "s" * 40, "try")
+        common._table.items[f"appr-stale-{n}"]["created_ts"] = 10 + n
+    out = runner.sweep()
+    assert out["closed_starting"] == 5
+    assert {common.get(f"appr-stale-{n}")["status"] for n in range(5)} == {"ERROR"}
+    pages = _sweep_queries(table, "STARTING")
+    assert len(pages) == 3
+    assert all(q["ScanIndexForward"] is True and q["Limit"] == 2 for q in pages)
+    assert "ExclusiveStartKey" not in pages[0]
+    assert [q["ExclusiveStartKey"]["approval_id"] for q in pages[1:]] == [
+        "appr-stale-1",
+        "appr-stale-3",
+    ]
+    # Every status the sweep handles is read the same way.
+    for status in ("RESUMING", "APPROVED", "DECLINED", "PENDING"):
+        assert all(q["ScanIndexForward"] is True for q in _sweep_queries(table, status))
+
+
+def test_sweeper_reaches_due_rows_behind_a_full_page_of_newer_ones(modules, monkeypatch):
+    """Regression: the sweep read the newest 100 PENDING rows only. With
+    a full page of fresh pauses, older expired ones were never closed."""
+    common, _, runner, table = modules
+    calls = []
+    monkeypatch.setattr(common, "invoke_agent", lambda s, p, **kw: calls.append(s) or {})
+    now = int(time.time())
+    for n in range(100):  # the earlier read's Limit
+        _pending_row(common, f"appr-fresh-{n:03d}", "try", now, now + 1800)
+    for n in range(3):
+        _pending_row(common, f"appr-due-{n}", "try", 1 + n, 1)
+    out = runner.sweep()
+    assert out["expired"] == 3 and out["closed_try"] == 3
+    assert {common.get(f"appr-due-{n}")["status"] for n in range(3)} == {"EXPIRED"}
+    assert {
+        common.get(f"appr-fresh-{n:03d}")["status"] for n in range(100)
+    } == {"PENDING"}
+    assert len(_sweep_queries(table, "PENDING")) == 2
+    assert calls == []
+
+
+def test_sweeper_resumes_expired_rows_oldest_first(modules, monkeypatch):
+    common, _, runner, _ = modules
+    monkeypatch.setattr(common, "SWEEP_PAGE_SIZE", 2)
+    sessions = []
+    monkeypatch.setattr(
+        common,
+        "invoke_agent",
+        lambda s, p, **kw: sessions.append(s) or {"status": "completed", "text": "refused"},
+    )
+    for approval_id, created in (("appr-b", 30), ("appr-c", 10), ("appr-a", 20)):
+        _pending_row(common, approval_id, "approval", created, 1)
+    runner.sweep()
+    by_session = {common.get(a)["session_id"]: a for a in ("appr-a", "appr-b", "appr-c")}
+    assert [by_session[s] for s in sessions] == ["appr-c", "appr-a", "appr-b"]
+    assert {common.get(a)["status"] for a in by_session.values()} == {"EXPIRED"}
+
+
+def test_approver_queue_still_reads_newest_first(modules):
+    common, api, _, table = modules
+    now = int(time.time())
+    for approval_id, created in (("appr-old", now - 60), ("appr-new", now)):
+        _pending_row(common, approval_id, "approval", created, now + 1800)
+    out = api.handler(_event("GET /approvals", claims=APPROVER), None)
+    rows = json.loads(out["body"])["approvals"]
+    assert [row["approval_id"] for row in rows] == ["appr-new", "appr-old"]
+    assert table.queries[-1]["ScanIndexForward"] is False
