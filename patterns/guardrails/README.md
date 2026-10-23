@@ -1,10 +1,11 @@
 # Reusable decision pattern: check every tool call before it runs
 
 A Strands `InterventionHandler` that checks every tool call before it runs.
-Two deterministic pre-checks settle what they can. Strands Decider 2B scores
-every other call with two typed questions, and plain Python turns the answers
-into Proceed, Guide, Confirm or Deny. Copy `triage.py` into your own agent; it
-needs only `strands-agents` from PyPI and a running Decider server.
+Two deterministic pre-checks and a memory of refused calls settle what they
+can. Strands Decider 2B scores every call they do not settle with two typed
+questions, and plain Python turns the answers into Proceed, Guide, Confirm or
+Deny. Copy `triage.py` into your own agent; it needs only `strands-agents`
+from PyPI and a running Decider server.
 
 The agent pauses for a person before a risky call runs, instead of someone
 cleaning up after it.
@@ -43,14 +44,16 @@ Exact repeats of refused calls are denied outright. The model never sees a
 score: Deny and Guide texts are neutral, and a denied pause reads "a person
 declined this call".
 
-## The tour, about two minutes from a clean install
+## The tour: about two minutes on a clean CI runner
 
 Before you start:
 
 - A machine that fits the 2B model in fp32 on CPU. We run an EC2 t3.xlarge
   (4 vCPU, 16 GB RAM); a t3.large (2 vCPU, 8 GB) was OOM-killed while loading
   the model.
-- Python 3.11 in a fresh virtual environment, as in the CI job.
+- Python 3.10 to 3.13: `torch==2.7.1` has no CPU wheel for 3.14. The CI job
+  runs the tour on 3.11, with no virtual environment. If you use one,
+  activate it in both terminals, since the server runs in the second.
 - Network access for the first serve: it downloads the model from Hugging
   Face once.
 - No AWS account. The tour needs none.
@@ -98,8 +101,9 @@ tour: proceed guide confirm deny in 37.6 s
 ```
 
 The last line must read `tour: proceed guide confirm deny`; the seconds vary
-by machine. In that run the whole job took about 2 minutes on a clean
-container: install 38 s, model download and serve 40 s, tour 39 s. The
+by machine. In that run the whole job took about 2 minutes on a fresh
+GitHub-hosted runner: install 38 s, model download and serve 40 s, the tour
+step 39 s (the tour's own clock: 37.6 s). The
 [pattern-tour](../../.github/workflows/pattern-tour.yml) workflow runs the
 same pinned install and fails unless that closing line appears.
 
@@ -135,8 +139,11 @@ decides": nothing runs on a guess, and nothing runs without a person.
   take over. Our line, 0.70, is a chosen operating point on 50 labeled tool
   calls. At 0.70 all 12 accepted fit cases were right, but only 9 of them
   reach Decider under the shipped routing, one short of our rule's own
-  minimum of 10. The repo README's Threshold section has the full
-  calibration.
+  minimum of 10. Applied to the 30 fit cases Decider scores, the rule finds
+  no qualifying line and falls back to 0.9. On our 128-case suite the
+  pre-registered dev rule in `scripts/analyze_threshold.py` would lock 0.95.
+  The comment above `DEFAULT_THRESHOLD` in `src/lachesis/policy.py` has the
+  full calibration.
 - Keep `Confirm` for the calls a person must see and `Deny` for the ones that
   must never run. A triage that denies when unsure takes the human out of a
   decision the human should make.
@@ -146,4 +153,5 @@ decides": nothing runs on a guess, and nothing runs without a person.
 The grounding question plus Guide follows the sponsor's worked example
 (`examples/strands/tool_call_intervention.py` in strands-decider). The
 five-class risk question, the Confirm and Deny split with the human pause, and
-the threshold measured on our own traffic are this pattern's own.
+the 0.70 operating point, chosen on our own 50 labeled calls, are this
+pattern's own.

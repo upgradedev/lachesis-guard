@@ -40,6 +40,11 @@ from typing import Any
 # right. Under the shipped routing only 9 of those 12 fit cases reach Decider
 # (3 are tier-0 reads), one short of the rule's own minimum of 10
 # (lachesis.evaluate), so the rule did not force 0.70: it was chosen.
+# Applied to the 30 fit cases Decider scores, the rule finds no qualifying
+# line and falls back to 0.9 (lachesis.evaluate.suggest_threshold over the
+# layer "decider" rows of evaluation/gpu_threshold_2026-10-13.jsonl). On the
+# 128-case suite the pre-registered dev rule in scripts/analyze_threshold.py
+# would lock 0.95.
 # With all 50 asked, Decider chose the wrong risk class 11 times, every time
 # below 0.70 (highest 0.67). Under the shipped routing 5 file reads skip
 # Decider: of the 45 it scores, 10 were wrong and all 10 paused. The 11th,

@@ -6,6 +6,9 @@ that proposes one tool call, and a tool body that counts how often it ran.
 Decider is scripted too, so these tests prove the wiring and the policy
 mapping inside the SDK, not the model's judgement. The live model is proved
 by ``tests/integration/test_handler_live.py`` and the pattern tour.
+
+Seen to fail: with ``interventions=[]`` in place of the handler, 4 of the 5
+tests fail and only the benign control passes (checked 2026-10-23).
 """
 
 from __future__ import annotations

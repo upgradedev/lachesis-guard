@@ -3,7 +3,9 @@
 Drop this one file into your own Strands agent (it needs only ``strands-agents``
 from PyPI and a running Decider server) and every proposed tool call is checked
 before it executes. Two deterministic pre-checks settle what they can (safe
-reads proceed, secret-shaped arguments pause); Decider scores every other call:
+reads proceed, secret-shaped arguments pause). A resumed pause and an exact
+repeat of a refused call are settled without the model too. Decider scores
+every call these do not settle:
 
 - benign, grounded, confident -> Proceed: the call runs.
 - not grounded -> Guide: the model asks the user instead of guessing.
@@ -213,7 +215,8 @@ DEFAULT_THRESHOLD = 0.7
 """Below this confidence a person decides. A chosen operating point on our own
 50-case fixture (run 38421303470: 12 fit cases accepted, 12 right at 0.7, but
 only 9 of them reach Decider under the shipped routing, one short of the
-rule's minimum of 10); measure your own traffic before you trust it."""
+rule's minimum of 10; on the 30 fit cases Decider scores, the rule falls back
+to 0.9). Measure your own traffic before you trust it."""
 
 CONFIRM_CLASSES = frozenset({"destructive_write", "untrusted_to_action", "confused_deputy"})
 """Risk classes that pause for a person when confident."""

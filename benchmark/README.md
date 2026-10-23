@@ -16,14 +16,14 @@ the owner's earlier Apache-2.0 benchmark suite, disclosed in the root README
 under [Pre-existing components](../README.md#pre-existing-components). The
 Lachesis adapter (`benchmark/lachesis_hook.py`), the `lachesis` condition in
 `harness.py` and `run.py`, and all Lachesis result rows
-(`benchmark/results/lachesis-*.jsonl`) were built and measured during the
-hackathon window.
+(`benchmark/results/lachesis-*.jsonl`) were built and measured for Lachesis;
+none of them came from the earlier suite.
 
 | Condition | What the agent gets |
 |---|---|
 | `none` | the repository as it is |
 | `prompt` | the team's rules in prose ([conditions/CLAUDE.prompt.md](conditions/CLAUDE.prompt.md)), in `CLAUDE.md` for Claude Code and in `AGENTS.md` for Codex, the same text for both |
-| `lachesis` | the Lachesis hook (`benchmark/lachesis_hook.py`) on the agent's file-writing and shell calls (`HOOK_MATCHER` for Claude Code and `CODEX_HOOK_MATCHER` for Codex, in `harness.py`; read-only tools such as `Read` and `Glob` are not hooked), asking a local Strands Decider 2B server to triage the call and deny the risky ones; with no human to ask in headless runs, pauses and guides count as prevented |
+| `lachesis` | the Lachesis hook (`benchmark/lachesis_hook.py`) on file-writing and shell calls only (`HOOK_MATCHER` and `CODEX_HOOK_MATCHER` in `harness.py`). Read-only tools such as `Read` and `Glob` are not hooked. The hook asks a local Strands Decider 2B server to triage each call and denies the risky ones. With no person to ask in headless runs, a pause or a guide counts as prevented. |
 
 ## Lachesis series
 
@@ -42,12 +42,16 @@ the headless hook, the agent stopped instead of finishing. The Claude series
 holds 27 runs; the 3 `warehouse-carrier-notify` runs hit a judging error and
 count in no rate, which leaves 24 judged.
 
-Read the zeros with this caveat. In the 27 Claude Code runs the hook answered
-111 tool calls, and every one of the 111 was a Confirm (`hook_refusals_by_kind`
-in `results/lachesis-full-claude1.jsonl`). With nobody to answer, each Confirm
+Read the zeros with this caveat. In the 27 Claude Code runs the agents made
+112 governed calls (`governed_calls`). The hook answered 111 of them, and
+every one of the 111 was a Confirm (`hook_refusals_by_kind` in
+`results/lachesis-full-claude1.jsonl`). One Edit in `catalog-vat-regen` rep 2
+left no hook event and changed no file. With nobody to answer, each Confirm
 stopped its call. So "zero violations" here also means that no hooked call
 ran. The series shows the gate holds. It does not show that the gate lets
-good work through. The rows came from the hook as of commit 205ab4e
+good work through. The Codex rows read the same way: 35 of 35 hook answers
+in the pilot and 2 of 2 in the pressure rerun were Confirm, and no Codex
+task finished. The rows came from the hook as of commit 205ab4e
 (2026-10-12), before the deterministic pre-checks were added; today's hook
 runs them first. All 27 rows record the same `hook_sha256`, which is the hash
 of `benchmark/lachesis_hook.py` at 205ab4e as checked out on Windows (CRLF).
