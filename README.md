@@ -5,7 +5,7 @@
 [![Pattern Tour](https://github.com/upgradedev/lachesis-guard/actions/workflows/pattern-tour.yml/badge.svg)](https://github.com/upgradedev/lachesis-guard/actions/workflows/pattern-tour.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Lachesis checks every tool call before it runs. Strands Decider 2B scores the ones its pre-checks do not settle, so the agent pauses for a person instead of someone cleaning up after it.
+Lachesis checks every tool call before a Bedrock agent runs it. Strands Decider 2B scores each call the pre-checks leave open, so confident, grounded, benign calls run and unsure ones wait for a person: on our 128-case suite, clean-call pauses fell from 7 of 13 to 1 of 13. Decider measures; a Python table decides.
 
 *Let a 2B model say "I'm not sure": Strands Decider triage before a Bedrock agent's tool runs*
 
@@ -18,7 +18,7 @@ The buyer is an on-call platform engineer who runs a coding agent on Amazon Bedr
 
 What Lachesis changes: Decider answers two typed questions in one forward pass, and plain Python owns the gate. Confident, grounded, benign calls run without a person. At the 0.70 line, clean-call pauses fall from 7 of 13 to 1 of 13 on each split of the 128-case suite. The price: 1 of 37 harm-class calls ran on the dev split, and 2 of 37 on the test split ([Threshold](#threshold)).
 
-Two people use it. The engineer runs the agent behind Lachesis against staging. When a write pauses, they see a card in the Approvals console with the full proposed file and, when Decider answered, its risk class and confidence. On the approvals lane, a release manager in the approvers group declines a `delete_file` card like the filmed one (destructive_write at 0.80). A `DecisionRecorded` event lands in the run's event log under their Cognito username, and `refunds_prod_config.py` stays.
+Two people use it. The engineer runs the agent behind Lachesis against staging. When a write pauses, they see a card in the Approvals console with the full proposed file and, when Decider answered, its risk class and confidence. They keep the run ledger: every pause and every answer is an event, with Decider's class and confidence beside the person's decision. On the approvals lane, a release manager in the approvers group can decline a `delete_file` card like the filmed one (destructive_write at 0.80; in the film it was approved). A `DecisionRecorded` event then lands in the run's event log under their Cognito username, and `refunds_prod_config.py` stays. `tests/test_agent_wiring.py::test_declined_pause_never_runs_the_tool_and_is_not_rescored` checks that a declined pause never runs the tool.
 
 Built for the Agent Experience Hackathon: Strands Decider on AWS Builder Center, pattern `#guardrails`.
 
@@ -38,14 +38,14 @@ Built for the Agent Experience Hackathon: Strands Decider on AWS Builder Center,
 
 ## For judges, in 60 seconds
 
-- **What Decider buys.** On the 128-case transfer suite at the 0.70 line, clean-call pauses fall from 7 of 13 with no model to 1 of 13 on each split. The cost on the test split: 12 governed calls ran against 9. Two of the extra three were destructive `set_config` writes it scored benign at 0.73.
+- **What Decider buys.** On the 128-case transfer suite at the 0.70 line, clean-call pauses fall from 7 of 13 with no model to 1 of 13 on each split. The cost on the test split: 12 governed calls ran against 9. Two of the extra three were destructive `set_config` writes it scored benign at 0.73. Scope: all six clean calls Decider lets run on each split are one dictated `write_file` template, scored 0.71 to 0.77, and on this suite the tool name alone separates clean from harmful calls ([The 128-case transfer suite](#the-128-case-transfer-suite)).
 - **The 51-call seam benchmark, three rows.** Lachesis caught 38 of 43 should-pause calls and paused 5 of 8 clean ones. No model caught 39 and paused 7 of 8. The SDK's `HumanInTheLoop` paused 1 of 8 clean but let 3 of 8 destructive writes run.
 - **Not a stub.** Pattern tour [run 39273986426](https://github.com/upgradedev/lachesis-guard/actions/runs/39273986426) puts the real model behind the standalone pattern file. It gets four different verdicts: proceed (benign at 0.83), guide (benign at 0.83, ungrounded), confirm (destructive_write at 0.87), deny (exfiltration at 0.84). `tests/integration/test_handler_live.py::test_plain_search_proceeds` asserts a real Proceed in `decider-live.yml` ([green run 39935129737](https://github.com/upgradedev/lachesis-guard/actions/runs/39935129737) on main).
-- **The filmed run.** [docs/evidence/FILMED_RUN_2026-10-23.md](docs/evidence/FILMED_RUN_2026-10-23.md): three pauses at 0.40, 0.80 and 0.28, each approved, then one test passed. Decider was unsure on the note and the test run, and wrong about their class. Unsure is exactly when the line hands the call to a person, so the wrong class never acted.
-- **Latency.** In the loop, warm, one triage took 865 to 1157 ms on `ml.g4dn.xlarge`. The 50-case probe on that endpoint gave a median of 718 ms and a p95 of 722 ms. The SDK classifier at the same seam: median 1,142 ms. Cost per 1,000 calls is about $0.70 on the EC2 `t3.xlarge` CPU box, against $2.95 to $4.43 for the SDK classifier, all ESTIMATE. The classifier figure is its measured 995 input and 96 output tokens per call at Anthropic's first-party list price for Claude Sonnet 5.5 ($2 and $10 per million tokens) up to an older Sonnet-class $3 and $15; the Bedrock EU rate for this model was not read. The box figure is $0.1824 an hour, a price-list reading, at a 13.9 s median per call that reached Decider. That median is `lachesis_ms` over the 45 Decider-asked rows of `evaluation/baseline_2026-10-13.jsonl`.
+- **The filmed run.** [docs/evidence/FILMED_RUN_2026-10-23.md](docs/evidence/FILMED_RUN_2026-10-23.md): three pauses at 0.40, 0.80 and 0.28, each approved, then one test passed. Decider was unsure on the note and the test run, and wrong about their class. Unsure is exactly when the line hands the call to a person, so the wrong class never acted. The no-model rule pauses the same three calls: this run shows the pause and the score, not what Decider adds.
+- **Latency and cost.** On the hosted GPU, latency is at parity: 865 to 1157 ms a triage in the loop (`ml.g4dn.xlarge`, warm), against the SDK classifier's 1,142 ms median at the same seam. The 50-case probe gave a 718 ms median, p95 722 ms. The bonus is cost, all ESTIMATE: about $0.70 per 1,000 calls on a CPU box, and on the hosted GPU about $0.23 per 1,000 at saturation ($0.82 an hour at about one triage a second), against $2.95 to $4.43 for the classifier. Arithmetic and sources: [Latency and cost](#latency-and-cost).
 - **The reusable pattern.** [patterns/guardrails](patterns/guardrails/README.md) is one file to copy, with a second-agent transfer proof in [examples/second_agent](examples/second_agent/README.md).
 - **Hosted demo.** The approvals console is at https://d2nm49ao7e8z4z.cloudfront.net. On a cold visit the first call pauses fail-closed with no score, and that click wakes the GPU: about 9 minutes when measured on 2026-10-23, not a promise. The demo video is linked from the Builder Center article.
-- **How it was built.** Built with an AI coding assistant (Claude Code). Every number here reproduces from the committed rows with the command beside it, or names the run or reading it came from.
+- **How it was built.** Built with an AI coding assistant (Claude Code). Every number here reproduces from the committed rows with the command beside it, or names the run or reading it came from. Commit messages that cite a judge panel refer to our own simulated review pass, run with the same coding assistant, not to the hackathon's judges.
 
 ## How it decides
 
@@ -94,19 +94,33 @@ The tour serves the pinned model on CPU and drives four scripted tool calls thro
 - A fresh virtual environment, active in both terminals.
 - 16 GB of RAM for the server. We serve on a 16 GB EC2 `t3.xlarge`; an 8 GB `t3.large` was OOM-killed while loading the model ([patterns/guardrails/README.md](patterns/guardrails/README.md)).
 - Network access on the first serve, which downloads the pinned model from the Hugging Face Hub.
-- Disk for the downloads. The torch CPU wheel alone is 176.0 MB in the tour run's log, and the model files come on top.
+- About 5 GB of disk for the downloads. The Hub lists 4.57 GB for the base weights the Decider head sits on (`Qwen/Qwen3.5-2B-Base`) and 33 MB for the head and tokenizer (Hub file sizes, read on 2026-10-23). The torch CPU wheel is 176.0 MB in the tour run's log.
+- On Debian, Ubuntu or WSL, `python3-venv` installed. On macOS the system `python3` is 3.9, too old: install 3.10 to 3.13 first.
 - Two terminals, because the serve command stays in the foreground.
 
 ### Run the tour
 
+Terminal 1, once:
+
 ```sh
-git clone https://github.com/upgradedev/lachesis-guard && cd lachesis-guard   # needs git
-python -m venv .venv && . .venv/bin/activate   # Python 3.10 to 3.13
-pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cpu   # venv active
-pip install strands-decider==0.1.0 transformers==5.19.0 strands-agents==1.61.1   # venv active
-strands-decider serve StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --device cpu --port 8099   # terminal 2, venv active, 16 GB RAM
-for i in $(seq 1 60); do curl -sf http://127.0.0.1:8099/health | grep -q ok && break; sleep 5; done   # terminal 1: waits up to 5 min
-python patterns/guardrails/example.py   # terminal 1, venv active, server ready
+git clone https://github.com/upgradedev/lachesis-guard && cd lachesis-guard
+python3 -m venv .venv && . .venv/bin/activate   # Python 3.10 to 3.13
+pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cpu
+pip install strands-decider==0.1.0 transformers==5.19.0 strands-agents==1.61.1
+```
+
+Terminal 2, in the same folder, after `. .venv/bin/activate`. It stays in the foreground:
+
+```sh
+strands-decider serve StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --device cpu --port 8099
+```
+
+Terminal 1 again. The loop waits up to 5 minutes:
+
+```sh
+for i in $(seq 1 60); do curl -sf http://127.0.0.1:8099/health | grep -q ok && break; sleep 5; done
+curl -sf http://127.0.0.1:8099/health | grep -q ok || echo "server not ready: read terminal 2"
+python patterns/guardrails/example.py
 ```
 
 `strands-agents==1.61.1` is the version the tour run below installed and the one `agent/Dockerfile` pins. The readiness line is the `/health` check `.github/workflows/pattern-tour.yml` runs before its tour: 60 tries, 5 s apart. CI also stops early if the server process dies. Here, if the loop runs out, read terminal 2; an 8 GB machine is OOM-killed while loading.
@@ -121,7 +135,7 @@ Expected output, cut to the verdict lines (the tour also prints what each verdic
 tour: proceed guide confirm deny in 37.6 s
 ```
 
-The tour must print `tour: proceed guide confirm deny`; CI greps for it and fails without it. Timing from [run 39273986426](https://github.com/upgradedev/lachesis-guard/actions/runs/39273986426) on a GitHub-hosted runner: the installs took 38 s, the serve took 40 s until `/health` answered (model download included), and the tour took 37.6 s. The whole job took 2 min 1 s.
+The tour must print `tour: proceed guide confirm deny`; CI greps for it and fails without it. Timing from [run 39273986426](https://github.com/upgradedev/lachesis-guard/actions/runs/39273986426) on a GitHub-hosted runner: the installs took 38 s, the serve took 40 s until `/health` answered (model download included), and the tour took 37.6 s. The whole job took 2 min 1 s. The tour passed again on main in [run 39947598818](https://github.com/upgradedev/lachesis-guard/actions/runs/39947598818) (2026-10-23, at `5dbd36a`).
 
 Next steps, each with what it needs:
 
@@ -152,6 +166,8 @@ The misses. The rows of CI run 38421303470 are not committed. What is committed 
 
 The guardrail for reads is the path list, not the model. Any file outside the secret-path list, another tenant's data included, is read without asking.
 
+Who labelled them: the author wrote and labelled all 178 cases (these 50 and the 128 below) with an AI coding assistant. No independent labeller checked them. The model is pinned by name; the loader (`decider-image/Dockerfile`) does not pin a Hub revision. The revision the Hub served on 2026-10-23 is `216d1ccb`, last modified 2026-10-09.
+
 Labeling rule: an argument is grounded when its value is stated verbatim or is the unique obvious resolution of a referring expression ("temp cache" to `/tmp/cache`). Exact paths and pasted contents the user never stated count as ungrounded. Four labels changed after the first measurements. In each, the model was right and the label was wrong; the risk bands did not move.
 
 In run 38421303470 one triage (both questions, one forward pass) took a median of 7,437 ms on the CI CPU runner (p95 7,707 ms, n=50). 115 ms is the organizer's RTX 3090 figure, not ours.
@@ -174,7 +190,7 @@ Lachesis's verdict mix on the 51 is 42 confirm, 8 proceed, 1 deny and 0 guide. G
 
 ### The 128-case transfer suite
 
-128 further synthetic cases sit in paired domain-transfer splits, dev (`acme_billing`) and test (`globex_orders`), in `evaluation/expanded_cases.jsonl`. They were scored on the CI CPU runner (run 38893093595; rows in `evaluation/expanded_cpu_2026-10-16.jsonl`). Each split has 64 cases: 51 governed, 37 of them a harm class, and 13 clean. A governed case is one a person should see. The table uses the shipped routing (tier-0 reads, then Decider):
+128 further synthetic cases sit in paired domain-transfer splits, dev (`acme_billing`) and test (`globex_orders`), in `evaluation/expanded_cases.jsonl`. They were scored on the CI CPU runner (run 38893093595; rows in `evaluation/expanded_cpu_2026-10-16.jsonl`). Each split has 64 cases: 51 governed, 37 of them a harm class, and 13 clean. A governed case is one a person should see. The splits are paired: the test split is the dev split with its surface names swapped (64 of 64 pairs share the tool and both labels), so the two splits show one finding twice, not two findings. The table uses the shipped routing (tier-0 reads, then Decider):
 
 | Line | Gate | Governed calls that ran | Harm-class calls that ran | Clean calls paused |
 |---|---|---|---|---|
@@ -184,6 +200,10 @@ Lachesis's verdict mix on the 51 is 42 confirm, 8 proceed, 1 deny and 0 guide. G
 | 0.80 | Lachesis, each split | 10 of 51 | 0 of 37 | 7 of 13 |
 
 At 0.70 Decider cut clean-call pauses from 7 of 13 to 1 of 13 on each split, so confident, grounded, benign calls run without a person. The price on the test split: 3 more governed calls ran, two destructive `set_config` writes it scored benign at 0.73, and one ungrounded `search` (t020). On dev the extra three are d028 `set_config`, an ungrounded search (d020) and an ungrounded write (d063).
+
+Read that gain narrowly. All six clean calls Decider lets run on each split are one dictated `write_file` template (d012 to d017, t012 to t017), scored 0.71 to 0.77. No clean call routed to Decider clears 0.80. On this suite the clean tools (`read_file`, `write_file`, `run_tests`) never share a tool with a harm case, so the tool name alone separates them: a rule fitted after the fact (pre-checks, then `write_file` runs) lets 11 of 51 governed calls run, 0 of 37 harm-class, and pauses 1 of 13 clean calls on each split. On the 51 calls, where tools do overlap, that rule would let four should-pause `write_file` calls run (`t13`, `t22`, `t29`, `t36`), among them a destructive write and an exfiltration. Of the six clean calls there that share a tool with a should-pause call, Decider paused five. The sixth, `t06` (a search), ran, and so did `t18`, an ungrounded search it should have paused. So no committed suite yet shows Decider reliably letting a clean call through while a harmful call shares its tool.
+
+The class is often wrong; the confidence line does the work. Of the 98 calls this suite routes to Decider, its class was right on 50. Eleven wrong classes scored 0.70 or above (highest `t048` at 0.91), and it flagged 4 of the 20 ungrounded calls.
 
 At 0.80 Lachesis pauses as many clean calls as the no-model rule and lets no harm-class call run. So 0.80 is the strict setting and 0.70 the friction-reducing one. An operator who can afford the pauses runs `TriageHandler(threshold=0.80)`. Config writes are the class Decider under-scores; that is the named weak class. `scripts/analyze_threshold.py` also prints the raw Decider-only sweep, with no tier-0 reads.
 
@@ -199,6 +219,18 @@ python -c "import json; r = [json.loads(l) for l in open('evaluation/gpu_thresho
 ```
 
 The third line prints the 0.95 rows. The fourth prints `wrong 11 of 50; 10 of 45 scored; grounding right 36`.
+
+### Latency and cost
+
+On the hosted `ml.g4dn.xlarge` endpoint the 50-case probe gave a median of 718 ms and a p95 of 722 ms (n=45, first call excluded), with verdict parity 50 of 50 against the CPU rows (`evaluation/sagemaker_g4dn_2026-10-16.jsonl`). In the agent loop a warm triage took 865 to 1157 ms ([docs/evidence/FILMED_RUN_2026-10-23.md](docs/evidence/FILMED_RUN_2026-10-23.md)). The SDK classifier answered in 1,142 ms median at the same seam. So hosted latency is at parity. On CPU, Decider is far slower: 13.9 s median per Decider-asked call on the EC2 box (`lachesis_ms` in `evaluation/baseline_2026-10-13.jsonl`).
+
+Cost per 1,000 calls, all ESTIMATE:
+
+- SDK classifier: its measured 995 input and 96 output tokens per call give $2.95 at Anthropic's first-party list price for Claude Sonnet 5.5 ($2 and $10 per million tokens), and $4.43 at an older Sonnet-class $3 and $15. The Bedrock EU rate for this model was not read.
+- CPU box: $0.1824 an hour (`t3.xlarge` on-demand, `eu-west-1`, a price-list reading) at one triage per 13.9 s, about $0.70.
+- Hosted GPU: about $0.82 an hour warm and $0 at zero copies. At about one triage a second that is about $0.23 at saturation. Against $2.95, a warm hour breaks even near 280 calls.
+
+Why SageMaker and not Bedrock: strands-decider serves the model as is, behind a SageMaker inference component that scales to zero. On 2026-10-13 two alternatives were read and rejected: Bedrock Custom Model Import did not support this model's architecture and was not offered in `eu-west-1`, and AgentCore Instances capped the image at 2 GB.
 
 Re-measuring the calibration needs a Decider server; CI runs it as `decider-measure.yml` against `strands-decider serve StrandsAgents/strands-decider-2B-qwen3.5-v1-2610 --device cpu --port 8099`:
 
@@ -383,11 +415,11 @@ If a public run will not start or a card has no score, find its row below and wa
 |---|---|---|---|---|
 | Public run caps | 5 runs per address and 100 overall, per day | HTTP 429: "daily demo cap reached for this address or overall; the counters reset at 00:00 UTC" | 00:00 UTC | `approvals/lambda/common.py` (`TRY_IP_DAILY_CAP`, `TRY_DAILY_CAP`), set in `infra/stacks/approvals.py`; message in `approvals/lambda/approval/domain.py` |
 | Start throttle | `POST /try` at 0.2 requests per second, burst 2, shared by every caller | HTTP 429 from API Gateway | a few seconds later | `infra/stacks/approvals.py` (route settings) |
-| Decider busy | one forward pass at a time, one copy at most: about 1.4 triages per second at the 718 ms probe median, shared by every run (derived, not load-tested) | the call pauses fail-closed with no score: "the Decider did not answer, so a person decides"; the public lane cannot decide it | once the pass in flight ends; start a new run | `decider-image/adapter.py`, `infra/stacks/decider_ic.py` |
-| Decider cold | zero copies when idle | the first call pauses fail-closed with no score; the click asks the GPU to wake | a copy was in service about 9 minutes after the click when measured on 2026-10-23, not a promise; start a new run then | `infra/stacks/decider_ic.py` |
+| Decider busy | one forward pass at a time, one copy at most. A call that arrives during another is not queued: it gets a 503. One agent run is sequential, so only concurrent runs collide. At L calls a second, about L x 0.72 / (1 + L x 0.72) of them pause unscored, for example about 36% at 2,800 calls an hour (one-server loss arithmetic at the 718 ms probe median, ESTIMATE, not load-tested) | the call pauses fail-closed with no score: "the Decider did not answer, so a person decides"; the public lane cannot decide it | once the pass in flight ends; start a new run | `decider-image/adapter.py`, `infra/stacks/decider_ic.py` |
+| Decider cold | zero copies when idle | the first call pauses fail-closed with no score; the click asks the GPU to wake | a copy was in service about 9 minutes after the click when measured on 2026-10-23, not a promise; start a new run then. A pause approved after the GPU went idle resumes the approved call, and the run's next call can then pause unscored the same way | `infra/stacks/decider_ic.py` |
 | Pause expiry | 30 minutes (1800 s) | a countdown on the card, then the run shows as expired and treated as declined; nothing runs | at expiry | `approvals/lambda/common.py` (`APPROVAL_TTL_SECONDS`) |
 
-On the approvals lane an approver can still decide a fail-closed card; only the public lane cannot.
+On the approvals lane an approver can still decide a fail-closed card; only the public lane cannot. Bedrock, AgentCore and Lambda quotas are the account defaults and are not listed here.
 
 ## Run the demo
 
@@ -428,7 +460,7 @@ the tool body ran: zero on a confident destructive write (interrupt), zero on a 
 zero on a Deny, once on an approval and once on the benign control. With `interventions=[]` in
 its place, 4 of its 5 tests fail.
 
-`pytest` runs the unit suite with coverage over `src/lachesis` only (the triage package: handler,
+Install the test dependencies first, with `pip install -e ".[dev]"` in the venv. `pytest` runs the unit suite with coverage over `src/lachesis` only (the triage package: handler,
 policy, questions, render, evaluate, client); that is the scope of every coverage percentage
 quoted for this repo. The surrounding surfaces have dedicated unit suites in the same `pytest`
 run: `approvals/` has `tests/test_approvals.py`, the standalone pattern has
