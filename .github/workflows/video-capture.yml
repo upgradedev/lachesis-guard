@@ -1,0 +1,54 @@
+name: video-capture
+
+# Records the submission video's browser journey through the live console
+# (video/capture.mjs): one real public-lane demo run, every pause approved,
+# then the policy, metrics and architecture views. It runs only on a push to
+# a video/ branch, so it never fires on main or on a pull request, and the
+# Decider GPU must already be warm when it is pushed, or the capture stops
+# with "the pause carries no Decider score". It spends one of the five
+# public demo runs of this runner's address.
+
+on:
+  push:
+    branches: ["video/**"]
+    paths: ["video/capture.mjs", ".github/workflows/video-capture.yml", "video/capture.trigger"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: video-capture
+  cancel-in-progress: false
+
+jobs:
+  capture:
+    if: github.repository == 'upgradedev/lachesis-guard'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install Playwright and Chromium
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/cap && cd /tmp/cap
+          npm init -y > /dev/null
+          npm install --no-audit --no-fund @playwright/test@1.48.2
+          npx playwright install --with-deps chromium
+      - name: Capture the live journey
+        env:
+          LACHESIS_EXPECT_BUILD: ff75eb4
+          CAPTURE_DIR: ${{ github.workspace }}/capture
+          NODE_PATH: /tmp/cap/node_modules
+        run: |
+          set -euo pipefail
+          cp video/capture.mjs /tmp/cap/capture.mjs
+          cd /tmp/cap && node capture.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: video-capture
+          path: capture/
+          retention-days: 7
