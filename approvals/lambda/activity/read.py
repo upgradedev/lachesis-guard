@@ -1,0 +1,208 @@
+"""The read model of the Activity context: what the project routes answer.
+
+Two lanes, decided per repository at read time from the ``private``
+flag the ingest last stored for it (a repository that becomes public
+shows its details from the next ingest on, one that becomes private
+hides them). A repository with no stored flag yet counts as private.
+
+- The anonymous lane (GET /projects, GET /projects/{key}/activity): a
+  public repository shows its name, last activity time, counts and
+  commits. A private repository, or one whose flag is not known (never
+  read, or GitHub refused the last read), shows only that it exists and
+  its visibility, and adds its counts and verdict mix to its project's:
+  no repository name, no last activity time, no commit, sha, path,
+  login, git name, subject line or finding reason. Even for a public
+  repository, a secret_in_added_line finding shows its rule and a fixed
+  reason, not its path or the kind of secret, so the page is no index of
+  leaked credentials; the approver lane shows both.
+- The approver lane (GET /approvals/projects, GET
+  /approvals/projects/{key}/activity, JWT): every repository in full.
+
+The page of recent commits (``recent``) holds only commits not dated in
+the future (store.dated_ceiling), so forged committer dates never push a
+real commit off it. Commits dated in the future are listed apart
+(``dated_in_future``, at most FUTURE_SHOWN, the nearest first, with
+``dated_in_future_truncated`` when more are stored), on the same lanes
+and with the same redaction.
+
+A commit lists at most FINDINGS_SHOWN findings, with finding_count and
+findings_truncated for the rest, and never its file list (files_changed
+is the count): each row read is projected to COMMIT_FIELDS, so a page of
+large commits stays small. No lane ever shows an address: none is
+stored. Scan findings are the
+deterministic scan's (scan_label says so); nothing here is a Decider
+score. Every count is read from the repository row, where the ingest
+stored it at ``counted_at``; this module adds counts up and never
+invents one.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from activity import domain, registry, scan
+from activity import store as activity_store
+
+RECENT_PER_REPO = 50
+RECENT_TOTAL = 50
+FUTURE_SHOWN = 5
+FINDINGS_SHOWN = 20
+WINDOW_DAYS = activity_store.TTL_DAYS
+
+COMMIT_FIELDS = (
+    "repo", "sha", "committed_at", "actor_login", "actor_name", "actor_kind",
+    "co_author_agents", "subject", "files_changed", "files_truncated",
+    "findings", "finding_count", "scan_verdict", "future_dated",
+)
+FINDING_FIELDS = ("rule", "path", "reason")
+SECRET_REASON_PUBLIC = "an added line holds secret-shaped text (approvers see where)"
+
+
+def visibility_of(meta: dict[str, Any] | None) -> str:
+    flag = (meta or {}).get("private")
+    if flag is False:
+        return "public"
+    return "private" if flag is True else "unknown"
+
+
+def _shown(meta: dict[str, Any] | None, approver: bool) -> bool:
+    return approver or visibility_of(meta) == "public"
+
+
+def _int(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
+def _counts(metas: list[dict[str, Any] | None]) -> dict[str, Any]:
+    by_kind = dict.fromkeys(domain.ACTOR_KINDS, 0)
+    by_verdict = dict.fromkeys(scan.VERDICTS, 0)
+    commits = flagged = 0
+    truncated = False
+    counted = []
+    for meta in metas:
+        meta = meta or {}
+        if not meta.get("counted_at"):
+            continue
+        counted.append(str(meta["counted_at"]))
+        commits += _int(meta.get("commits"))
+        flagged += _int(meta.get("flagged_changes"))
+        truncated = truncated or meta.get("counts_truncated") is True
+        for source, target in ((meta.get("by_actor_kind"), by_kind),
+                               (meta.get("by_scan_verdict"), by_verdict)):
+            if isinstance(source, dict):
+                for key in target:
+                    target[key] += _int(source.get(key))
+    return {
+        "commits": commits,
+        "by_actor_kind": by_kind,
+        "by_scan_verdict": by_verdict,
+        "flagged_changes": flagged,
+        "counts_truncated": truncated,
+        "counted_at": min(counted) if counted else "",
+    }
+
+
+def _project_visibility(visibilities: list[str]) -> str:
+    """public, private, mixed, or unknown when no repository was read yet."""
+    if all(v == "public" for v in visibilities):
+        return "public"
+    if all(v == "unknown" for v in visibilities):
+        return "unknown"
+    if all(v != "public" for v in visibilities):
+        return "private"
+    return "mixed"
+
+
+def project_summary(
+    project: registry.Project, store: activity_store.ActivityStore, approver: bool
+) -> dict[str, Any]:
+    metas = [store.get_meta(project.project_repo(repo)) for repo in project.repos]
+    repos, last = [], ""
+    for repo, meta in zip(project.repos, metas, strict=True):
+        shown = _shown(meta, approver)
+        entry = {"repo": repo if shown else "", "visibility": visibility_of(meta)}
+        if shown:
+            entry["last_activity_at"] = str((meta or {}).get("last_activity_at") or "")
+            entry["ingest_status"] = str((meta or {}).get("status") or "")
+            entry["stalled_runs"] = _int((meta or {}).get("stalled_runs"))
+            last = max(last, entry["last_activity_at"])
+        repos.append(entry)
+    return {
+        "key": project.key,
+        "name": project.name,
+        "repos": repos,
+        "visibility": _project_visibility([entry["visibility"] for entry in repos]),
+        "last_activity_at": last,
+        **_counts(metas),
+    }
+
+
+def projects_view(
+    projects: tuple[registry.Project, ...],
+    store: activity_store.ActivityStore,
+    approver: bool,
+) -> dict[str, Any]:
+    return {
+        "lane": "approver" if approver else "public",
+        "window_days": WINDOW_DAYS,
+        "scan_label": scan.LABEL,
+        "projects": [project_summary(project, store, approver) for project in projects],
+    }
+
+
+def _finding(entry: dict[str, Any], approver: bool) -> dict[str, str]:
+    finding = {key: str(entry.get(key, "")) for key in FINDING_FIELDS}
+    if not approver and finding["rule"] == scan.SECRET_IN_ADDED_LINE:
+        finding.update(path="", reason=SECRET_REASON_PUBLIC)
+    return finding
+
+
+def _commit(row: dict[str, Any], approver: bool) -> dict[str, Any]:
+    view = {key: row[key] for key in COMMIT_FIELDS if key in row}
+    findings = [entry for entry in row.get("findings") or [] if isinstance(entry, dict)]
+    view["findings"] = [_finding(entry, approver) for entry in findings[:FINDINGS_SHOWN]]
+    view["finding_count"] = max(_int(row.get("finding_count")), len(findings))
+    view["findings_truncated"] = view["finding_count"] > len(view["findings"])
+    view["future_dated"] = row.get("future_dated") is True
+    view["co_author_agents"] = [
+        str(name) for name in row.get("co_author_agents") or [] if name in domain.AGENT_NAMES
+    ]
+    return view
+
+
+def activity_view(
+    project: registry.Project,
+    store: activity_store.ActivityStore,
+    approver: bool,
+    now: float,
+) -> dict[str, Any]:
+    summary = project_summary(project, store, approver)
+    commits: list[dict[str, Any]] = []
+    future: list[dict[str, Any]] = []
+    hidden = 0
+    for repo in project.repos:
+        project_repo = project.project_repo(repo)
+        if not _shown(store.get_meta(project_repo), approver):
+            hidden += 1
+            continue
+        rows = store.recent(project_repo, now, RECENT_PER_REPO, COMMIT_FIELDS)
+        commits.extend(_commit(row, approver) for row in rows)
+        # One more than shown, so "more are stored" is known, not guessed.
+        rows = store.future(project_repo, now, FUTURE_SHOWN + 1, COMMIT_FIELDS)
+        future.extend(_commit(row, approver) for row in rows)
+
+    def order(commit: dict[str, Any]) -> tuple[str, str]:
+        return str(commit.get("committed_at", "")), str(commit.get("sha", ""))
+
+    commits.sort(key=order, reverse=True)
+    future.sort(key=order)
+    return {
+        **summary,
+        "lane": "approver" if approver else "public",
+        "window_days": WINDOW_DAYS,
+        "scan_label": scan.LABEL,
+        "hidden_repos": hidden,
+        "recent": commits[:RECENT_TOTAL],
+        "dated_in_future": future[:FUTURE_SHOWN],
+        "dated_in_future_truncated": len(future) > FUTURE_SHOWN,
+    }

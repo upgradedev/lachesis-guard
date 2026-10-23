@@ -455,11 +455,12 @@ function viewQueue() {
       return;
     }
     $("#queue-msg").textContent = ""; $("#queue-checked").textContent = "Last checked " + hhmmss(Date.now()) + " UTC";
-    const rows = (out.body.approvals || []).slice().sort((a, b) => (a.created_ts || 0) - (b.created_ts || 0));
+    const rows = (out.body.approvals || []).slice().sort((a, b) => String(a.project || "Demo").localeCompare(String(b.project || "Demo")) || (a.created_ts || 0) - (b.created_ts || 0));
     const badge = $("#queue-badge"); if (badge) { badge.hidden = rows.length === 0; badge.textContent = String(rows.length); }
     $("#queue-empty").hidden = rows.length > 0; $("#queue-table").hidden = rows.length === 0;
     const body = $("#queue-table tbody"); body.textContent = "";
-    rows.forEach(v => {
+    let grp = new Set(rows.map(v => v.project || "Demo")).size > 1 ? null : (rows[0] || {}).project || "Demo"; // B7a: project headers only when the rows span projects
+    rows.forEach(v => { if ((v.project || "Demo") !== grp) { grp = v.project || "Demo"; body.append(h("tr", { class: "grp" }, h("th", { colspan: "6", scope: "colgroup", text: "Project: " + grp }))); }
       const c = v.card || {}, p = parseReason(c.reason || ""), t = targetOf(p.args), exp = expiry(v), made = Date.parse(c.created_at) || (v.created_ts || 0) * 1000;
       body.append(h("tr", {}, h("td", { "data-label": "Waiting", text: made ? age(made) : "" }),
         h("td", { "data-label": "Tool \u00B7 target" }, h("a", { href: "#/a/" + encodeURIComponent(v.approval_id), text: (c.tool || "tool") + (t ? " \u00B7 " + t : "") })),
@@ -480,6 +481,24 @@ $("#queue-start").addEventListener("click", async () => {
   btn.disabled = false; $("#queue-msg").textContent = out.status === 202 ? "Started run " + out.body.approval_id + ". Paused calls appear in the queue." : errText(out);
 });
 
+// ---- B7a: Projects. The anonymous lane (GET /projects) is the default, also when signed in; the approver lane (/approvals/projects) is an explicit choice and falls back to the anonymous one on a 401 or 403. Every count is the backend's; a flag is the deterministic scan's, never a Decider score. ----
+const mix = o => Object.entries(o || {}).map(([k, n]) => n + " " + k).join(" · "), utc = s => s ? String(s).replace("T", " ").replace("Z", " UTC") : ""; let projPriv = false;
+function viewProjects(key) {
+  const g = gen, box = $("#projects-body"), led = $("#project-activity"), msg = $("#projects-msg"), want = !!auth.token && projPriv, get = path => api((want ? "/approvals/projects" : "/projects") + path).then(out => want && (out.status === 401 || out.status === 403) ? api("/projects" + path).then(o => Object.assign(o, { fell: out.status })) : out);
+  if (!auth.token) projPriv = false; $("#projects-lane").hidden = !auth.token; $("#projects-private").checked = want; box.textContent = ""; led.hidden = true; led.textContent = ""; msg.className = "muted"; msg.textContent = "Loading projects...";
+  get("").then(out => { if (g !== gen) return; const b = out.body || {}, sub = t => h("span", { class: "tile-sub", text: t }); msg.className = b.lane === "approver" ? "lane-warn" : "muted";
+    msg.textContent = out.status !== 200 ? errText(out) : (out.fell ? (out.fell === 403 ? "This account is not in the approvers group" : "The session ended") + ", so this is the public view. " : "") + "Commits of the last " + b.window_days + " days. " + (b.lane === "approver" ? "Approver view: includes private repositories. Do not record or share this screen." : "Public view: a private repository shows counts only.");
+    (b.projects || []).forEach(p => box.append(h("a", { class: "tile", href: "#/projects/" + encodeURIComponent(p.key), "aria-current": p.key === key ? "page" : null }, h("span", { class: "tile-k", text: p.name + " · " + p.visibility }),
+      h("strong", { class: "tile-v", text: p.flagged_changes + " scan findings" + (p.counts_truncated ? " (count cut)" : "") }), sub(p.repos.map(r => r.repo ? r.repo + " (" + r.visibility + (b.lane === "approver" ? ", ingest " + (r.ingest_status || "not run yet") + (r.stalled_runs ? ", stalled " + r.stalled_runs + (r.stalled_runs === 1 ? " run" : " runs") : "") : "") + ")" : r.visibility === "unknown" ? "repository visibility not known" : "private repository").join(", ")),
+      ["Last activity: " + (utc(p.last_activity_at) || "none shown") + " · " + p.commits + " commits", "Actors (by trailer): " + mix(p.by_actor_kind), "Commits by deterministic scan: " + mix(p.by_scan_verdict)].map(t => sub(t + (p.counts_truncated ? " (count cut)" : "")))))); });
+  if (key) get("/" + encodeURIComponent(key) + "/activity").then(out => { if (g !== gen) return; led.hidden = false; led.textContent = ""; const b = out.body || {}, rows = b.recent || [], later = b.dated_in_future || []; if (out.status !== 200) { led.append(h("p", { class: "err", text: out.status === 404 ? "No project matches this link." : errText(out) })); return; }
+    const table = list => h("table", { class: "table" }, h("thead", {}, h("tr", {}, ["Time", "Actor", "Co-author agent", "Files changed", "Flagged changes"].map(t => h("th", { scope: "col", text: t })))), h("tbody", {}, list.map(c => h("tr", {},
+        h("td", { "data-label": "Time", text: utc(c.committed_at) + (c.future_dated ? " (dated in the future)" : "") }), h("td", { "data-label": "Actor", text: c.actor_kind + (c.actor_login ? " · " + c.actor_login : "") }), h("td", { "data-label": "Co-author agent", text: (c.co_author_agents || []).join(", ") || "none" }),
+        h("td", { "data-label": "Files changed", text: String(c.files_changed) }), h("td", { "data-label": "Flagged changes" }, (c.findings || []).length ? h("ul", {}, c.findings.map(f => h("li", { text: (f.path ? f.path + ": " : "") + f.reason })).concat(c.findings_truncated ? [h("li", { class: "muted", text: c.finding_count + " findings in all; the first are listed." })] : [])) : h("span", { class: "muted", text: "clean" }))))));
+    led.append(h("h2", { text: b.name + ": recent commits" }), h("p", { class: "muted small", text: "Flagged changes come from a " + b.scan_label + "." + (b.hidden_repos ? " Private repositories not listed on this lane: " + b.hidden_repos + "." : "") }),
+      rows.length ? table(rows) : h("p", { class: "empty", text: "No commits to show for this project on this lane." }));
+    if (later.length) led.append(h("h3", { text: "Dated in the future" }), h("p", { class: "muted small", text: "A committer date is whatever the committer set, so these commits are listed apart and never push a recent one off the list above." + (b.dated_in_future_truncated ? " More are stored than listed here." : "") }), table(later)); });
+}
 function viewDetail(id) {
   const body = $("#detail-body"), st = $("#detail-status"), led = $("#detail-ledger"); body.textContent = ""; st.textContent = ""; led.hidden = true; led.textContent = "";
   if (!auth.token) {
@@ -532,7 +551,7 @@ $("#signin-form").addEventListener("submit", async e => {
 $("#si-cancel").addEventListener("click", () => $("#signin").close());
 $("#open-signin").addEventListener("click", openSignin);
 document.querySelectorAll("[data-signin]").forEach(b => b.addEventListener("click", openSignin));
-$("#signout").addEventListener("click", () => { signOut(); route(); });
+$("#signout").addEventListener("click", () => { signOut(); route(); }); $("#projects-private").addEventListener("change", e => { projPriv = e.target.checked; route(); });
 $(".skip").addEventListener("click", e => { e.preventDefault(); $("#main").focus(); });
 
 const caseSearch = $("#case-search"); if (caseSearch) caseSearch.addEventListener("input", () => { explorer.q = caseSearch.value; renderCases(); });
@@ -544,7 +563,7 @@ document.querySelectorAll("#thr-tabs [data-thr]").forEach(b => b.addEventListene
 function parts() { return (location.hash.replace(/^#\/?/, "") || "").split("/").filter(Boolean).map(decodeURIComponent); }
 function current() {
   const p = parts();
-  return p[0] === "try" ? "try" : p[0] === "queue" ? "queue" : p[0] === "policy" ? "policy" : p[0] === "metrics" ? "metrics" : p[0] === "architecture" ? "architecture" : p[0] === "a" && p[1] ? "detail" : "home";
+  return p[0] === "try" ? "try" : p[0] === "queue" ? "queue" : p[0] === "policy" ? "policy" : p[0] === "metrics" ? "metrics" : p[0] === "architecture" ? "architecture" : p[0] === "projects" ? "projects" : p[0] === "a" && p[1] ? "detail" : "home";
 }
 // ---- motion layer: parallax, card spotlight, staggered reveal. Numbers never animate: every frame shows the measured value. Inert under prefers-reduced-motion. ----
 const MOTION = window.matchMedia("(prefers-reduced-motion: no-preference)"), FINE = window.matchMedia("(pointer: fine) and (min-width: 900px)");
@@ -570,7 +589,7 @@ function route() {
     if (active) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
   });
   if (view === "try") viewTry(p[1]);
-  else if (view === "queue") viewQueue();
+  else if (view === "queue") viewQueue(); else if (view === "projects") viewProjects(p[1]);
   else if (view === "detail") viewDetail(p[1]);
   else if (view === "policy") renderThrSim("0.70");
   else if (view === "metrics") renderMetrics();

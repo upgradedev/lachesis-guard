@@ -11,6 +11,18 @@ Routes (HTTP API, see infra/stacks/approvals.py):
 - GET  /try/{token}/events   no auth: that run's ledger (B5), try lane only
 - GET  /approvals/{id}/events  approvers group only: an approval-lane
                              run's ledger (B5)
+- GET  /projects             no auth: the registered projects with their
+                             counts (B7a, activity/read.py)
+- GET  /projects/{key}/activity  no auth: a project's recent commits,
+                             public repositories only
+- GET  /approvals/projects   approvers group only: the same, every
+                             repository in full
+- GET  /approvals/projects/{key}/activity  approvers group only
+
+A route with no authorizer never carries JWT claims, so each project
+read has two routes: the anonymous one redacts private repositories
+(activity/read.py), the approver one is behind the JWT authorizer. A
+project key is checked against the committed registry before any read.
 
 A ledger is the run's rows of lachesis-run-events cut to the whitelist
 of ledger.py (seq, type, at, status, and the run and triage fields the
@@ -53,11 +65,15 @@ import contextlib
 import json
 import os
 import re
+import time
 
 import boto3
 import common
 import ledger
 import orchestrator
+from activity import read as activity_read
+from activity import registry as activity_registry
+from activity import store as activity_store
 from approval import domain, service
 
 RUNNER_ARN = os.environ.get("RUNNER_ARN", "")
@@ -266,6 +282,40 @@ def _ledger(approval_id: str, lane: str, not_found: str) -> dict:
     return _response(200, {"events": events})
 
 
+def _activity_store() -> activity_store.ActivityStore:
+    return activity_store.ActivityStore()
+
+
+def _projects(approver: bool) -> dict:
+    """GET /projects (anonymous) or GET /approvals/projects. A failed read
+    is 503; only the exception type name is logged."""
+    try:
+        view = activity_read.projects_view(
+            activity_registry.load(), _activity_store(), approver
+        )
+    except Exception as exc:
+        print(json.dumps({"projects_read_failed": type(exc).__name__}))
+        return _response(503, {"error": "the project activity could not be read"})
+    return _response(200, view)
+
+
+def _project_activity(key: str, approver: bool) -> dict:
+    """A project's recent commits. An unknown key is 404 before any read."""
+    project = (
+        activity_registry.find(activity_registry.load(), key)
+        if activity_registry.valid_key(key)
+        else None
+    )
+    if project is None:
+        return _response(404, {"error": "unknown project"})
+    try:
+        view = activity_read.activity_view(project, _activity_store(), approver, time.time())
+    except Exception as exc:
+        print(json.dumps({"activity_read_failed": type(exc).__name__}))
+        return _response(503, {"error": "the project activity could not be read"})
+    return _response(200, view)
+
+
 def _decision(event: dict) -> tuple[str | None, dict | None]:
     """The decision in the body, or an error response."""
     body = _parse_body(event)
@@ -312,6 +362,12 @@ def handler(event, _context):
     if route == "GET /try/{token}/events":
         return _ledger(params.get("token", ""), "try", "unknown token")
 
+    if route == "GET /projects":
+        return _projects(approver=False)
+
+    if route == "GET /projects/{key}/activity":
+        return _project_activity(params.get("key", ""), approver=False)
+
     if route == "POST /try/{token}/decision":
         token = params.get("token", "")
         if not _valid_id(token):
@@ -355,6 +411,12 @@ def handler(event, _context):
             if row.get("lane", "approval") == "approval"
         ]
         return _response(200, {"approvals": [common.public_view(row) for row in rows]})
+
+    if route == "GET /approvals/projects":
+        return _projects(approver=True)
+
+    if route == "GET /approvals/projects/{key}/activity":
+        return _project_activity(params.get("key", ""), approver=True)
 
     if route == "GET /approvals/{id}":
         approval_id = params.get("id", "")

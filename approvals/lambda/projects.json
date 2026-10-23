@@ -1,0 +1,10 @@
+{
+  "projects": [
+    {"key": "lachesis", "name": "Lachesis", "repos": ["upgradedev/lachesis-guard"]},
+    {"key": "agon", "name": "Agon", "repos": ["upgradedev/agon-azure"]},
+    {"key": "elenchos", "name": "Elenchos", "repos": ["upgradedev/elenchos-loop", "upgradedev/elenchos"]},
+    {"key": "volcan", "name": "Volcan", "repos": ["upgradedev/volcan_amazon"]},
+    {"key": "mercury", "name": "Mercury", "repos": ["upgradedev/mercury_amazon"]},
+    {"key": "aletheia", "name": "Aletheia", "repos": ["upgradedev/aletheia_amazon"]}
+  ]
+}

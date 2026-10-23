@@ -52,6 +52,18 @@ this state machine only; the task function may SendTaskFailure on it
 only. Alarms on failed, aborted and timed-out executions go to the
 alerts topic. Not yet deployed or run on AWS.
 
+The activity ingest (B7a): the table lachesis-activity (pk
+project_repo, sk committed_at#sha, the foundation CMK, a 30-day ttl) and
+the function lachesis-activity-ingest (approvals/lambda/ingest.py) on a
+15-minute schedule. It reads the token from the secret
+lachesis/github-readonly (GetSecretValue on that secret's ARN only; the
+secret uses the AWS managed key, so no key grant), calls the GitHub REST
+API read-only, writes one row per commit with PutItem conditioned on
+attribute_not_exists, and puts one ActivityObserved per new commit on
+lachesis-events, with source lachesis.activity only. The API may GetItem
+and Query that table, nothing else, for GET /projects and the activity
+routes. Not yet deployed or run on AWS.
+
 Deploy isolation: the iac workflow deploys this stack with
 --exclusively, so a deploy here never redeploys LachesisFoundation,
 LachesisDecider or LachesisAgent. A change here that needs something
@@ -115,6 +127,12 @@ EVENT_SOURCE = "lachesis.approvals"
 RUN_FAILED_RULE_NAME = "lachesis-run-failed"
 OUTBOX_METRIC_NAMESPACE = "Lachesis/Outbox"
 RUN_FAILED_METRIC = "RunFailedPublished"
+# B7a: the activity ingest. The secret is created by the owner, outside
+# CDK; the ingest reads it and nothing else does.
+ACTIVITY_SOURCE = "lachesis.activity"
+ACTIVITY_TABLE_NAME = "lachesis-activity"
+GITHUB_SECRET_NAME = "lachesis/github-readonly"
+INGEST_RATE_MINUTES = 15
 # B6: how a new run starts. "false" (the default everywhere) keeps the
 # async runner path; "true" starts the lachesis-run workflow instead.
 USE_STEP_FUNCTIONS = os.environ.get("LACHESIS_USE_STEP_FUNCTIONS", "false").strip().lower()
@@ -580,6 +598,11 @@ class ApprovalsStack(cdk.Stack):
             # B5: the run ledger, per lane (the API checks the lane).
             ("GET /approvals/{id}/events", "JWT"),
             ("GET /try/{token}/events", "NONE"),
+            # B7a: the projects, per lane (no claims reach a NONE route).
+            ("GET /projects", "NONE"),
+            ("GET /projects/{key}/activity", "NONE"),
+            ("GET /approvals/projects", "JWT"),
+            ("GET /approvals/projects/{key}/activity", "JWT"),
         )
         route_resources = []
         for route_key, auth_type in routes:
@@ -626,6 +649,14 @@ class ApprovalsStack(cdk.Stack):
                 "GET /try/{token}/events": {
                     "ThrottlingRateLimit": 10,
                     "ThrottlingBurstLimit": 20,
+                },
+                # B7a: the anonymous project reads (one GetItem per
+                # repository, plus one Query per public repository for
+                # the activity list).
+                "GET /projects": {"ThrottlingRateLimit": 5, "ThrottlingBurstLimit": 10},
+                "GET /projects/{key}/activity": {
+                    "ThrottlingRateLimit": 5,
+                    "ThrottlingBurstLimit": 10,
                 },
             },
         )
@@ -860,6 +891,93 @@ class ApprovalsStack(cdk.Stack):
         )
         dlq_alarm.add_alarm_action(cw_actions.SnsAction(foundation.alerts_topic))
 
+        # --- B7a: the activity ingest ------------------------------------
+        activity_table = dynamodb.Table(
+            self,
+            "ActivityTable",
+            table_name=ACTIVITY_TABLE_NAME,
+            partition_key=dynamodb.Attribute(
+                name="project_repo", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(name="sk", type=dynamodb.AttributeType.STRING),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            encryption=dynamodb.TableEncryption.CUSTOMER_MANAGED,
+            encryption_key=foundation.key,
+            time_to_live_attribute="ttl",
+            removal_policy=cdk.RemovalPolicy.DESTROY,
+        )
+        ingest = lambda_.Function(
+            self,
+            "Ingest",
+            function_name="lachesis-activity-ingest",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            handler="ingest.handler",
+            code=code,
+            # The handler stops itself 90 s before the end. The schedule
+            # invokes it asynchronously, and a failed run is not retried
+            # (retry_attempts 0): a retry could start after a timed-out
+            # run and overlap the next tick. The next run is the retry.
+            timeout=cdk.Duration.minutes(10),
+            retry_attempts=0,
+            memory_size=256,
+            environment={
+                "ACTIVITY_TABLE": activity_table.table_name,
+                "EVENT_BUS_NAME": bus.event_bus_name,
+                "GITHUB_SECRET_ID": GITHUB_SECRET_NAME,
+            },
+        )
+        # Reads the repository row, writes commit rows (PutItem), marks
+        # them published and saves the repository row (UpdateItem), and
+        # recounts the window (Query); plus the CMK the table uses.
+        activity_table.grant(
+            ingest,
+            "dynamodb:GetItem",
+            "dynamodb:PutItem",
+            "dynamodb:UpdateItem",
+            "dynamodb:Query",
+        )
+        foundation.key.grant(ingest, *_KEY_ACTIONS)
+        # The one secret, by its ARN; Secrets Manager appends a hyphen and
+        # six random characters to a secret's name in its ARN, so exactly
+        # six ? match it and no longer name (github-readonly-admin) does.
+        github_secret_arn = (
+            f"arn:aws:secretsmanager:eu-west-1:{self.account}:secret:{GITHUB_SECRET_NAME}-??????"
+        )
+        ingest.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["secretsmanager:GetSecretValue"], resources=[github_secret_arn]
+            )
+        )
+        ingest.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["events:PutEvents"],
+                resources=[bus.event_bus_arn],
+                conditions={"StringEquals": {"events:source": [ACTIVITY_SOURCE]}},
+            )
+        )
+        events.Rule(
+            self,
+            "IngestSchedule",
+            schedule=events.Schedule.rate(cdk.Duration.minutes(INGEST_RATE_MINUTES)),
+            targets=[targets.LambdaFunction(ingest)],
+        )
+        ingest_errors_alarm = cloudwatch.Alarm(
+            self,
+            "IngestErrorsAlarm",
+            metric=ingest.metric_errors(period=cdk.Duration.minutes(15), statistic="Sum"),
+            threshold=1,
+            evaluation_periods=1,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            alarm_description="The activity ingest failed a run (B7a)",
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+        ingest_errors_alarm.add_alarm_action(cw_actions.SnsAction(foundation.alerts_topic))
+        # GET /projects and the activity routes: the repository rows and
+        # the recent commit rows, read only.
+        activity_table.grant(api_fn, "dynamodb:GetItem", "dynamodb:Query")
+        api_fn.add_environment("ACTIVITY_TABLE", activity_table.table_name)
+
+        self.activity_table = activity_table
         self.runner_dlq = runner_dlq
         self.run_state_machine = state_machine
         self.events_table = events_table

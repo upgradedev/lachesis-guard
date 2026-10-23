@@ -312,4 +312,7 @@ def public_view(item: dict) -> dict:
         ],
         "result_text": error_label(result_text) if status == "ERROR" else result_text,
         "created_ts": int(item.get("created_ts", 0)),
+        # B7a: the queue groups runs by project. A run carries no project
+        # of its own yet, so every run is the canned demo's.
+        "project": str(item.get("project") or "Demo"),
     }
