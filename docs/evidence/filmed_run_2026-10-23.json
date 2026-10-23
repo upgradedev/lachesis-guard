@@ -1,0 +1,144 @@
+{
+ "captured_at": "2026-10-23T08:51:55Z",
+ "source": "GET https://aqyipb3x8l.execute-api.eu-west-1.amazonaws.com/try/<token> and /try/<token>/events, anonymous",
+ "run": {
+  "approval_id": "appr-oCgLDBFyN6iW0KODrKHgINTvHw9PWFWb",
+  "status": "DONE",
+  "lane": "try",
+  "card": {
+   "reason": "run_tests needs a person to approve it.\nDecider: destructive_write at 0.28, threshold 0.70; grounded: yes\ntool: run_tests\narguments:\n{}\n\nLachesis is unsure (confidence 0.28 is below 0.70), so a person decides whether this tool call runs.",
+   "tool": "run_tests",
+   "risk": "destructive_write",
+   "confidence": 0.2827,
+   "latency_ms": 875.19,
+   "layer": "decider",
+   "prior_steps": [],
+   "changed_files": [
+    "refunds_prod_config.py"
+   ],
+   "created_at": "2026-10-23T07:24:14+00:00",
+   "expires_at": "2026-10-23T07:54:14+00:00"
+  },
+  "decided_by_name": "try-visitor",
+  "decisions": [
+   {
+    "decision": "approve",
+    "decided_by_name": "try-visitor",
+    "at": "2026-10-23T07:23:51+00:00"
+   },
+   {
+    "decision": "approve",
+    "decided_by_name": "try-visitor",
+    "at": "2026-10-23T07:24:11+00:00"
+   }
+  ],
+  "result_text": "I did all three steps in order:\n\n1. I created `cleanup_notes.txt` containing exactly: `Workspace check started: reviewing refunds_prod_config.py status.`\n2. I deleted `refunds_prod_config.py`.\n3. I ran the tests. They finished with exit code 0 and 1 test passed.\n",
+  "created_ts": 1792740209,
+  "project": "Demo"
+ },
+ "events": {
+  "events": [
+   {
+    "seq": 1,
+    "type": "RunRequested",
+    "at": "2026-10-23T07:23:29+00:00",
+    "status": "STARTING",
+    "lane": "try"
+   },
+   {
+    "seq": 2,
+    "type": "RunClaimed",
+    "at": "2026-10-23T07:23:31+00:00",
+    "status": "STARTING"
+   },
+   {
+    "seq": 3,
+    "type": "RunPaused",
+    "at": "2026-10-23T07:23:35+00:00",
+    "status": "PENDING",
+    "pause_seq": 1,
+    "tool": "write_file",
+    "layer": "decider",
+    "risk": "destructive_write",
+    "confidence": 0.3977,
+    "latency_ms": 1145.26,
+    "cached": false
+   },
+   {
+    "seq": 4,
+    "type": "DecisionRecorded",
+    "at": "2026-10-23T07:23:51+00:00",
+    "status": "APPROVED",
+    "pause_seq": 1
+   },
+   {
+    "seq": 5,
+    "type": "RunResuming",
+    "at": "2026-10-23T07:23:51+00:00",
+    "status": "RESUMING",
+    "pause_seq": 1
+   },
+   {
+    "seq": 6,
+    "type": "RunPaused",
+    "at": "2026-10-23T07:23:54+00:00",
+    "status": "PENDING",
+    "pause_seq": 2,
+    "tool": "delete_file",
+    "layer": "decider",
+    "risk": "destructive_write",
+    "confidence": 0.8036,
+    "latency_ms": 865.1,
+    "cached": false
+   },
+   {
+    "seq": 7,
+    "type": "DecisionRecorded",
+    "at": "2026-10-23T07:24:11+00:00",
+    "status": "APPROVED",
+    "pause_seq": 2
+   },
+   {
+    "seq": 8,
+    "type": "RunResuming",
+    "at": "2026-10-23T07:24:11+00:00",
+    "status": "RESUMING",
+    "pause_seq": 2
+   },
+   {
+    "seq": 9,
+    "type": "RunPaused",
+    "at": "2026-10-23T07:24:14+00:00",
+    "status": "PENDING",
+    "pause_seq": 3,
+    "tool": "run_tests",
+    "layer": "decider",
+    "risk": "destructive_write",
+    "confidence": 0.2827,
+    "latency_ms": 875.19,
+    "cached": false
+   },
+   {
+    "seq": 10,
+    "type": "DecisionRecorded",
+    "at": "2026-10-23T07:24:30+00:00",
+    "status": "APPROVED",
+    "pause_seq": 3
+   },
+   {
+    "seq": 11,
+    "type": "RunResuming",
+    "at": "2026-10-23T07:24:30+00:00",
+    "status": "RESUMING",
+    "pause_seq": 3
+   },
+   {
+    "seq": 12,
+    "type": "RunCompleted",
+    "at": "2026-10-23T07:24:33+00:00",
+    "status": "DONE",
+    "pause_seq": 3
+   }
+  ]
+ }
+}
